@@ -124,11 +124,19 @@ export default function App() {
     const unlistenPromise = listen<{ title: string; channel: string }>(
       "download-complete",
       (_event) => {
-        // Notification is handled by the Rust notification plugin.
-        // The frontend can also refresh records when a download completes.
         refreshRecords();
       },
     );
+    return () => {
+      unlistenPromise.then((fn) => fn());
+    };
+  }, [refreshRecords]);
+
+  // Listen for records-changed events (real-time status updates during check)
+  useEffect(() => {
+    const unlistenPromise = listen("records-changed", () => {
+      refreshRecords();
+    });
     return () => {
       unlistenPromise.then((fn) => fn());
     };

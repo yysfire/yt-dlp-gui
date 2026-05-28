@@ -60,6 +60,9 @@ pub(crate) async fn check_and_download(
         all_records.push(record.clone());
         StorageService::save_download_records(data_dir, &all_records)?;
 
+        // Emit event so frontend can refresh immediately
+        let _ = app_handle.emit("records-changed", ());
+
         // Attempt download
         let quality = sub.quality_preset.clone();
         match YtDlpService::download_video(
@@ -99,6 +102,9 @@ pub(crate) async fn check_and_download(
             *existing = record.clone();
         }
         StorageService::save_download_records(data_dir, &all_records)?;
+
+        // Emit event for status update
+        let _ = app_handle.emit("records-changed", ());
 
         new_records.push(record);
     }
