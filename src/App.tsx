@@ -174,11 +174,9 @@ export default function App() {
         recordsError={recordsError}
         onCheckSubscription={async (id) => {
           await checkSubscription(id);
-          await refreshRecords();
         }}
         onManualCheckAll={async () => {
           await checkAll();
-          await refreshRecords();
         }}
       />
     </ThemeProvider>
