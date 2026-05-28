@@ -1,7 +1,7 @@
 # yt-dlp 订阅管理器 — 系统架构设计
 
 > **作者**: Bob (Architect)  
-> **日期**: 2025-05-28  
+> **日期**: 2026-05-29  
 > **基于**: PRD v1.0 (Alice, Product Manager)
 
 ---
@@ -687,7 +687,7 @@ env_logger = "0.11"
     "channel_avatar_url": "https://...",
     "paused": false,
     "quality_preset": "1080p",
-    "created_at": "2025-05-28T12:00:00Z"
+    "created_at": "2026-05-29T12:00:00Z"
   }
 ]
 ```
@@ -703,7 +703,7 @@ env_logger = "0.11"
     "file_path": "/downloads/video.mp4",
     "file_size": 123456789,
     "status": "completed",
-    "downloaded_at": "2025-05-28T14:00:00Z"
+    "downloaded_at": "2026-05-29T14:00:00Z"
   }
 ]
 ```
@@ -724,7 +724,7 @@ env_logger = "0.11"
 **state.json**:
 ```json
 {
-  "last_check_time": "2025-05-28T13:55:00Z",
+  "last_check_time": "2026-05-29T13:55:00Z",
   "total_downloads": 47
 }
 ```
