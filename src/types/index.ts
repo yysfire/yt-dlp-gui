@@ -31,6 +31,7 @@ export interface AppSettings {
   notifications_enabled: boolean;
   dark_mode: boolean;
   proxy_url: string;
+  cookie_file: string;
 }
 
 /** Result of a batch import operation. */

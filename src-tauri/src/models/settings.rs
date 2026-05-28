@@ -17,6 +17,8 @@ pub struct AppSettings {
     pub dark_mode: bool,
     /// HTTP/SOCKS proxy URL for yt-dlp (empty string = no proxy)
     pub proxy_url: String,
+    /// Path to a Netscape-format cookie file for yt-dlp authentication
+    pub cookie_file: String,
 }
 
 impl Default for AppSettings {
@@ -30,6 +32,7 @@ impl Default for AppSettings {
             notifications_enabled: false,
             dark_mode: false,
             proxy_url: String::new(),
+            cookie_file: String::new(),
         }
     }
 }
@@ -83,6 +86,7 @@ mod tests {
         assert!(!settings.notifications_enabled);
         assert!(!settings.dark_mode);
         assert_eq!(settings.proxy_url, "");
+        assert_eq!(settings.cookie_file, "");
     }
 
     #[test]
@@ -105,6 +109,7 @@ mod tests {
         assert_eq!(deserialized.notifications_enabled, settings.notifications_enabled);
         assert_eq!(deserialized.dark_mode, settings.dark_mode);
         assert_eq!(deserialized.proxy_url, settings.proxy_url);
+        assert_eq!(deserialized.cookie_file, settings.cookie_file);
     }
 
     #[test]
@@ -120,6 +125,7 @@ mod tests {
         assert!(json_value["notifications_enabled"].is_boolean());
         assert!(json_value["dark_mode"].is_boolean());
         assert!(json_value["proxy_url"].is_string());
+        assert!(json_value["cookie_file"].is_string());
     }
 
     #[test]

@@ -93,15 +93,20 @@ pub async fn batch_import_subscriptions(
         StorageService::load_subscriptions(&state.data_dir).map_err(|e| e.to_string())?;
     let existing_urls: HashSet<&str> = subs.iter().map(|s| s.url.as_str()).collect();
 
-    // ── Read settings for yt-dlp path and proxy ─────────────────────
-    let (yt_dlp_path, proxy) = {
+    // ── Read settings for yt-dlp path, proxy, and cookie_file ───────
+    let (yt_dlp_path, proxy, cookie_file) = {
         let settings = state.settings.lock().map_err(|e| e.to_string())?;
         let proxy = if settings.proxy_url.is_empty() {
             None
         } else {
             Some(settings.proxy_url.clone())
         };
-        (settings.yt_dlp_path.clone(), proxy)
+        let cookie_file = if settings.cookie_file.is_empty() {
+            None
+        } else {
+            Some(settings.cookie_file.clone())
+        };
+        (settings.yt_dlp_path.clone(), proxy, cookie_file)
     };
 
     // ── Process each URL ────────────────────────────────────────────
@@ -121,9 +126,10 @@ pub async fn batch_import_subscriptions(
         let url_clone = url.clone();
         let yt_dlp = yt_dlp_path.clone();
         let proxy_clone = proxy.clone();
+        let cookie_clone = cookie_file.clone();
 
         match tokio::task::spawn_blocking(move || {
-            YtDlpService::parse_channel_info(&yt_dlp, &proxy_clone, &url_clone)
+            YtDlpService::parse_channel_info(&yt_dlp, &proxy_clone, &cookie_clone, &url_clone)
         })
         .await
         .map_err(|e| format!("spawn_blocking error: {}", e))?

@@ -78,6 +78,7 @@ pub async fn start_scheduler(
 
             let yt_dlp_path = settings_clone.yt_dlp_path.clone();
             let proxy = Some(settings_clone.proxy_url.clone());
+            let cookie_file = Some(settings_clone.cookie_file.clone());
             let download_dir = std::path::PathBuf::from(&settings_clone.download_dir);
 
             let mut total_completed: u32 = 0;
@@ -91,6 +92,7 @@ pub async fn start_scheduler(
                     sub,
                     &yt_dlp_path,
                     &proxy,
+                    &cookie_file,
                     &download_dir,
                     &data_dir,
                     &app_state.last_check_time,

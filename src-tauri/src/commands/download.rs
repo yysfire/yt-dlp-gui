@@ -14,6 +14,7 @@ pub(crate) async fn check_and_download(
     sub: &Subscription,
     yt_dlp_path: &str,
     proxy: &Option<String>,
+    cookie_file: &Option<String>,
     download_dir: &PathBuf,
     data_dir: &PathBuf,
     last_check_time: &Option<String>,
@@ -39,7 +40,7 @@ pub(crate) async fn check_and_download(
     };
 
     // Check for new videos
-    let videos = YtDlpService::check_new_videos(yt_dlp_path, proxy, &sub.url, &since)?;
+    let videos = YtDlpService::check_new_videos(yt_dlp_path, proxy, cookie_file, &sub.url, &since)?;
 
     let mut new_records: Vec<DownloadRecord> = Vec::new();
 
@@ -60,8 +61,9 @@ pub(crate) async fn check_and_download(
 
         // Attempt download
         let quality = sub.quality_preset.clone();
-        match YtDlpService::download_video(yt_dlp_path, proxy, &video.url, &quality, download_dir)
-        {
+        match YtDlpService::download_video(
+            yt_dlp_path, proxy, cookie_file, &video.url, &quality, download_dir,
+        ) {
             Ok(result) => {
                 record.status = "completed".to_string();
                 record.file_path = result.file_path;
@@ -123,11 +125,12 @@ pub async fn check_subscription(
     }
 
     // Clone settings values and drop the MutexGuard before awaiting
-    let (yt_dlp_path, proxy, download_dir) = {
+    let (yt_dlp_path, proxy, cookie_file, download_dir) = {
         let settings = state.settings.lock().map_err(|e| e.to_string())?;
         (
             settings.yt_dlp_path.clone(),
             Some(settings.proxy_url.clone()),
+            Some(settings.cookie_file.clone()),
             PathBuf::from(&settings.download_dir),
         )
     };
@@ -140,6 +143,7 @@ pub async fn check_subscription(
         sub,
         &yt_dlp_path,
         &proxy,
+        &cookie_file,
         &download_dir,
         &state.data_dir,
         &app_state.last_check_time,
@@ -162,11 +166,12 @@ pub async fn check_all_subscriptions(
         .map_err(|e| e.to_string())?;
 
     // Clone settings values and drop the MutexGuard before awaiting
-    let (yt_dlp_path, proxy, download_dir) = {
+    let (yt_dlp_path, proxy, cookie_file, download_dir) = {
         let settings = state.settings.lock().map_err(|e| e.to_string())?;
         (
             settings.yt_dlp_path.clone(),
             Some(settings.proxy_url.clone()),
+            Some(settings.cookie_file.clone()),
             PathBuf::from(&settings.download_dir),
         )
     };
@@ -187,6 +192,7 @@ pub async fn check_all_subscriptions(
             sub,
             &yt_dlp_path,
             &proxy,
+            &cookie_file,
             &download_dir,
             &state.data_dir,
             &app_state.last_check_time,

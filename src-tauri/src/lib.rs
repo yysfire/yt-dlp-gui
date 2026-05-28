@@ -79,6 +79,7 @@ pub fn run() {
 
                     let yt_dlp_path = settings_clone.yt_dlp_path.clone();
                     let proxy = Some(settings_clone.proxy_url.clone());
+                    let cookie_file = Some(settings_clone.cookie_file.clone());
                     let download_dir =
                         std::path::PathBuf::from(&settings_clone.download_dir);
 
@@ -93,6 +94,7 @@ pub fn run() {
                             sub,
                             &yt_dlp_path,
                             &proxy,
+                            &cookie_file,
                             &download_dir,
                             &data_dir_clone,
                             &app_state.last_check_time,

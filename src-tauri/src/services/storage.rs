@@ -288,6 +288,7 @@ mod tests {
             notifications_enabled: true,
             dark_mode: true,
             proxy_url: "http://127.0.0.1:7890".to_string(),
+            cookie_file: String::new(),
         };
 
         StorageService::save_settings(tmp.path(), &settings)

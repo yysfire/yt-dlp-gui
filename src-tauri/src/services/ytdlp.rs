@@ -53,6 +53,7 @@ impl YtDlpService {
     pub fn parse_channel_info(
         yt_dlp_path: &str,
         proxy: &Option<String>,
+        cookie_file: &Option<String>,
         url: &str,
     ) -> Result<ChannelInfo, AppError> {
         let mut cmd = Command::new(yt_dlp_path);
@@ -62,6 +63,12 @@ impl YtDlpService {
         if let Some(ref proxy_url) = proxy {
             if !proxy_url.is_empty() {
                 cmd.arg("--proxy").arg(proxy_url);
+            }
+        }
+
+        if let Some(ref cf) = cookie_file {
+            if !cf.is_empty() {
+                cmd.arg("--cookies").arg(cf);
             }
         }
 
@@ -93,6 +100,7 @@ impl YtDlpService {
     pub fn check_new_videos(
         yt_dlp_path: &str,
         proxy: &Option<String>,
+        cookie_file: &Option<String>,
         url: &str,
         since: &str,
     ) -> Result<Vec<VideoInfo>, AppError> {
@@ -108,6 +116,12 @@ impl YtDlpService {
         if let Some(ref proxy_url) = proxy {
             if !proxy_url.is_empty() {
                 cmd.arg("--proxy").arg(proxy_url);
+            }
+        }
+
+        if let Some(ref cf) = cookie_file {
+            if !cf.is_empty() {
+                cmd.arg("--cookies").arg(cf);
             }
         }
 
@@ -150,6 +164,7 @@ impl YtDlpService {
     pub fn download_video(
         yt_dlp_path: &str,
         proxy: &Option<String>,
+        cookie_file: &Option<String>,
         url: &str,
         quality: &str,
         output_dir: &Path,
@@ -182,6 +197,12 @@ impl YtDlpService {
         if let Some(ref proxy_url) = proxy {
             if !proxy_url.is_empty() {
                 cmd.arg("--proxy").arg(proxy_url);
+            }
+        }
+
+        if let Some(ref cf) = cookie_file {
+            if !cf.is_empty() {
+                cmd.arg("--cookies").arg(cf);
             }
         }
 
@@ -413,5 +434,28 @@ mod tests {
         let proxy: Option<String> = Some("http://127.0.0.1:7890".to_string());
         let should_add = proxy.as_ref().map_or(false, |p| !p.is_empty());
         assert!(should_add, "proxy arg should be added when proxy is non-empty");
+    }
+
+    // ── Edge case: cookie_file handling logic ──────────────────────
+
+    #[test]
+    fn test_cookie_file_none_no_cookies_arg() {
+        let cookie_file: Option<String> = None;
+        let should_add = cookie_file.as_ref().map_or(false, |c| !c.is_empty());
+        assert!(!should_add, "no cookies arg when cookie_file is None");
+    }
+
+    #[test]
+    fn test_cookie_file_empty_string_no_cookies_arg() {
+        let cookie_file: Option<String> = Some("".to_string());
+        let should_add = cookie_file.as_ref().map_or(false, |c| !c.is_empty());
+        assert!(!should_add, "no cookies arg when cookie_file is empty string");
+    }
+
+    #[test]
+    fn test_cookie_file_some_non_empty_adds_cookies_arg() {
+        let cookie_file: Option<String> = Some("/path/to/cookies.txt".to_string());
+        let should_add = cookie_file.as_ref().map_or(false, |c| !c.is_empty());
+        assert!(should_add, "cookies arg should be added when cookie_file is non-empty");
     }
 }

@@ -15,6 +15,7 @@ import {
   CircularProgress,
   Alert,
   Grid,
+  InputAdornment,
 } from "@mui/material";
 import type { AppSettings } from "@/types";
 import * as api from "@/lib/tauri";
@@ -183,6 +184,49 @@ export default function SettingsDialog({
                 size="small"
                 placeholder="http://127.0.0.1:7890"
                 helperText="留空则不使用代理"
+              />
+            </Grid>
+
+            {/* Cookie File */}
+            <Grid item xs={12}>
+              <TextField
+                fullWidth
+                label="Cookie 文件"
+                value={settings.cookie_file}
+                onChange={(e) => updateField("cookie_file", e.target.value)}
+                size="small"
+                placeholder="留空则不使用 Cookie 认证"
+                helperText="Netscape 格式的 Cookie 文件，用于 YouTube 认证"
+                InputProps={{
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        onClick={async () => {
+                          try {
+                            const { open } = await import(
+                              "@tauri-apps/plugin-dialog"
+                            );
+                            const selected = await open({
+                              filters: [
+                                { name: "Cookie Files", extensions: ["txt"] },
+                              ],
+                              multiple: false,
+                            });
+                            if (selected && typeof selected === "string") {
+                              updateField("cookie_file", selected);
+                            }
+                          } catch {
+                            // User cancelled
+                          }
+                        }}
+                      >
+                        选择文件
+                      </Button>
+                    </InputAdornment>
+                  ),
+                }}
               />
             </Grid>
 

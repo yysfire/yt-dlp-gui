@@ -26,13 +26,14 @@ pub async fn add_subscription(
         .to_string());
     }
 
-    // Get yt-dlp path and proxy from settings
+    // Get yt-dlp path, proxy, and cookie_file from settings
     let settings = state.settings.lock().map_err(|e| e.to_string())?;
     let yt_dlp_path = settings.yt_dlp_path.clone();
     let proxy = Some(settings.proxy_url.clone());
+    let cookie_file = Some(settings.cookie_file.clone());
 
     // Parse channel info via yt-dlp
-    let channel_info = YtDlpService::parse_channel_info(&yt_dlp_path, &proxy, &url)
+    let channel_info = YtDlpService::parse_channel_info(&yt_dlp_path, &proxy, &cookie_file, &url)
         .map_err(|e| e.to_string())?;
 
     let subscription = Subscription::new(
