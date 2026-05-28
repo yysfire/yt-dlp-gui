@@ -13,6 +13,7 @@ interface AppShellProps {
   subscriptions: Subscription[];
   subscriptionsLoading: boolean;
   subscriptionsError: string | null;
+  recordsError: string | null;
   selectedId: string | null;
   onSelectSubscription: (id: string | null) => void;
   onAddSubscription: (url: string) => Promise<Subscription>;
@@ -31,6 +32,7 @@ export default function AppShell({
   subscriptions,
   subscriptionsLoading,
   subscriptionsError,
+  recordsError,
   selectedId,
   onSelectSubscription,
   onAddSubscription,
@@ -91,6 +93,7 @@ export default function AppShell({
             <DetailPanel
               subscription={selectedSub}
               records={filteredRecords}
+              error={recordsError}
             />
           </div>
           <StatusBar />

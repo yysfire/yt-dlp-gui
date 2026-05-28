@@ -83,6 +83,7 @@ export default function App() {
 
   const {
     records,
+    error: recordsError,
     checkSubscription,
     checkAll,
     refresh: refreshRecords,
@@ -170,6 +171,7 @@ export default function App() {
         onTogglePause={togglePause}
         onRefreshSubscriptions={refreshSubs}
         records={records}
+        recordsError={recordsError}
         onCheckSubscription={async (id) => {
           await checkSubscription(id);
           await refreshRecords();

@@ -1,16 +1,18 @@
-import { Box, Typography, Avatar, Chip } from "@mui/material";
+import { Box, Typography, Avatar, Chip, Alert } from "@mui/material";
 import type { Subscription, DownloadRecord } from "@/types";
 import DownloadRecordList from "./DownloadRecordList";
 
 interface DetailPanelProps {
   subscription: Subscription | null;
   records: DownloadRecord[];
+  error?: string | null;
 }
 
 /** Right-side detail panel showing channel info and download records. */
 export default function DetailPanel({
   subscription,
   records,
+  error,
 }: DetailPanelProps) {
   if (!subscription) {
     return (
@@ -90,6 +92,11 @@ export default function DetailPanel({
 
       {/* Download Records */}
       <div className="flex-1 overflow-y-auto">
+        {error && (
+          <Alert severity="error" sx={{ m: 2 }} variant="outlined">
+            {error}
+          </Alert>
+        )}
         <DownloadRecordList records={records} />
       </div>
     </div>
