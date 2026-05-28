@@ -134,6 +134,7 @@ impl YtDlpService {
             }
         }
 
+        log::info!("yt-dlp: running check_new_videos...");
         let output = cmd.output().map_err(|e| AppError::YtDlp(format!(
             "Failed to execute yt-dlp: {}",
             e
