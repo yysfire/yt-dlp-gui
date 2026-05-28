@@ -102,8 +102,8 @@ impl YtDlpService {
 
     /// Checks a channel for new videos since the given date.
     ///
-    /// Executes: `yt-dlp --flat-playlist --dump-json --dateafter <YYYYMMDD> <url>`
-    /// Returns a list of videos published after `since`.
+    /// Executes: `yt-dlp --flat-playlist --dump-json --playlist-end 5 --dateafter <YYYYMMDD> <url>`
+    /// Returns a list of videos published after `since` (limited to most recent 5).
     pub fn check_new_videos(
         yt_dlp_path: &str,
         proxy: &Option<String>,
@@ -115,6 +115,8 @@ impl YtDlpService {
         cmd.args([
             "--flat-playlist",
             "--dump-json",
+            "--playlist-end",
+            "5",
             "--dateafter",
             since,
         ])
@@ -405,11 +407,12 @@ mod tests {
 
     #[test]
     fn test_check_new_videos_args_structure() {
-        let expected_args = vec!["--flat-playlist", "--dump-json", "--dateafter"];
-        assert_eq!(expected_args.len(), 3);
+        let expected_args = vec!["--flat-playlist", "--dump-json", "--playlist-end", "--dateafter"];
+        assert_eq!(expected_args.len(), 4);
         assert_eq!(expected_args[0], "--flat-playlist");
         assert_eq!(expected_args[1], "--dump-json");
-        assert_eq!(expected_args[2], "--dateafter");
+        assert_eq!(expected_args[2], "--playlist-end");
+        assert_eq!(expected_args[3], "--dateafter");
     }
 
     #[test]
