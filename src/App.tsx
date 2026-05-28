@@ -4,6 +4,7 @@ import {
   createTheme,
   CssBaseline,
 } from "@mui/material";
+import { listen } from "@tauri-apps/api/event";
 import { useSubscriptions } from "@/hooks/useSubscriptions";
 import { useDownloadRecords } from "@/hooks/useDownloadRecords";
 import AppShell from "@/components/AppShell";
@@ -116,6 +117,21 @@ export default function App() {
     };
     initScheduler();
   }, []);
+
+  // Listen for download-complete events from the Rust backend
+  useEffect(() => {
+    const unlistenPromise = listen<{ title: string; channel: string }>(
+      "download-complete",
+      (_event) => {
+        // Notification is handled by the Rust notification plugin.
+        // The frontend can also refresh records when a download completes.
+        refreshRecords();
+      },
+    );
+    return () => {
+      unlistenPromise.then((fn) => fn());
+    };
+  }, [refreshRecords]);
 
   // Handle dark mode toggle (called when settings are updated externally)
   const handleDarkModeChange = useCallback((isDark: boolean) => {

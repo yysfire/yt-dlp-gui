@@ -42,6 +42,7 @@ pub async fn get_app_state(
 /// Starts the background scheduler that periodically checks all subscriptions.
 #[tauri::command]
 pub async fn start_scheduler(
+    app_handle: tauri::AppHandle,
     state: State<'_, AppContext>,
 ) -> Result<(), String> {
     let (interval_mins, data_dir, settings_clone) = {
@@ -94,6 +95,7 @@ pub async fn start_scheduler(
                     &data_dir,
                     &app_state.last_check_time,
                     &records,
+                    &app_handle,
                 )
                 .await
                 {

@@ -6,6 +6,8 @@ import SubscriptionList from "./SubscriptionList";
 import AddSubscriptionDialog from "./AddSubscriptionDialog";
 import DetailPanel from "./DetailPanel";
 import SettingsDialog from "./SettingsDialog";
+import ExportDialog from "./ExportDialog";
+import ImportDialog from "./ImportDialog";
 
 interface AppShellProps {
   subscriptions: Subscription[];
@@ -41,6 +43,8 @@ export default function AppShell({
 }: AppShellProps) {
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const selectedSub = subscriptions.find((s) => s.id === selectedId) ?? null;
@@ -76,6 +80,8 @@ export default function AppShell({
             onCheckSubscription={onCheckSubscription}
             onManualCheckAll={onManualCheckAll}
             onRefresh={onRefreshSubscriptions}
+            onOpenExport={() => setExportDialogOpen(true)}
+            onOpenImport={() => setImportDialogOpen(true)}
           />
         </div>
 
@@ -100,6 +106,16 @@ export default function AppShell({
       <SettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
+      />
+      <ExportDialog
+        open={exportDialogOpen}
+        onClose={() => setExportDialogOpen(false)}
+        subscriptions={subscriptions}
+      />
+      <ImportDialog
+        open={importDialogOpen}
+        onClose={() => setImportDialogOpen(false)}
+        onImported={onRefreshSubscriptions}
       />
     </div>
   );

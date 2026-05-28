@@ -4,6 +4,7 @@ import type {
   DownloadRecord,
   AppSettings,
   AppState,
+  ImportResult,
 } from "@/types";
 
 // ── Subscription commands ──────────────────────────────────────────
@@ -101,4 +102,32 @@ export async function startScheduler(): Promise<void> {
 /** Stops the background scheduler. */
 export async function stopScheduler(): Promise<void> {
   return invoke<void>("stop_scheduler");
+}
+
+// ── Import / Export commands ──────────────────────────────────────
+
+/** Exports all subscriptions to a JSON file at the given path. */
+export async function exportSubscriptionsJson(path: string): Promise<void> {
+  return invoke<void>("export_subscriptions_json", { path });
+}
+
+/** Exports all subscriptions to an OPML file at the given path. */
+export async function exportSubscriptionsOpml(path: string): Promise<void> {
+  return invoke<void>("export_subscriptions_opml", { path });
+}
+
+/**
+ * Batch imports subscriptions from URLs and/or a file path.
+ *
+ * @param urls - List of channel URLs (used in paste mode).
+ * @param filePath - Path to a .txt or .opml file (used in file mode).
+ */
+export async function batchImportSubscriptions(
+  urls: string[],
+  filePath?: string,
+): Promise<ImportResult> {
+  return invoke<ImportResult>("batch_import_subscriptions", {
+    urls,
+    file_path: filePath ?? null,
+  });
 }

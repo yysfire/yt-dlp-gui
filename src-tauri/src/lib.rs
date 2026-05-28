@@ -24,6 +24,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // Resolve the app data directory
             let data_dir = app
@@ -95,6 +97,7 @@ pub fn run() {
                             &data_dir_clone,
                             &app_state.last_check_time,
                             &records,
+                            &app_handle,
                         )
                         .await
                         {
@@ -148,6 +151,9 @@ pub fn run() {
             commands::settings::get_app_state,
             commands::settings::start_scheduler,
             commands::settings::stop_scheduler,
+            commands::import_export::export_subscriptions_json,
+            commands::import_export::export_subscriptions_opml,
+            commands::import_export::batch_import_subscriptions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

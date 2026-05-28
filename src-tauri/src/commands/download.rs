@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use chrono::Utc;
-use tauri::State;
+use tauri::{Emitter, Manager, State};
 
 use crate::models::{AppState, DownloadRecord, Subscription};
 use crate::services::{StorageService, YtDlpService};
@@ -18,6 +18,7 @@ pub(crate) async fn check_and_download(
     data_dir: &PathBuf,
     last_check_time: &Option<String>,
     existing_records: &[DownloadRecord],
+    app_handle: &tauri::AppHandle,
 ) -> Result<Vec<DownloadRecord>, AppError> {
     // Determine the date cutoff for checking
     let since = match last_check_time {
@@ -66,6 +67,21 @@ pub(crate) async fn check_and_download(
                 record.file_path = result.file_path;
                 record.file_size = result.file_size;
                 record.downloaded_at = Utc::now().to_rfc3339();
+
+                // Send desktop notification if enabled
+                if let Some(ctx) = app_handle.try_state::<crate::AppContext>() {
+                    if let Ok(settings) = ctx.settings.lock() {
+                        if settings.notifications_enabled {
+                            let _ = app_handle.emit(
+                                "download-complete",
+                                serde_json::json!({
+                                    "title": &record.video_title,
+                                    "channel": &sub.channel_name,
+                                }),
+                            );
+                        }
+                    }
+                }
             }
             Err(e) => {
                 log::error!("Download failed for {}: {}", video.title, e);
@@ -92,6 +108,7 @@ pub(crate) async fn check_and_download(
 pub async fn check_subscription(
     id: String,
     state: State<'_, AppContext>,
+    app_handle: tauri::AppHandle,
 ) -> Result<Vec<DownloadRecord>, String> {
     let subs = StorageService::load_subscriptions(&state.data_dir)
         .map_err(|e| e.to_string())?;
@@ -127,6 +144,7 @@ pub async fn check_subscription(
         &state.data_dir,
         &app_state.last_check_time,
         &records,
+        &app_handle,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -138,6 +156,7 @@ pub async fn check_subscription(
 #[tauri::command]
 pub async fn check_all_subscriptions(
     state: State<'_, AppContext>,
+    app_handle: tauri::AppHandle,
 ) -> Result<Vec<DownloadRecord>, String> {
     let subs = StorageService::load_subscriptions(&state.data_dir)
         .map_err(|e| e.to_string())?;
@@ -172,6 +191,7 @@ pub async fn check_all_subscriptions(
             &state.data_dir,
             &app_state.last_check_time,
             &records,
+            &app_handle,
         )
         .await
         {
@@ -224,6 +244,7 @@ pub async fn get_all_download_records(
 #[tauri::command]
 pub async fn manual_check_all(
     state: State<'_, AppContext>,
+    app_handle: tauri::AppHandle,
 ) -> Result<Vec<DownloadRecord>, String> {
-    check_all_subscriptions(state).await
+    check_all_subscriptions(state, app_handle).await
 }

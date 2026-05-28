@@ -33,6 +33,15 @@ export interface AppSettings {
   proxy_url: string;
 }
 
+/** Result of a batch import operation. */
+export interface ImportResult {
+  imported: Subscription[];
+  skipped_duplicates: string[];
+  skipped_invalid: string[];
+  total: number;
+  success_count: number;
+}
+
 /** Runtime application state. */
 export interface AppState {
   last_check_time: string | null;

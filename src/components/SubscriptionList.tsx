@@ -10,6 +10,8 @@ import {
 import {
   Refresh as RefreshIcon,
   DownloadForOffline as CheckAllIcon,
+  FileDownload as ExportIcon,
+  FileUpload as ImportIcon,
 } from "@mui/icons-material";
 import type { Subscription } from "@/types";
 import SubscriptionItem from "./SubscriptionItem";
@@ -25,6 +27,8 @@ interface SubscriptionListProps {
   onCheckSubscription: (id: string) => Promise<void>;
   onManualCheckAll: () => Promise<void>;
   onRefresh: () => Promise<void>;
+  onOpenExport: () => void;
+  onOpenImport: () => void;
 }
 
 /** Sidebar container rendering the subscription list with toolbar. */
@@ -39,6 +43,8 @@ export default function SubscriptionList({
   onCheckSubscription,
   onManualCheckAll,
   onRefresh,
+  onOpenExport,
+  onOpenImport,
 }: SubscriptionListProps) {
   return (
     <div className="flex flex-col h-full bg-white dark:bg-gray-800">
@@ -56,6 +62,16 @@ export default function SubscriptionList({
         <Typography variant="body2" fontWeight={600} sx={{ flexGrow: 1 }}>
           订阅列表
         </Typography>
+        <Tooltip title="导入">
+          <IconButton size="small" onClick={onOpenImport}>
+            <ImportIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+        <Tooltip title="导出">
+          <IconButton size="small" onClick={onOpenExport}>
+            <ExportIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
         <Tooltip title="检查全部">
           <IconButton size="small" onClick={onManualCheckAll}>
             <CheckAllIcon fontSize="small" />
