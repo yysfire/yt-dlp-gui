@@ -86,7 +86,14 @@ impl YtDlpService {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let info: ChannelInfo = serde_json::from_str(stdout.trim()).map_err(|e| {
+        let trimmed = stdout.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::YtDlp(
+                "yt-dlp returned empty output — YouTube may require authentication. \
+                 Try adding a cookie file in Settings.".to_string(),
+            ));
+        }
+        let info: ChannelInfo = serde_json::from_str(trimmed).map_err(|e| {
             AppError::YtDlp(format!("Failed to parse channel info: {}", e))
         })?;
 

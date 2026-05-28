@@ -4,7 +4,7 @@ use std::path::Path;
 
 use tauri::Emitter;
 
-use crate::models::{ImportResult, OpmlOutline, Subscription};
+use crate::models::{ImportResult, Subscription};
 use crate::services::opml::OpmlService;
 use crate::services::{StorageService, YtDlpService};
 use crate::AppContext;

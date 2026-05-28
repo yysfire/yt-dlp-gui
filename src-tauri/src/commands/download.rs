@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 use tauri::{Emitter, Manager, State};
 
-use crate::models::{AppState, DownloadRecord, Subscription};
+use crate::models::{DownloadRecord, Subscription};
 use crate::services::{StorageService, YtDlpService};
 use crate::utils::AppError;
 use crate::AppContext;
