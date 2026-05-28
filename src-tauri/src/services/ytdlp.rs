@@ -48,7 +48,7 @@ pub struct YtDlpService;
 impl YtDlpService {
     /// Parses channel metadata from a URL.
     ///
-    /// Executes: `yt-dlp --dump-json --playlist-items 0 <url>`
+    /// Executes: `yt-dlp --dump-json --playlist-items 1 <url>`
     /// and extracts channel name, avatar, platform, etc.
     pub fn parse_channel_info(
         yt_dlp_path: &str,
@@ -57,7 +57,7 @@ impl YtDlpService {
         url: &str,
     ) -> Result<ChannelInfo, AppError> {
         let mut cmd = Command::new(yt_dlp_path);
-        cmd.args(["--dump-json", "--playlist-items", "0"])
+        cmd.args(["--dump-json", "--playlist-items", "1"])
             .arg(url);
 
         if let Some(ref proxy_url) = proxy {
@@ -397,10 +397,10 @@ mod tests {
     #[test]
     fn test_parse_channel_info_args_structure() {
         // Verify the expected argument structure for parse_channel_info
-        let expected_args = vec!["--dump-json", "--playlist-items", "0"];
+        let expected_args = vec!["--dump-json", "--playlist-items", "1"];
         assert_eq!(expected_args[0], "--dump-json");
         assert_eq!(expected_args[1], "--playlist-items");
-        assert_eq!(expected_args[2], "0");
+        assert_eq!(expected_args[2], "1");
     }
 
     #[test]
