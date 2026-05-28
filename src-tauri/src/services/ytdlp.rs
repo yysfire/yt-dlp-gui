@@ -25,11 +25,9 @@ pub struct ChannelInfo {
 pub struct VideoInfo {
     /// Video title
     pub title: String,
-    /// Full video URL
-    #[serde(alias = "webpage_url")]
+    /// Full video URL (matches `url` in --flat-playlist JSON)
     pub url: String,
     /// Upload date in YYYYMMDD format
-    #[serde(alias = "upload_date")]
     pub upload_date: Option<String>,
 }
 
@@ -296,7 +294,7 @@ mod tests {
     fn test_video_info_deserialization() {
         let json = r#"{
             "title": "Amazing Video",
-            "webpage_url": "https://youtube.com/watch?v=abc",
+            "url": "https://youtube.com/watch?v=abc",
             "upload_date": "20250528"
         }"#;
 
@@ -312,7 +310,7 @@ mod tests {
     fn test_video_info_without_upload_date() {
         let json = r#"{
             "title": "No Date Video",
-            "webpage_url": "https://youtube.com/watch?v=xyz"
+            "url": "https://youtube.com/watch?v=xyz"
         }"#;
 
         let video: VideoInfo = serde_json::from_str(json)
