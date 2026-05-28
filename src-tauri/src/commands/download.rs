@@ -207,7 +207,11 @@ pub async fn check_all_subscriptions(
                 all_new.extend(new_records);
             }
             Err(e) => {
-                log::error!("Error checking subscription {}: {}", sub.channel_name, e);
+                return Err(format!(
+                    "Error checking {}: {}",
+                    sub.channel_name,
+                    e
+                ));
             }
         }
     }
