@@ -20,7 +20,10 @@ pub struct AppContext {
 
 /// Initializes the Tauri application, registers all commands and plugins.
 pub fn run() {
-    env_logger::init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .init();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
