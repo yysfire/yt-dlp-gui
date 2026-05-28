@@ -44,10 +44,15 @@ pub(crate) async fn check_and_download(
     let videos = YtDlpService::check_new_videos(yt_dlp_path, proxy, cookie_file, &sub.url, &since)?;
 
     let mut new_records: Vec<DownloadRecord> = Vec::new();
+    // Track seen URLs to avoid duplicates within a single check run
+    let mut seen_urls: std::collections::HashSet<String> = existing_records
+        .iter()
+        .map(|r| r.video_url.clone())
+        .collect();
 
     for video in videos {
         // Skip if the video URL already has a download record
-        if existing_records.iter().any(|r| r.video_url == video.url) {
+        if !seen_urls.insert(video.url.clone()) {
             continue;
         }
 
