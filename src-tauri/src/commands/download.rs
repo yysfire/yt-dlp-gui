@@ -40,6 +40,7 @@ pub(crate) async fn check_and_download(
     };
 
     // Check for new videos
+    log::info!("check_and_download: since={}, url={}", since, sub.url);
     let videos = YtDlpService::check_new_videos(yt_dlp_path, proxy, cookie_file, &sub.url, &since)?;
 
     let mut new_records: Vec<DownloadRecord> = Vec::new();
@@ -182,6 +183,14 @@ pub async fn check_all_subscriptions(
 
     let mut all_new: Vec<DownloadRecord> = Vec::new();
     let mut total_completed: u32 = 0;
+
+    log::info!(
+        "check_all: {} subscriptions, cookie={}, proxy={}, ytdlp={}",
+        subs.len(),
+        cookie_file.as_deref().unwrap_or("none"),
+        proxy.as_deref().unwrap_or("none"),
+        yt_dlp_path,
+    );
 
     for sub in &subs {
         if sub.paused {

@@ -163,6 +163,8 @@ impl YtDlpService {
             }
         }
 
+        log::info!("check_new_videos: found {} videos for {}", videos.len(), url);
+
         Ok(videos)
     }
 
