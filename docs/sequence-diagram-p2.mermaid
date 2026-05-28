@@ -1,0 +1,83 @@
+sequenceDiagram
+    %% ═══════════════════════════════════════════════
+    %% 导出 OPML 流程
+    %% ═══════════════════════════════════════════════
+    actor User
+    participant ExportDialog
+    participant PluginDialog as "@tauri-apps/plugin-dialog"
+    participant ExportCmd as "Rust: export.rs"
+    participant OpmlService
+    participant StorageService
+
+    User->>ExportDialog: 点击"导出订阅" → 选择 OPML
+    ExportDialog->>PluginDialog: save(defaultPath: "subscriptions.opml")
+    PluginDialog-->>ExportDialog: filePath
+    ExportDialog->>ExportCmd: invoke("export_subscriptions_opml", {path})
+    ExportCmd->>StorageService: load_subscriptions(data_dir)
+    StorageService-->>ExportCmd: Vec~Subscription~
+    ExportCmd->>OpmlService: build_opml(&subs)
+    OpmlService-->>ExportCmd: String (OPML XML)
+    ExportCmd->>ExportCmd: std::fs::write(path, opml)
+    ExportCmd-->>ExportDialog: Ok(())
+    ExportDialog->>ExportDialog: 成功提示
+
+    %% ═══════════════════════════════════════════════
+    %% 批量导入 (OPML 文件模式) 流程
+    %% ═══════════════════════════════════════════════
+    Note over User,StorageService: ── 批量导入 (OPML 文件模式) ──
+
+    User->>ExportDialog: 点击"批量导入" → 文件标签
+    User->>ExportDialog: 点击"选择文件"
+    ExportDialog->>PluginDialog: open(filters: [opml,txt])
+    PluginDialog-->>ExportDialog: filePath
+    ExportDialog->>ExportCmd: invoke("batch_import_subscriptions", {urls:[], filePath})
+    ExportCmd->>ExportCmd: std::fs::read_to_string(filePath)
+    ExportCmd->>OpmlService: parse_opml(&content)
+    OpmlService-->>ExportCmd: Vec~OpmlOutline~
+    ExportCmd->>ExportCmd: extract xml_url → URL list
+    ExportCmd->>StorageService: load_subscriptions(data_dir)
+    StorageService-->>ExportCmd: existing subs
+    loop each URL
+        alt duplicate
+            ExportCmd->>ExportCmd: skipped_duplicates++
+        else valid
+            ExportCmd->>ExportCmd: YtDlpService::parse_channel_info()
+            ExportCmd->>ExportCmd: Subscription::new() → imported++
+        else invalid
+            ExportCmd->>ExportCmd: skipped_invalid++
+        end
+    end
+    ExportCmd->>StorageService: save_subscriptions(data_dir, &subs)
+    ExportCmd-->>ExportDialog: ImportResult
+    ExportDialog->>ExportDialog: 显示导入统计
+
+    %% ═══════════════════════════════════════════════
+    %% 下载完成通知流程
+    %% ═══════════════════════════════════════════════
+    Note over User,StorageService: ── 下载完成通知 ──
+
+    participant Scheduler as "Scheduler / Command"
+    participant CheckDownload as "check_and_download()"
+    participant YtDlpService
+    participant Notification as "tauri-plugin-notification"
+
+    Scheduler->>CheckDownload: check_and_download(sub, ..., app_handle)
+    CheckDownload->>YtDlpService: check_new_videos()
+    YtDlpService-->>CheckDownload: Vec~VideoInfo~
+    loop each new video
+        CheckDownload->>YtDlpService: download_video()
+        alt success
+            YtDlpService-->>CheckDownload: DownloadResult
+            CheckDownload->>CheckDownload: record.status = "completed"
+            CheckDownload->>StorageService: save updated record
+            CheckDownload->>CheckDownload: check notifications_enabled
+            alt enabled
+                CheckDownload->>Notification: app.notification().builder().title().body().show()
+                Notification-->>CheckDownload: sent
+            end
+        else failure
+            YtDlpService-->>CheckDownload: Err
+            CheckDownload->>CheckDownload: record.status = "failed"
+        end
+    end
+    CheckDownload-->>Scheduler: Vec~DownloadRecord~

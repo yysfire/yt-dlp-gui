@@ -1,83 +1,108 @@
 sequenceDiagram
-    %% ═══════════════════════════════════════════════
-    %% 导出 OPML 流程
-    %% ═══════════════════════════════════════════════
     actor User
-    participant ExportDialog
-    participant PluginDialog as "@tauri-apps/plugin-dialog"
-    participant ExportCmd as "Rust: export.rs"
-    participant OpmlService
-    participant StorageService
+    participant Dialog as AddSubscriptionDialog
+    participant Hook as useSubscriptions
+    participant Tauri as Tauri IPC
+    participant Cmd as subscription_commands
+    participant YtDlp as YtDlpService
+    participant Storage as StorageService
+    participant FS as FileSystem
 
-    User->>ExportDialog: 点击"导出订阅" → 选择 OPML
-    ExportDialog->>PluginDialog: save(defaultPath: "subscriptions.opml")
-    PluginDialog-->>ExportDialog: filePath
-    ExportDialog->>ExportCmd: invoke("export_subscriptions_opml", {path})
-    ExportCmd->>StorageService: load_subscriptions(data_dir)
-    StorageService-->>ExportCmd: Vec~Subscription~
-    ExportCmd->>OpmlService: build_opml(&subs)
-    OpmlService-->>ExportCmd: String (OPML XML)
-    ExportCmd->>ExportCmd: std::fs::write(path, opml)
-    ExportCmd-->>ExportDialog: Ok(())
-    ExportDialog->>ExportDialog: 成功提示
+    User->>Dialog: 输入 URL 并提交
+    Dialog->>Hook: addSubscription(url)
+    Hook->>Tauri: invoke('add_subscription', { url })
+    Tauri->>Cmd: add_subscription(url, state)
+    Cmd->>Cmd: 从 state 获取 data_dir
+    Cmd->>Storage: load_subscriptions(data_dir)
+    Storage->>FS: 读取 subscriptions.json
+    FS-->>Storage: JSON bytes
+    Storage-->>Cmd: Vec~Subscription~
+    Cmd->>Cmd: 检查 URL 是否已存在
+    Cmd->>YtDlp: parse_channel_info(yt_dlp_path, proxy, url)
+    YtDlp-->>Cmd: ChannelInfo { name, avatar, platform }
+    Cmd->>Cmd: 创建 Subscription { id: uuid, ... }
+    Cmd->>Storage: save_subscriptions(data_dir, &subs)
+    Storage->>FS: 写入 subscriptions.json
+    Storage-->>Cmd: Ok(())
+    Cmd-->>Tauri: Subscription
+    Tauri-->>Hook: Subscription
+    Hook->>Hook: 更新本地状态
+    Hook-->>Dialog: 关闭弹窗，刷新列表
+    Dialog-->>User: 显示新订阅
 
-    %% ═══════════════════════════════════════════════
-    %% 批量导入 (OPML 文件模式) 流程
-    %% ═══════════════════════════════════════════════
-    Note over User,StorageService: ── 批量导入 (OPML 文件模式) ──
+---
 
-    User->>ExportDialog: 点击"批量导入" → 文件标签
-    User->>ExportDialog: 点击"选择文件"
-    ExportDialog->>PluginDialog: open(filters: [opml,txt])
-    PluginDialog-->>ExportDialog: filePath
-    ExportDialog->>ExportCmd: invoke("batch_import_subscriptions", {urls:[], filePath})
-    ExportCmd->>ExportCmd: std::fs::read_to_string(filePath)
-    ExportCmd->>OpmlService: parse_opml(&content)
-    OpmlService-->>ExportCmd: Vec~OpmlOutline~
-    ExportCmd->>ExportCmd: extract xml_url → URL list
-    ExportCmd->>StorageService: load_subscriptions(data_dir)
-    StorageService-->>ExportCmd: existing subs
-    loop each URL
-        alt duplicate
-            ExportCmd->>ExportCmd: skipped_duplicates++
-        else valid
-            ExportCmd->>ExportCmd: YtDlpService::parse_channel_info()
-            ExportCmd->>ExportCmd: Subscription::new() → imported++
-        else invalid
-            ExportCmd->>ExportCmd: skipped_invalid++
+sequenceDiagram
+    participant Scheduler as SchedulerService
+    participant Cmd as download_commands
+    participant Storage as StorageService
+    participant YtDlp as YtDlpService
+    participant FS as FileSystem
+
+    Scheduler->>Scheduler: tokio::interval tick
+    Scheduler->>Cmd: check_all_subscriptions(state)
+    Cmd->>Storage: load_subscriptions(data_dir)
+    Storage-->>Cmd: Vec~Subscription~
+    Cmd->>Storage: load_download_records(data_dir)
+    Storage-->>Cmd: Vec~DownloadRecord~
+    Cmd->>Storage: load_state(data_dir)
+    Storage-->>Cmd: AppState (last_check_time)
+
+    loop 对每个未暂停的订阅
+        Cmd->>YtDlp: check_new_videos(yt_dlp_path, proxy, url, last_check_time)
+        YtDlp->>YtDlp: 执行 yt-dlp --flat-playlist --dump-json --dateafter ...
+        YtDlp-->>Cmd: Vec~VideoInfo~
+        loop 对每个新视频
+            Cmd->>Cmd: 创建 DownloadRecord { status: "downloading" }
+            Cmd->>Storage: save_download_records(data_dir, &records)
+            Cmd->>YtDlp: download_video(yt_dlp_path, proxy, url, quality, output_dir)
+            YtDlp-->>Cmd: DownloadResult { file_path, file_size }
+            Cmd->>Cmd: 更新 DownloadRecord { status: "completed" }
+            Cmd->>Storage: save_download_records(data_dir, &records)
         end
     end
-    ExportCmd->>StorageService: save_subscriptions(data_dir, &subs)
-    ExportCmd-->>ExportDialog: ImportResult
-    ExportDialog->>ExportDialog: 显示导入统计
 
-    %% ═══════════════════════════════════════════════
-    %% 下载完成通知流程
-    %% ═══════════════════════════════════════════════
-    Note over User,StorageService: ── 下载完成通知 ──
+    Cmd->>Storage: save_state(data_dir, &new_state)
+    Cmd-->>Scheduler: Vec~DownloadRecord~
 
-    participant Scheduler as "Scheduler / Command"
-    participant CheckDownload as "check_and_download()"
-    participant YtDlpService
-    participant Notification as "tauri-plugin-notification"
+    Note over Scheduler,FS: 前端通过 Event 或轮询获取最新记录
 
-    Scheduler->>CheckDownload: check_and_download(sub, ..., app_handle)
-    CheckDownload->>YtDlpService: check_new_videos()
-    YtDlpService-->>CheckDownload: Vec~VideoInfo~
-    loop each new video
-        CheckDownload->>YtDlpService: download_video()
-        alt success
-            YtDlpService-->>CheckDownload: DownloadResult
-            CheckDownload->>CheckDownload: record.status = "completed"
-            CheckDownload->>StorageService: save updated record
-            CheckDownload->>CheckDownload: check notifications_enabled
-            alt enabled
-                CheckDownload->>Notification: app.notification().builder().title().body().show()
-                Notification-->>CheckDownload: sent
-            end
-        else failure
-            YtDlpService-->>CheckDownload: Err
-            CheckDownload->>CheckDownload: record.status = "failed"
+---
+
+sequenceDiagram
+    actor User
+    participant List as SubscriptionList
+    participant Hook as useSubscriptions
+    participant Tauri as Tauri IPC
+    participant Cmd as download_commands
+    participant YtDlp as YtDlpService
+    participant Storage as StorageService
+    participant FS as FileSystem
+
+    User->>List: 点击 [手动检查更新]
+    List->>Hook: checkAllSubscriptions()
+    Hook->>Tauri: invoke('check_all_subscriptions')
+    Tauri->>Cmd: check_all_subscriptions(state)
+    Cmd->>Storage: load_subscriptions(data_dir)
+    Storage-->>Cmd: Vec~Subscription~
+    Cmd->>Storage: load_download_records(data_dir)
+    Storage-->>Cmd: Vec~DownloadRecord~
+
+    loop 每个未暂停的订阅
+        Cmd->>YtDlp: check_new_videos(...)
+        YtDlp-->>Cmd: Vec~VideoInfo~
+        loop 新视频
+            Cmd->>Cmd: 创建 DownloadRecord(downloading)
+            Cmd->>Storage: save_download_records(...)
+            Cmd->>YtDlp: download_video(...)
+            YtDlp-->>Cmd: DownloadResult
+            Cmd->>Cmd: 更新 DownloadRecord(completed)
+            Cmd->>Storage: save_download_records(...)
         end
     end
-    CheckDownload-->>Scheduler: Vec~DownloadRecord~
+
+    Cmd-->>Tauri: Vec~DownloadRecord~
+    Tauri-->>Hook: DownloadRecord[]
+    Hook->>Hook: 更新 records 状态
+    Hook-->>List: 刷新 UI
+    List-->>User: 显示下载结果

@@ -1,22 +1,6 @@
 classDiagram
-    %% ── 新增数据模型 ──
-    class ImportResult {
-        +u32 imported
-        +u32 skipped_duplicates
-        +u32 skipped_invalid
-    }
-    class OpmlOutline {
-        +String title
-        +String xml_url
-    }
+    direction TB
 
-    %% ── 新增服务 ──
-    class OpmlService {
-        +build_opml(subs: Vec~Subscription~) String$
-        +parse_opml(xml: &str) Vec~OpmlOutline~$
-    }
-
-    %% ── 现有模型（引用，不重复设计）──
     class Subscription {
         +String id
         +String url
@@ -26,16 +10,7 @@ classDiagram
         +bool paused
         +String quality_preset
         +String created_at
-    }
-
-    class AppSettings {
-        +bool notifications_enabled
-        +String download_dir
-        +u32 check_interval_minutes
-        +String yt_dlp_path
-        +String quality_preset
-        +bool dark_mode
-        +String proxy_url
+        +new(url: String, platform: String, channel_name: String, channel_avatar_url: String) Subscription
     }
 
     class DownloadRecord {
@@ -47,11 +22,81 @@ classDiagram
         +u64 file_size
         +String status
         +String downloaded_at
+        +new(subscription_id: String, video_title: String, video_url: String, file_path: String) DownloadRecord
     }
 
-    %% ── 关系 ──
-    OpmlService ..> Subscription : reads url/channel_name
-    OpmlService ..> OpmlOutline : produces
-    ImportResult ..> Subscription : batch creates
-    Subscription "1" --> "*" DownloadRecord : has records
-    AppSettings --> Subscription : notifications_enabled affects
+    class AppSettings {
+        +String download_dir
+        +u32 check_interval_minutes
+        +String yt_dlp_path
+        +String quality_preset
+        +bool notifications_enabled
+        +bool dark_mode
+        +String proxy_url
+        +default() AppSettings
+    }
+
+    class AppState {
+        +String last_check_time
+        +u32 total_downloads
+        +default() AppState
+    }
+
+    class StorageService {
+        +load_subscriptions(data_dir: &Path) Vec~Subscription~
+        +save_subscriptions(data_dir: &Path, subs: &[Subscription]) Result
+        +load_download_records(data_dir: &Path) Vec~DownloadRecord~
+        +save_download_records(data_dir: &Path, records: &[DownloadRecord]) Result
+        +load_settings(data_dir: &Path) AppSettings
+        +save_settings(data_dir: &Path, settings: &AppSettings) Result
+        +load_state(data_dir: &Path) AppState
+        +save_state(data_dir: &Path, state: &AppState) Result
+    }
+
+    class YtDlpService {
+        +parse_channel_info(yt_dlp_path: &str, proxy: &Option~String~, url: &str) Result~ChannelInfo~
+        +check_new_videos(yt_dlp_path: &str, proxy: &Option~String~, url: &str, since: &str) Result~Vec~VideoInfo~~
+        +download_video(yt_dlp_path: &str, proxy: &Option~String~, url: &str, quality: &str, output_dir: &Path) Result~DownloadResult~
+    }
+
+    class SchedulerService {
+        +start(interval_mins: u32, callback: impl Fn()) JoinHandle
+        +stop(handle: JoinHandle)
+    }
+
+    class ChannelInfo {
+        +String channel_name
+        +String channel_url
+        +String channel_avatar_url
+        +String platform
+    }
+
+    class VideoInfo {
+        +String title
+        +String url
+        +String upload_date
+    }
+
+    class DownloadResult {
+        +String file_path
+        +u64 file_size
+    }
+
+    class AppError {
+        <<enum>>
+        Io(std::io::Error)
+        Serde(serde_json::Error)
+        YtDlp(String)
+        NotFound(String)
+        Duplicate(String)
+    }
+
+    StorageService ..> Subscription
+    StorageService ..> DownloadRecord
+    StorageService ..> AppSettings
+    StorageService ..> AppState
+    YtDlpService ..> ChannelInfo
+    YtDlpService ..> VideoInfo
+    YtDlpService ..> DownloadResult
+    YtDlpService ..> AppError
+    StorageService ..> AppError
