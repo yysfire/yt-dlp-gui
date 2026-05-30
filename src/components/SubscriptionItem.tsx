@@ -119,13 +119,13 @@ export default function SubscriptionItem({
           <FormControl size="small" sx={{ minWidth: 72 }} onClick={(e) => e.stopPropagation()}>
             <Select
               value={subscription.group_name || "未分组"}
+              open={editingGroup}
+              onOpen={() => setEditingGroup(true)}
+              onClose={() => setEditingGroup(false)}
               onChange={(e) => {
                 onUpdateGroup(subscription.id, e.target.value);
                 setEditingGroup(false);
               }}
-              onBlur={() => setEditingGroup(false)}
-              onClose={() => setEditingGroup(false)}
-              open
               sx={{ height: 22, fontSize: "0.65rem" }}
             >
               {GROUPS.map((g) => (
