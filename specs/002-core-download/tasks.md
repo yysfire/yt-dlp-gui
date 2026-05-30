@@ -25,8 +25,8 @@
 
 **Purpose**: 确认开发环境就绪，现有代码可编译通过
 
-- [ ] T001 验证 proyecto 构建通过：运行 `cargo check` 和 `npx tsc --noEmit` 确认无编译错误
-- [ ] T002 验证现有 Rust 测试通过：运行 `cargo test` 确认全部 69 个测试通过
+- [X] T001 验证 proyecto 构建通过：运行 `cargo check` 和 `npx tsc --noEmit` 确认无编译错误
+- [X] T002 验证现有 Rust 测试通过：运行 `cargo test` 确认全部 77 个测试通过
 
 **Checkpoint**: 开发环境就绪，可以开始开发
 
@@ -40,26 +40,26 @@
 
 ### Tests for Foundational（先编写，确保 FAIL）
 
-- [ ] T003 [P] 编写 VideoInfo.id 反序列化测试：添加 `id` 字段和有/无 `id` 的反序列化用例在 `src-tauri/src/services/ytdlp.rs` 的 `#[cfg(test)]` 模块中
-- [ ] T004 [P] 编写 DownloadRecord 新字段测试：`video_id` 默认值、`error_message` 序列化往返、新增状态值 `paused`/`cancelled` 在 `src-tauri/src/models/download.rs` 的 `#[cfg(test)]` 模块中
-- [ ] T005 [P] 编写 AppSettings 新字段测试：`max_concurrent_downloads` 默认值为 1，序列化往返在 `src-tauri/src/models/settings.rs` 的 `#[cfg(test)]` 模块中
-- [ ] T006 [P] 编写 progress_parser 测试：正常进度行解析、格式异常回退、空字符串处理在 `src-tauri/src/utils/progress_parser.rs` 的 `#[cfg(test)]` 模块中
+- [X] T003 [P] 编写 VideoInfo.id 反序列化测试：添加 `id` 字段和有/无 `id` 的反序列化用例在 `src-tauri/src/services/ytdlp.rs` 的 `#[cfg(test)]` 模块中
+- [X] T004 [P] 编写 DownloadRecord 新字段测试：`video_id` 默认值、`error_message` 序列化往返、新增状态值 `paused`/`cancelled` 在 `src-tauri/src/models/download.rs` 的 `#[cfg(test)]` 模块中
+- [X] T005 [P] 编写 AppSettings 新字段测试：`max_concurrent_downloads` 默认值为 1，序列化往返在 `src-tauri/src/models/settings.rs` 的 `#[cfg(test)]` 模块中
+- [X] T006 [P] 编写 progress_parser 测试：正常进度行解析、格式异常回退、空字符串处理在 `src-tauri/src/utils/progress_parser.rs` 的 `#[cfg(test)]` 模块中
 
 ### Models Implementation
 
-- [ ] T007 在 `VideoInfo` 结构体中新增 `id: Option<String>` 字段（serde alias），更新相关反序列化代码在 `src-tauri/src/services/ytdlp.rs`
-- [ ] T008 在 `DownloadRecord` 结构体中新增 `video_id: String`（默认 `""`）、`error_message: Option<String>`（默认 `None`），在 `src-tauri/src/models/download.rs`
-- [ ] T009 在 `AppSettings` 结构体中新增 `max_concurrent_downloads: u32`（默认 1，范围 1-3），在 `src-tauri/src/models/settings.rs`
+- [X] T007 在 `VideoInfo` 结构体中新增 `id: Option<String>` 字段（serde alias），更新相关反序列化代码在 `src-tauri/src/services/ytdlp.rs`
+- [X] T008 在 `DownloadRecord` 结构体中新增 `video_id: String`（默认 `""`）、`error_message: Option<String>`（默认 `None`），在 `src-tauri/src/models/download.rs`
+- [X] T009 在 `AppSettings` 结构体中新增 `max_concurrent_downloads: u32`（默认 1，范围 1-3），在 `src-tauri/src/models/settings.rs`
 
 ### Utilities Implementation
 
-- [ ] T010 实现 `progress_parser.rs`：函数 `parse_progress_line(line: &str) -> Option<ProgressEvent>` 解析 yt-dlp `--progress-template` 输出格式（`percent|speed|downloaded_bytes|total_bytes|eta`）在 `src-tauri/src/utils/progress_parser.rs`
-- [ ] T011 在 `lib.rs` 中声明 `mod progress_parser` 和 `pub use` 导出在 `src-tauri/src/lib.rs`
+- [X] T010 实现 `progress_parser.rs`：函数 `parse_progress_line(line: &str) -> Option<ProgressEvent>` 解析 yt-dlp `--progress-template` 输出格式（`percent|speed|downloaded_bytes|total_bytes|eta`）在 `src-tauri/src/utils/progress_parser.rs`
+- [X] T011 在 `lib.rs` 中声明 `mod progress_parser` 和 `pub use` 导出在 `src-tauri/src/lib.rs`
 
 ### TypeScript Types & API Stubs
 
-- [ ] T012 [P] 更新 TypeScript 类型：`DownloadRecord` 新增 `video_id`、`error_message`，新增 `DownloadProgress`、`TaskStatus`、`DownloadTask`、`QueueState` 接口在 `src/types/index.ts`
-- [ ] T013 [P] 新增 Tauri invoke 函数类型签名桩（不含实现）：`pauseDownload`、`resumeDownload`、`cancelDownload`、`getDownloadQueue`、`getQueueState` 在 `src/lib/tauri.ts`
+- [X] T012 [P] 更新 TypeScript 类型：`DownloadRecord` 新增 `video_id`、`error_message`，新增 `DownloadProgress`、`TaskStatus`、`DownloadTask`、`QueueState` 接口在 `src/types/index.ts`
+- [X] T013 [P] 新增 Tauri invoke 函数类型签名桩（不含实现）：`pauseDownload`、`resumeDownload`、`cancelDownload`、`getDownloadQueue`、`getQueueState` 在 `src/lib/tauri.ts`
 
 **Checkpoint**: 数据模型就绪，运行 `cargo test` 确认新测试全部通过，`npx tsc --noEmit` 类型检查通过
 
@@ -73,14 +73,14 @@
 
 ### Tests for US5
 
-- [ ] T014 [P] [US5] 编写去重逻辑测试：`VideoInfo` 的 `id` 存在时按 `video_id` 去重，`id` 为 `None` 时回退按 `video_url` 去重在 `src-tauri/src/services/ytdlp.rs` 的 `#[cfg(test)]` 模块中
+- [X] T014 [P] [US5] 编写去重逻辑测试：`VideoInfo` 的 `id` 存在时按 `video_id` 去重，`id` 为 `None` 时回退按 `video_url` 去重在 `src-tauri/src/services/ytdlp.rs` 的 `#[cfg(test)]` 模块中
 
 ### Implementation for US5
 
-- [ ] T015 [US5] 重构 `check_and_download()` 中的去重逻辑：优先使用 `video_id` 建立 `HashSet`，`video_id` 不存在时回退到 `video_url`，在 `src-tauri/src/commands/download.rs`
-- [ ] T016 [US5] 更新去重跳过逻辑：状态为 `failed` 的记录允许重新加入下载队列，状态为 `completed` 或 `cancelled` 的记录跳过，在 `src-tauri/src/commands/download.rs`
-- [ ] T017 [US5] 在下载失败路径中记录 `error_message`：将 yt-dlp 的 stderr 错误信息写入 `DownloadRecord.error_message`，在 `src-tauri/src/commands/download.rs`
-- [ ] T018 [US5] 更新 `DownloadRecord::new()` 构造函数：接收 `video_id` 参数，在 `src-tauri/src/models/download.rs`
+- [X] T015 [US5] 重构 `check_and_download()` 中的去重逻辑：优先使用 `video_id` 建立 `HashSet`，`video_id` 不存在时回退到 `video_url`，在 `src-tauri/src/commands/download.rs`
+- [X] T016 [US5] 更新去重跳过逻辑：状态为 `failed` 的记录允许重新加入下载队列，状态为 `completed` 或 `cancelled` 的记录跳过，在 `src-tauri/src/commands/download.rs`
+- [X] T017 [US5] 在下载失败路径中记录 `error_message`：将 yt-dlp 的 stderr 错误信息写入 `DownloadRecord.error_message`，在 `src-tauri/src/commands/download.rs`
+- [X] T018 [US5] 更新 `DownloadRecord::new()` 构造函数：接收 `video_id` 参数，在 `src-tauri/src/models/download.rs`
 
 **Checkpoint**: US5 独立可测 — 重复视频不下载，失败视频可重试，失败原因可见
 
@@ -94,21 +94,21 @@
 
 ### Tests for US2
 
-- [ ] T019 [P] [US2] 编写 `DownloadQueue` 单元测试：入队顺序（FIFO）、并发控制（Semaphore 限制）、状态转换（Waiting→Running→Completed）、清空队列在 `src-tauri/src/services/download_queue.rs` 的 `#[cfg(test)]` 模块中
+- [X] T019 [P] [US2] 编写 `DownloadQueue` 单元测试：入队顺序（FIFO）、并发控制（Semaphore 限制）、状态转换（Waiting→Running→Completed）、清空队列在 `src-tauri/src/services/download_queue.rs` 的 `#[cfg(test)]` 模块中
 
 ### Implementation for US2
 
-- [ ] T020 [US2] 创建 `DownloadQueue` 结构体：`queue: Arc<Mutex<VecDeque<DownloadTask>>>`、`semaphore: Arc<Semaphore>`、`tasks: Arc<Mutex<JoinSet>>>`、`app_handle: AppHandle`，方法 `new()`、`enqueue()`、`start()` 在 `src-tauri/src/services/download_queue.rs`
-- [ ] T021 [US2] 实现 `DownloadTask` 结构体：包含 `id`、`video_id`、`video_url`、`video_title`、`subscription_id`、`quality`、`status: TaskStatus`、`progress`、`error_message`、`created_at`、`completed_at` 在 `src-tauri/src/services/download_queue.rs`
-- [ ] T022 [US2] 实现 `TaskStatus` 枚举：`Waiting`、`Running`、`Paused`、`Completed`、`Failed`、`Cancelled` 及 `Display` trait，在 `src-tauri/src/services/download_queue.rs`
-- [ ] T023 [US2] 实现 `enqueue()` 方法：创建 `DownloadTask` 并 push 到 `VecDeque`，发射 `queue-changed` 事件，尝试 `start()` 调度，在 `src-tauri/src/services/download_queue.rs`
-- [ ] T024 [US2] 实现 `start()` 方法：从 `VecDeque` pop 并 `tokio::spawn` 下载任务（通过 Semaphore 控制并发），调用 `download_video()` 完成后更新状态和记录，release Semaphore 后递归调用 `start()` 在 `src-tauri/src/services/download_queue.rs`
-- [ ] T025 [US2] 实现 `get_queue_state()` 命令：返回 `QueueState { active_count, waiting_count, max_concurrent }` 在 `src-tauri/src/commands/download.rs`
-- [ ] T026 [US2] 实现 `get_download_queue()` 命令：返回 `Vec<DownloadTask>`（Serialize），在 `src-tauri/src/commands/download.rs`
-- [ ] T027 [US2] 修改 `check_and_download()`：不再直接调用 `download_video()`，而是创建 `DownloadTask` 并入队到 `DownloadQueue`，保留记录创建和 `records-changed` 事件在 `src-tauri/src/commands/download.rs`
-- [ ] T028 [US2] 在 `lib.rs` 中初始化 `DownloadQueue`：作为 `AppContext` 的一部分或通过 `app.manage()` 注入全局实例，注册新命令在 `src-tauri/src/lib.rs`
-- [ ] T029 [US2] 实现前端 `useDownloadRecords` hook 新增方法：`getQueueState()` 获取队列状态，监听 `queue-changed` 事件在 `src/hooks/useDownloadRecords.ts`
-- [ ] T030 [US2] 实现前端 Tauri API 函数：`getDownloadQueue()`、`getQueueState()` 在 `src/lib/tauri.ts`
+- [X] T020 [US2] 创建 `DownloadQueue` 结构体：`queue: Arc<Mutex<VecDeque<DownloadTask>>>`、`semaphore: Arc<Semaphore>`、`tasks: Arc<Mutex<JoinSet>>>`、`app_handle: AppHandle`，方法 `new()`、`enqueue()`、`start()` 在 `src-tauri/src/services/download_queue.rs`
+- [X] T021 [US2] 实现 `DownloadTask` 结构体：包含 `id`、`video_id`、`video_url`、`video_title`、`subscription_id`、`quality`、`status: TaskStatus`、`progress`、`error_message`、`created_at`、`completed_at` 在 `src-tauri/src/services/download_queue.rs`
+- [X] T022 [US2] 实现 `TaskStatus` 枚举：`Waiting`、`Running`、`Paused`、`Completed`、`Failed`、`Cancelled` 及 `Display` trait，在 `src-tauri/src/services/download_queue.rs`
+- [X] T023 [US2] 实现 `enqueue()` 方法：创建 `DownloadTask` 并 push 到 `VecDeque`，发射 `queue-changed` 事件，尝试 `start()` 调度，在 `src-tauri/src/services/download_queue.rs`
+- [X] T024 [US2] 实现 `start()` 方法：从 `VecDeque` pop 并 `tokio::spawn` 下载任务（通过 Semaphore 控制并发），调用 `download_video()` 完成后更新状态和记录，release Semaphore 后递归调用 `start()` 在 `src-tauri/src/services/download_queue.rs`
+- [X] T025 [US2] 实现 `get_queue_state()` 命令：返回 `QueueState { active_count, waiting_count, max_concurrent }` 在 `src-tauri/src/commands/download.rs`
+- [X] T026 [US2] 实现 `get_download_queue()` 命令：返回 `Vec<DownloadTask>`（Serialize），在 `src-tauri/src/commands/download.rs`
+- [X] T027 [US2] 修改 `check_and_download()`：不再直接调用 `download_video()`，而是创建 `DownloadTask` 并入队到 `DownloadQueue`，保留记录创建和 `records-changed` 事件在 `src-tauri/src/commands/download.rs`
+- [X] T028 [US2] 在 `lib.rs` 中初始化 `DownloadQueue`：作为 `AppContext` 的一部分或通过 `app.manage()` 注入全局实例，注册新命令在 `src-tauri/src/lib.rs`
+- [X] T029 [US2] 实现前端 `useDownloadRecords` hook 新增方法：`getQueueState()` 获取队列状态，监听 `queue-changed` 事件在 `src/hooks/useDownloadRecords.ts`
+- [X] T030 [US2] 实现前端 Tauri API 函数：`getDownloadQueue()`、`getQueueState()` 在 `src/lib/tauri.ts`
 
 **Checkpoint**: US2 独立可测 — 检测到的视频自动排队，按 FIFO 顺序下载，并发数可配置
 
@@ -122,15 +122,15 @@
 
 ### Tests for US1
 
-- [ ] T031 [P] [US1] 编写状态恢复测试：模拟 `download_records.json` 中有 `downloading`/`paused` 状态的记录，验证 `recover_state()` 将其标记为 `failed` 并设置 `error_message` 在 `src-tauri/src/commands/download.rs` 的 `#[cfg(test)]` 模块中
-- [ ] T032 [P] [US1] 编写调度器集成测试：验证 `SchedulerService::start()` callback 调用队列的 `enqueue()` 在 `src-tauri/src/services/scheduler.rs` 的 `#[cfg(test)]` 模块中
+- [X] T031 [P] [US1] 编写状态恢复测试：模拟 `download_records.json` 中有 `downloading`/`paused` 状态的记录，验证 `recover_state()` 将其标记为 `failed` 并设置 `error_message` 在 `src-tauri/src/commands/download.rs` 的 `#[cfg(test)]` 模块中
+- [X] T032 [P] [US1] 编写调度器集成测试：验证 `SchedulerService::start()` callback 调用队列的 `enqueue()` 在 `src-tauri/src/services/scheduler.rs` 的 `#[cfg(test)]` 模块中
 
 ### Implementation for US1
 
-- [ ] T033 [US1] 修改后台调度器（`lib.rs` setup 闭包）：检测到新视频后调用 `DownloadQueue::enqueue()` 而非直接下载，保持错误日志在 `src-tauri/src/lib.rs`
-- [ ] T034 [US1] 修改 `start_scheduler` 命令（commands/settings.rs）：同步简化，移除内联调度逻辑（调度由 lib.rs setup 统一管理），仅记录日志在 `src-tauri/src/commands/settings.rs`
-- [ ] T035 [US1] 实现 `recover_state()` 函数：启动时读取 `download_records.json`，将状态为 `downloading` 或 `paused` 的记录标记为 `failed`（设置 `error_message = "Application restarted"`），在 `src-tauri/src/commands/download.rs` 或 `lib.rs` setup 中调用
-- [ ] T036 [US1] 更新 `lib.rs` setup：添加 `recover_state()` 调用，添加 `scheduler-check-complete` 事件中携带队列统计信息，在 `src-tauri/src/lib.rs`
+- [X] T033 [US1] 修改后台调度器（`lib.rs` setup 闭包）：检测到新视频后调用 `DownloadQueue::enqueue()` 而非直接下载，保持错误日志在 `src-tauri/src/lib.rs`
+- [X] T034 [US1] 修改 `start_scheduler` 命令（commands/settings.rs）：同步简化，移除内联调度逻辑（调度由 lib.rs setup 统一管理），仅记录日志在 `src-tauri/src/commands/settings.rs`
+- [X] T035 [US1] 实现 `recover_state()` 函数：启动时读取 `download_records.json`，将状态为 `downloading` 或 `paused` 的记录标记为 `failed`（设置 `error_message = "Application restarted"`），在 `src-tauri/src/commands/download.rs` 或 `lib.rs` setup 中调用
+- [X] T036 [US1] 更新 `lib.rs` setup：添加 `recover_state()` 调用，添加 `scheduler-check-complete` 事件中携带队列统计信息，在 `src-tauri/src/lib.rs`
 
 **Checkpoint**: US1 独立可测 — 定时检查正常触发，新视频自动入队，重启后状态正确恢复
 

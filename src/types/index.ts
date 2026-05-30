@@ -16,12 +16,49 @@ export interface Subscription {
 export interface DownloadRecord {
   id: string;
   subscription_id: string;
+  video_id: string;
   video_title: string;
   video_url: string;
   file_path: string;
   file_size: number;
-  status: "downloading" | "completed" | "failed";
+  status: "downloading" | "completed" | "failed" | "paused" | "cancelled";
+  error_message: string | null;
   downloaded_at: string; // ISO 8601
+}
+
+/** Download task status in memory queue */
+export type TaskStatus = "waiting" | "running" | "paused" | "completed" | "failed" | "cancelled";
+
+/** Real-time download progress */
+export interface DownloadProgress {
+  task_id: string;
+  percent: number;
+  speed: string;
+  downloaded_bytes: number;
+  total_bytes: number;
+  eta: string;
+}
+
+/** Download task in the in-memory queue */
+export interface DownloadTask {
+  id: string;
+  video_id: string;
+  video_url: string;
+  video_title: string;
+  subscription_id: string;
+  quality: string;
+  status: TaskStatus;
+  progress: DownloadProgress | null;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+/** Download queue runtime state */
+export interface QueueState {
+  active_count: number;
+  waiting_count: number;
+  max_concurrent: number;
 }
 
 /** Application-wide settings. */
@@ -34,6 +71,7 @@ export interface AppSettings {
   dark_mode: boolean;
   proxy_url: string;
   cookie_file: string;
+  max_concurrent_downloads: number;
 }
 
 /** Result of a batch import operation. */

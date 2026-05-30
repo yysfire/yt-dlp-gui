@@ -19,6 +19,13 @@ pub struct AppSettings {
     pub proxy_url: String,
     /// Path to a Netscape-format cookie file for yt-dlp authentication
     pub cookie_file: String,
+    /// Maximum number of concurrent downloads (1-3)
+    #[serde(default = "default_max_concurrent_downloads")]
+    pub max_concurrent_downloads: u32,
+}
+
+fn default_max_concurrent_downloads() -> u32 {
+    1
 }
 
 impl Default for AppSettings {
@@ -33,6 +40,7 @@ impl Default for AppSettings {
             dark_mode: false,
             proxy_url: String::new(),
             cookie_file: String::new(),
+            max_concurrent_downloads: 1,
         }
     }
 }
@@ -126,6 +134,48 @@ mod tests {
         assert!(json_value["dark_mode"].is_boolean());
         assert!(json_value["proxy_url"].is_string());
         assert!(json_value["cookie_file"].is_string());
+        assert!(json_value["max_concurrent_downloads"].is_number());
+    }
+
+    #[test]
+    fn test_max_concurrent_downloads_default() {
+        let settings = AppSettings::default();
+        assert_eq!(settings.max_concurrent_downloads, 1);
+    }
+
+    #[test]
+    fn test_max_concurrent_downloads_custom_value() {
+        let json = r#"{
+            "download_dir": "/tmp",
+            "check_interval_minutes": 60,
+            "yt_dlp_path": "yt-dlp",
+            "quality_preset": "1080p",
+            "notifications_enabled": true,
+            "dark_mode": false,
+            "proxy_url": "",
+            "cookie_file": "",
+            "max_concurrent_downloads": 3
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json)
+            .expect("should deserialize with max_concurrent_downloads");
+        assert_eq!(settings.max_concurrent_downloads, 3);
+    }
+
+    #[test]
+    fn test_max_concurrent_downloads_default_on_missing() {
+        let json = r#"{
+            "download_dir": "/tmp",
+            "check_interval_minutes": 60,
+            "yt_dlp_path": "yt-dlp",
+            "quality_preset": "1080p",
+            "notifications_enabled": false,
+            "dark_mode": false,
+            "proxy_url": "",
+            "cookie_file": ""
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json)
+            .expect("should deserialize with missing max_concurrent_downloads");
+        assert_eq!(settings.max_concurrent_downloads, 1);
     }
 
     #[test]

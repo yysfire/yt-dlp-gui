@@ -27,6 +27,8 @@ pub struct VideoInfo {
     pub title: String,
     /// Full video URL (matches `url` in --flat-playlist JSON)
     pub url: String,
+    /// Video ID from the platform (e.g., YouTube video ID). Used for deduplication.
+    pub id: Option<String>,
     /// Upload date in YYYYMMDD format
     pub upload_date: Option<String>,
 }
@@ -316,6 +318,29 @@ mod tests {
         let video: VideoInfo = serde_json::from_str(json)
             .expect("should parse without upload_date");
         assert_eq!(video.upload_date, None);
+    }
+
+    #[test]
+    fn test_video_info_with_id() {
+        let json = r#"{
+            "id": "dQw4w9WgXcQ",
+            "title": "Video With ID",
+            "url": "https://youtube.com/watch?v=dQw4w9WgXcQ"
+        }"#;
+        let video: VideoInfo = serde_json::from_str(json)
+            .expect("should parse VideoInfo with id");
+        assert_eq!(video.id, Some("dQw4w9WgXcQ".to_string()));
+    }
+
+    #[test]
+    fn test_video_info_without_id() {
+        let json = r#"{
+            "title": "Video Without ID",
+            "url": "https://youtube.com/watch?v=xyz"
+        }"#;
+        let video: VideoInfo = serde_json::from_str(json)
+            .expect("should parse VideoInfo without id");
+        assert_eq!(video.id, None);
     }
 
     // ── Format string tests ────────────────────────────────────────

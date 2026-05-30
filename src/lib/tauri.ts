@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Subscription,
   DownloadRecord,
+  DownloadTask,
+  QueueState,
   AppSettings,
   AppState,
   ImportResult,
@@ -84,6 +86,31 @@ export async function getAllDownloadRecords(): Promise<DownloadRecord[]> {
 /** Manually triggers a full check of all subscriptions. */
 export async function manualCheckAll(): Promise<DownloadRecord[]> {
   return invoke<DownloadRecord[]>("manual_check_all");
+}
+
+/** Pauses an active download task. */
+export async function pauseDownload(id: string): Promise<void> {
+  return invoke<void>("pause_download", { id });
+}
+
+/** Resumes a paused download task. */
+export async function resumeDownload(id: string): Promise<void> {
+  return invoke<void>("resume_download", { id });
+}
+
+/** Cancels a download task and cleans up partial files. */
+export async function cancelDownload(id: string): Promise<void> {
+  return invoke<void>("cancel_download", { id });
+}
+
+/** Returns the current in-memory download queue. */
+export async function getDownloadQueue(): Promise<DownloadTask[]> {
+  return invoke<DownloadTask[]>("get_download_queue");
+}
+
+/** Returns the runtime download queue state. */
+export async function getQueueState(): Promise<QueueState> {
+  return invoke<QueueState>("get_queue_state");
 }
 
 // ── Settings commands ──────────────────────────────────────────────

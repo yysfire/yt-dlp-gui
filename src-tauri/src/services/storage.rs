@@ -124,6 +124,7 @@ mod tests {
             sub_id.to_string(),
             title.to_string(),
             "https://example.com/video".to_string(),
+            "".to_string(),
         )
     }
 
@@ -289,6 +290,7 @@ mod tests {
             dark_mode: true,
             proxy_url: "http://127.0.0.1:7890".to_string(),
             cookie_file: String::new(),
+            max_concurrent_downloads: 1,
         };
 
         StorageService::save_settings(tmp.path(), &settings)

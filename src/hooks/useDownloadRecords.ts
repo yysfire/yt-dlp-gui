@@ -9,6 +9,8 @@ interface UseDownloadRecordsReturn {
   refresh: (subscriptionId?: string) => Promise<void>;
   checkSubscription: (id: string) => Promise<void>;
   checkAll: () => Promise<void>;
+  getQueueState: () => Promise<import("@/types").QueueState | null>;
+  getQueue: () => Promise<import("@/types").DownloadTask[]>;
 }
 
 /**
@@ -76,5 +78,23 @@ export function useDownloadRecords(): UseDownloadRecordsReturn {
     refresh().finally(() => setLoading(false));
   }, [refresh]);
 
-  return { records, loading, error, refresh, checkSubscription, checkAll };
+  const getQueueState = useCallback(async () => {
+    try {
+      return await api.getQueueState();
+    } catch (e) {
+      setError(String(e));
+      return null;
+    }
+  }, []);
+
+  const getQueue = useCallback(async () => {
+    try {
+      return await api.getDownloadQueue();
+    } catch (e) {
+      setError(String(e));
+      return [];
+    }
+  }, []);
+
+  return { records, loading, error, refresh, checkSubscription, checkAll, getQueueState, getQueue };
 }

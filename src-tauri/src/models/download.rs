@@ -21,12 +21,18 @@ pub struct DownloadRecord {
     pub status: String,
     /// ISO 8601 timestamp of download
     pub downloaded_at: String,
+    /// Platform-specific video ID used for deduplication
+    #[serde(default)]
+    pub video_id: String,
+    /// Error message if the download failed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 impl DownloadRecord {
     /// Creates a new download record in "downloading" state.
     /// The record is assigned a UUID and the current UTC timestamp.
-    pub fn new(subscription_id: String, video_title: String, video_url: String) -> Self {
+    pub fn new(subscription_id: String, video_title: String, video_url: String, video_id: String) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             subscription_id,
@@ -36,6 +42,8 @@ impl DownloadRecord {
             file_size: 0,
             status: "downloading".to_string(),
             downloaded_at: Utc::now().to_rfc3339(),
+            video_id,
+            error_message: None,
         }
     }
 }
@@ -50,6 +58,7 @@ mod tests {
             "sub-123".to_string(),
             "My Video Title".to_string(),
             "https://youtube.com/watch?v=abc".to_string(),
+            "".to_string(),
         );
 
         // Verify UUID
@@ -79,6 +88,7 @@ mod tests {
             "sub-1".to_string(),
             "Video".to_string(),
             "https://example.com/v".to_string(),
+            "".to_string(),
         );
         assert_eq!(record.status, "downloading");
 
@@ -96,6 +106,7 @@ mod tests {
             "sub-2".to_string(),
             "Failed Video".to_string(),
             "https://example.com/f".to_string(),
+            "".to_string(),
         );
         record2.status = "failed".to_string();
         assert_eq!(record2.status, "failed");
@@ -114,6 +125,8 @@ mod tests {
             file_size: 999_999,
             status: "completed".to_string(),
             downloaded_at: "2025-05-28T12:00:00+00:00".to_string(),
+            video_id: "dQw4w9WgXcQ".to_string(),
+            error_message: None,
         };
 
         let json = serde_json::to_string(&record).expect("serialization should succeed");
@@ -136,6 +149,7 @@ mod tests {
             "sid".to_string(),
             "Vid".to_string(),
             "https://u".to_string(),
+            "".to_string(),
         );
 
         let json = serde_json::to_value(&record).expect("should serialize to JSON value");
@@ -151,5 +165,61 @@ mod tests {
 
         assert_eq!(json["status"].as_str().unwrap(), "downloading");
         assert_eq!(json["file_size"].as_u64().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_download_record_with_video_id() {
+        let record = DownloadRecord::new(
+            "sub-1".to_string(),
+            "Video".to_string(),
+            "https://example.com/v".to_string(),
+            "dQw4w9WgXcQ".to_string(),
+        );
+        assert_eq!(record.video_id, "dQw4w9WgXcQ");
+        assert_eq!(record.error_message, None);
+    }
+
+    #[test]
+    fn test_download_record_error_message_serialization() {
+        let mut record = DownloadRecord::new(
+            "sub-1".to_string(),
+            "Failed Video".to_string(),
+            "https://example.com/f".to_string(),
+            "abc123".to_string(),
+        );
+        record.status = "failed".to_string();
+        record.error_message = Some("yt-dlp error: Network error".to_string());
+
+        let json = serde_json::to_string(&record).expect("serialization should succeed");
+        assert!(json.contains("error_message"));
+        assert!(json.contains("Network error"));
+    }
+
+    #[test]
+    fn test_download_record_error_message_none_skipped() {
+        let record = DownloadRecord::new(
+            "sub-1".to_string(),
+            "Video".to_string(),
+            "https://example.com/v".to_string(),
+            "xyz".to_string(),
+        );
+        let json = serde_json::to_string(&record).expect("serialization should succeed");
+        assert!(!json.contains("error_message") || json.contains("\"error_message\":null"));
+    }
+
+    #[test]
+    fn test_download_record_status_paused_and_cancelled() {
+        let mut record = DownloadRecord::new(
+            "sub-1".to_string(),
+            "Video".to_string(),
+            "https://example.com/v".to_string(),
+            "abc".to_string(),
+        );
+
+        record.status = "paused".to_string();
+        assert_eq!(record.status, "paused");
+
+        record.status = "cancelled".to_string();
+        assert_eq!(record.status, "cancelled");
     }
 }

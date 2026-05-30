@@ -9,6 +9,7 @@ mod services;
 mod commands;
 
 use crate::services::StorageService;
+use crate::services::download_queue::DownloadQueue;
 
 /// Application-wide context shared across all command handlers.
 pub struct AppContext {
@@ -16,6 +17,11 @@ pub struct AppContext {
     pub data_dir: PathBuf,
     /// Runtime settings cache, protected by a mutex for interior mutability.
     pub settings: Mutex<models::settings::AppSettings>,
+}
+
+/// Holds the global download queue instance.
+pub struct QueueContext {
+    pub queue: Mutex<Option<DownloadQueue>>,
 }
 
 /// Initializes the Tauri application, registers all commands and plugins.
@@ -50,6 +56,7 @@ pub fn run() {
             );
 
             let interval_mins = settings.check_interval_minutes;
+            let max_concurrent = settings.max_concurrent_downloads;
             let data_dir_clone = data_dir.clone();
             let settings_clone = settings.clone();
 
@@ -60,8 +67,18 @@ pub fn run() {
 
             app.manage(ctx);
 
-            // Start the background scheduler in a tokio task
+            // Recover download state from previous session
+            let _ = commands::download::recover_state(&data_dir_clone);
+
+            // Initialize the global download queue
             let app_handle = app.handle().clone();
+            let queue = DownloadQueue::new(app_handle.clone(), max_concurrent);
+            let queue_ctx = QueueContext {
+                queue: Mutex::new(Some(queue)),
+            };
+            app.manage(queue_ctx);
+
+            // Start the background scheduler in a tokio task
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(
                     tokio::time::Duration::from_secs((interval_mins as u64) * 60),
@@ -152,6 +169,8 @@ pub fn run() {
             commands::download::get_download_records,
             commands::download::get_all_download_records,
             commands::download::manual_check_all,
+            commands::download::get_download_queue,
+            commands::download::get_queue_state,
             commands::settings::get_settings,
             commands::settings::update_settings,
             commands::settings::get_app_state,
