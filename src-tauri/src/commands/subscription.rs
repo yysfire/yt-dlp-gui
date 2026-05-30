@@ -174,9 +174,10 @@ pub async fn update_subscription_group(
         .find(|s| s.id == id)
         .ok_or_else(|| format!("订阅不存在: {}", id))?;
     sub.group_name = group_name.clone();
+    let updated = sub.clone();
     StorageService::save_subscriptions(&ctx.data_dir, &subs)
         .map_err(|e| e.to_string())?;
-    Ok(sub.clone())
+    Ok(updated)
 }
 
 #[cfg(test)]
