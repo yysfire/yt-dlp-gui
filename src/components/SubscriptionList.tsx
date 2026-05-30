@@ -1,3 +1,4 @@
+import { useState, useMemo } from "react";
 import {
   List,
   Typography,
@@ -6,6 +7,9 @@ import {
   Alert,
   IconButton,
   Tooltip,
+  FormControl,
+  Select,
+  MenuItem,
 } from "@mui/material";
 import {
   Refresh as RefreshIcon,
@@ -15,6 +19,8 @@ import {
 } from "@mui/icons-material";
 import type { Subscription } from "@/types";
 import SubscriptionItem from "./SubscriptionItem";
+
+const GROUPS = ["全部", "未分组", "学习", "娱乐", "音乐", "科技", "其他"];
 
 interface SubscriptionListProps {
   subscriptions: Subscription[];
@@ -29,6 +35,7 @@ interface SubscriptionListProps {
   onRefresh: () => Promise<void>;
   onOpenExport: () => void;
   onOpenImport: () => void;
+  onUpdateGroup: (id: string, groupName: string) => Promise<void>;
 }
 
 /** Sidebar container rendering the subscription list with toolbar. */
@@ -45,7 +52,16 @@ export default function SubscriptionList({
   onRefresh,
   onOpenExport,
   onOpenImport,
+  onUpdateGroup,
 }: SubscriptionListProps) {
+  const [groupFilter, setGroupFilter] = useState("全部");
+
+  const filteredSubscriptions = useMemo(() => {
+    if (groupFilter === "全部") return subscriptions;
+    if (groupFilter === "未分组") return subscriptions.filter((s) => !s.group_name);
+    return subscriptions.filter((s) => s.group_name === groupFilter);
+  }, [subscriptions, groupFilter]);
+
   return (
     <div className="flex flex-col h-full bg-white dark:bg-gray-800">
       {/* Toolbar */}
@@ -62,6 +78,20 @@ export default function SubscriptionList({
         <Typography variant="body2" fontWeight={600} sx={{ flexGrow: 1 }}>
           订阅列表
         </Typography>
+        <FormControl size="small" sx={{ minWidth: 80, mr: 0.5 }}>
+          <Select
+            value={groupFilter}
+            onChange={(e) => setGroupFilter(e.target.value)}
+            displayEmpty
+            sx={{ fontSize: "0.75rem" }}
+          >
+            {GROUPS.map((g) => (
+              <MenuItem key={g} value={g} dense sx={{ fontSize: "0.75rem" }}>
+                {g}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
         <Tooltip title="导入">
           <IconButton size="small" onClick={onOpenImport}>
             <ImportIcon fontSize="small" />
@@ -98,7 +128,7 @@ export default function SubscriptionList({
           </Alert>
         )}
 
-        {!loading && !error && subscriptions.length === 0 && (
+        {!loading && !error && filteredSubscriptions.length === 0 && (
           <Box sx={{ p: 3, textAlign: "center" }}>
             <Typography variant="body2" color="text.secondary">
               暂无订阅
@@ -109,9 +139,9 @@ export default function SubscriptionList({
           </Box>
         )}
 
-        {!loading && subscriptions.length > 0 && (
+        {!loading && filteredSubscriptions.length > 0 && (
           <List disablePadding dense>
-            {subscriptions.map((sub) => (
+            {filteredSubscriptions.map((sub) => (
               <SubscriptionItem
                 key={sub.id}
                 subscription={sub}
@@ -122,6 +152,7 @@ export default function SubscriptionList({
                 onDelete={() => onDelete(sub.id)}
                 onTogglePause={() => onTogglePause(sub.id)}
                 onCheck={() => onCheckSubscription(sub.id)}
+                onUpdateGroup={onUpdateGroup}
               />
             ))}
           </List>

@@ -146,6 +146,7 @@ pub fn run() {
             commands::subscription::get_subscriptions,
             commands::subscription::toggle_subscription_pause,
             commands::subscription::update_subscription_quality,
+            commands::subscription::update_subscription_group,
             commands::download::check_subscription,
             commands::download::check_all_subscriptions,
             commands::download::get_download_records,

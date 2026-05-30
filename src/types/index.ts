@@ -7,7 +7,9 @@ export interface Subscription {
   channel_avatar_url: string;
   paused: boolean;
   quality_preset: string;
+  group_name: string;
   created_at: string; // ISO 8601
+  last_checked_at: string | null;
 }
 
 /** Represents a single video download record. */

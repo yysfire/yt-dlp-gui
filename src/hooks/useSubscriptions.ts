@@ -11,6 +11,7 @@ interface UseSubscriptionsReturn {
   deleteSubscription: (id: string) => Promise<void>;
   togglePause: (id: string) => Promise<void>;
   updateQuality: (id: string, quality: string) => Promise<void>;
+  updateGroup: (id: string, groupName: string) => Promise<void>;
 }
 
 /**
@@ -63,6 +64,11 @@ export function useSubscriptions(): UseSubscriptionsReturn {
     [],
   );
 
+  const updateGroup = useCallback(async (id: string, groupName: string) => {
+    const updated = await api.updateSubscriptionGroup(id, groupName);
+    setSubscriptions((prev) => prev.map((s) => (s.id === id ? updated : s)));
+  }, []);
+
   useEffect(() => {
     setLoading(true);
     refresh().finally(() => setLoading(false));
@@ -77,5 +83,6 @@ export function useSubscriptions(): UseSubscriptionsReturn {
     deleteSubscription,
     togglePause,
     updateQuality,
+    updateGroup,
   };
 }

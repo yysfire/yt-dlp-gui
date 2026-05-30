@@ -78,6 +78,7 @@ export default function App() {
     addSubscription,
     deleteSubscription,
     togglePause,
+    updateGroup,
     refresh: refreshSubs,
   } = useSubscriptions();
 
@@ -186,6 +187,7 @@ export default function App() {
         onManualCheckAll={async () => {
           await checkAll();
         }}
+        onUpdateGroup={updateGroup}
       />
     </ThemeProvider>
   );

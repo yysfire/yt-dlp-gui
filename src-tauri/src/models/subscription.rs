@@ -19,8 +19,12 @@ pub struct Subscription {
     pub paused: bool,
     /// Quality preset for downloads (e.g., "1080p", "720p", "best")
     pub quality_preset: String,
+    /// Group/category name for organizing subscriptions
+    pub group_name: String,
     /// ISO 8601 creation timestamp
     pub created_at: String,
+    /// ISO 8601 timestamp of the last check, or None if never checked
+    pub last_checked_at: Option<String>,
 }
 
 impl Subscription {
@@ -40,7 +44,9 @@ impl Subscription {
             channel_avatar_url,
             paused: false,
             quality_preset: "1080p".to_string(),
+            group_name: "未分组".to_string(),
             created_at: Utc::now().to_rfc3339(),
+            last_checked_at: None,
         }
     }
 }
@@ -72,6 +78,8 @@ mod tests {
         // Verify defaults
         assert!(!sub.paused, "paused should default to false");
         assert_eq!(sub.quality_preset, "1080p", "quality_preset should default to '1080p'");
+        assert_eq!(sub.group_name, "未分组", "group_name should default to '未分组'");
+        assert!(sub.last_checked_at.is_none(), "last_checked_at should default to None");
 
         // Verify created_at is a valid ISO 8601 timestamp
         assert!(!sub.created_at.is_empty());
@@ -119,7 +127,9 @@ mod tests {
         assert_eq!(deserialized.channel_avatar_url, sub.channel_avatar_url);
         assert_eq!(deserialized.paused, sub.paused);
         assert_eq!(deserialized.quality_preset, sub.quality_preset);
+        assert_eq!(deserialized.group_name, sub.group_name);
         assert_eq!(deserialized.created_at, sub.created_at);
+        assert_eq!(deserialized.last_checked_at, sub.last_checked_at);
     }
 
     #[test]
@@ -133,5 +143,16 @@ mod tests {
             );
             assert_eq!(sub.platform, *platform);
         }
+    }
+
+    #[test]
+    fn test_subscription_default_group_name() {
+        let sub = Subscription::new(
+            "https://youtube.com/@test".to_string(),
+            "youtube".to_string(),
+            "Test Channel".to_string(),
+            "https://example.com/avatar.jpg".to_string(),
+        );
+        assert_eq!(sub.group_name, "未分组");
     }
 }

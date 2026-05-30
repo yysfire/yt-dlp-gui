@@ -10,6 +10,8 @@ import {
   Chip,
   Typography,
   IconButton,
+  Select,
+  FormControl,
 } from "@mui/material";
 import {
   MoreVert as MoreIcon,
@@ -21,6 +23,8 @@ import {
 } from "@mui/icons-material";
 import type { Subscription } from "@/types";
 
+const GROUPS = ["未分组", "学习", "娱乐", "音乐", "科技", "其他"];
+
 interface SubscriptionItemProps {
   subscription: Subscription;
   selected: boolean;
@@ -28,6 +32,7 @@ interface SubscriptionItemProps {
   onDelete: () => void;
   onTogglePause: () => void;
   onCheck: () => void;
+  onUpdateGroup: (id: string, groupName: string) => void;
 }
 
 /** Platform icon mapping. */
@@ -50,8 +55,10 @@ export default function SubscriptionItem({
   onDelete,
   onTogglePause,
   onCheck,
+  onUpdateGroup,
 }: SubscriptionItemProps) {
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
+  const [editingGroup, setEditingGroup] = useState(false);
   const menuOpen = Boolean(anchorEl);
 
   const handleMenuOpen = (e: React.MouseEvent<HTMLElement>) => {
@@ -105,6 +112,39 @@ export default function SubscriptionItem({
             size="small"
             variant="outlined"
             sx={{ mr: 1, height: 20, fontSize: "0.65rem" }}
+          />
+        )}
+
+        {editingGroup ? (
+          <FormControl size="small" sx={{ minWidth: 72 }} onClick={(e) => e.stopPropagation()}>
+            <Select
+              value={subscription.group_name || "未分组"}
+              onChange={(e) => {
+                onUpdateGroup(subscription.id, e.target.value === "未分组" ? "" : e.target.value);
+                setEditingGroup(false);
+              }}
+              onBlur={() => setEditingGroup(false)}
+              onClose={() => setEditingGroup(false)}
+              open
+              sx={{ height: 22, fontSize: "0.65rem" }}
+            >
+              {GROUPS.map((g) => (
+                <MenuItem key={g} value={g} dense sx={{ fontSize: "0.7rem" }}>
+                  {g}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        ) : (
+          <Chip
+            label={subscription.group_name || "未分组"}
+            size="small"
+            variant="outlined"
+            sx={{ mr: 1, height: 20, fontSize: "0.65rem", cursor: "pointer" }}
+            onClick={(e) => {
+              e.stopPropagation();
+              setEditingGroup(true);
+            }}
           />
         )}
 

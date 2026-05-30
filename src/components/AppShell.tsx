@@ -23,6 +23,7 @@ interface AppShellProps {
   records: DownloadRecord[];
   onCheckSubscription: (id: string) => Promise<void>;
   onManualCheckAll: () => Promise<void>;
+  onUpdateGroup: (id: string, groupName: string) => Promise<void>;
 }
 
 /**
@@ -42,6 +43,7 @@ export default function AppShell({
   records,
   onCheckSubscription,
   onManualCheckAll,
+  onUpdateGroup,
 }: AppShellProps) {
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -84,6 +86,7 @@ export default function AppShell({
             onRefresh={onRefreshSubscriptions}
             onOpenExport={() => setExportDialogOpen(true)}
             onOpenImport={() => setImportDialogOpen(true)}
+            onUpdateGroup={onUpdateGroup}
           />
         </div>
 

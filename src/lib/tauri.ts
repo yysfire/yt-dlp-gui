@@ -42,6 +42,17 @@ export async function updateSubscriptionQuality(
   });
 }
 
+/** Updates the group for a subscription. */
+export async function updateSubscriptionGroup(
+  id: string,
+  groupName: string,
+): Promise<Subscription> {
+  return invoke<Subscription>("update_subscription_group", {
+    id,
+    group_name: groupName,
+  });
+}
+
 // ── Download commands ──────────────────────────────────────────────
 
 /** Checks a single subscription for new videos. */
