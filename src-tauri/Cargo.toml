@@ -27,5 +27,8 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

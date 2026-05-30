@@ -45,6 +45,12 @@ pub struct DownloadResult {
     pub file_size: u64,
 }
 
+/// Result of spawning a yt-dlp download process.
+pub struct SpawnedDownload {
+    pub child: tokio::process::Child,
+    pub output_template: String,
+}
+
 /// Stateless service wrapping yt-dlp CLI invocations.
 pub struct YtDlpService;
 
@@ -378,6 +384,67 @@ impl YtDlpService {
         Ok(DownloadResult {
             file_path,
             file_size,
+        })
+    }
+
+    /// Spawns a yt-dlp download process and returns the child handle.
+    /// The caller controls process lifecycle (pause/resume/kill) and reads stdout.
+    pub fn download_video_spawn(
+        yt_dlp_path: &str,
+        proxy: &Option<String>,
+        cookie_file: &Option<String>,
+        url: &str,
+        quality: &str,
+        output_dir: &Path,
+    ) -> Result<SpawnedDownload, AppError> {
+        std::fs::create_dir_all(output_dir)?;
+
+        let output_template = output_dir.join("%(title)s.%(ext)s");
+
+        let mut cmd = tokio::process::Command::new(yt_dlp_path);
+
+        let format_str = match quality {
+            "best" => "best".to_string(),
+            "2160p" => "bestvideo[height<=2160]+bestaudio/best[height<=2160]".to_string(),
+            "1440p" => "bestvideo[height<=1440]+bestaudio/best[height<=1440]".to_string(),
+            "720p" => "bestvideo[height<=720]+bestaudio/best[height<=720]".to_string(),
+            "480p" => "bestvideo[height<=480]+bestaudio/best[height<=480]".to_string(),
+            _ => "bestvideo[height<=1080]+bestaudio/best[height<=1080]".to_string(),
+        };
+
+        cmd.args([
+            "-f", &format_str,
+            "-o", &output_template.to_string_lossy(),
+            "--no-playlist",
+            "--progress-template",
+            "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_estimate)s|%(progress._eta_str)s",
+            "--print", "after_move:filepath",
+            url,
+        ]);
+
+        if let Some(ref proxy_url) = proxy {
+            if !proxy_url.is_empty() {
+                cmd.arg("--proxy").arg(proxy_url);
+            }
+        }
+
+        if let Some(ref cf) = cookie_file {
+            if !cf.is_empty() {
+                cmd.arg("--cookies").arg(cf);
+            }
+        }
+
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let child = cmd.spawn().map_err(|e| AppError::YtDlp(format!(
+            "Failed to execute yt-dlp: {}",
+            e
+        )))?;
+
+        Ok(SpawnedDownload {
+            child,
+            output_template: output_template.to_string_lossy().to_string(),
         })
     }
 }

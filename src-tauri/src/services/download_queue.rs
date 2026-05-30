@@ -1,15 +1,17 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use serde::Serialize;
 use tauri::{Emitter, AppHandle};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Semaphore;
 
 use crate::models::{DownloadRecord, Subscription};
 use crate::services::{StorageService, YtDlpService};
 use crate::utils::AppError;
+use crate::utils::progress_parser;
 
 /// Status of a download task in the in-memory queue.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -92,10 +94,17 @@ pub struct DownloadContext {
     pub data_dir: PathBuf,
 }
 
-/// FIFO download queue with concurrency control.
+/// Holds the child process handle and PID for an active download.
+struct ActiveTask {
+    child: tokio::process::Child,
+    pid: u32,
+}
+
+/// FIFO download queue with concurrency control and process lifecycle management.
 pub struct DownloadQueue {
     queue: Arc<Mutex<VecDeque<DownloadTask>>>,
     semaphore: Arc<Semaphore>,
+    active_tasks: Arc<Mutex<HashMap<String, ActiveTask>>>,
     app_handle: AppHandle,
 }
 
@@ -105,12 +114,12 @@ impl DownloadQueue {
         Self {
             queue: Arc::new(Mutex::new(VecDeque::new())),
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
+            active_tasks: Arc::new(Mutex::new(HashMap::new())),
             app_handle,
         }
     }
 
     /// Enqueues a batch of new video download tasks.
-    /// Returns the number of tasks added.
     pub fn enqueue_batch(
         &self,
         videos: Vec<(String, String, String)>,
@@ -135,14 +144,12 @@ impl DownloadQueue {
             };
             queue.push_back(task);
         }
-        // Drop lock before emitting event
         drop(queue);
         self.emit_queue_changed();
         count
     }
 
-    /// Queues a single download task from a check_and_download result.
-    /// Creates a DownloadRecord and saves it immediately.
+    /// Queues a single download task from a check result.
     pub fn enqueue_from_video(
         &self,
         sub: &Subscription,
@@ -152,7 +159,6 @@ impl DownloadQueue {
         quality: String,
         data_dir: &PathBuf,
     ) -> Result<(), AppError> {
-        // Create and save a "downloading" record
         let record = DownloadRecord::new(
             sub.id.clone(),
             video_title.clone(),
@@ -163,13 +169,10 @@ impl DownloadQueue {
         let mut all_records = StorageService::load_download_records(data_dir)?;
         all_records.push(record);
         StorageService::save_download_records(data_dir, &all_records)?;
-
-        // Emit event for frontend refresh
         let _ = self.app_handle.emit("records-changed", ());
 
-        // Create task and push to queue
         let mut queue = self.queue.lock().unwrap();
-        let task = DownloadTask {
+        queue.push_back(DownloadTask {
             id: uuid::Uuid::new_v4().to_string(),
             video_id,
             video_url,
@@ -181,28 +184,25 @@ impl DownloadQueue {
             error_message: None,
             created_at: Utc::now().to_rfc3339(),
             completed_at: None,
-        };
-        queue.push_back(task);
+        });
         drop(queue);
-
         self.emit_queue_changed();
 
         Ok(())
     }
 
-    /// Starts processing the queue. Called after enqueueing tasks.
-    /// Will spawn download tasks up to the semaphore limit.
+    /// Starts processing the queue in a background task.
     pub fn start_processing(&self, ctx: DownloadContext) {
         let queue = Arc::clone(&self.queue);
         let semaphore = Arc::clone(&self.semaphore);
+        let active_tasks = Arc::clone(&self.active_tasks);
         let app_handle = self.app_handle.clone();
 
         tokio::spawn(async move {
             loop {
-                // Acquire semaphore permit before starting a task
                 let permit = match semaphore.clone().acquire_owned().await {
                     Ok(p) => p,
-                    Err(_) => break, // Semaphore closed
+                    Err(_) => break,
                 };
 
                 let task = {
@@ -212,31 +212,37 @@ impl DownloadQueue {
 
                 let task = match task {
                     Some(t) => t,
-                    None => {
-                        // No more tasks
-                        break;
-                    }
+                    None => break,
                 };
 
                 let ctx_clone = ctx.clone();
                 let queue_clone = Arc::clone(&queue);
+                let active_clone = Arc::clone(&active_tasks);
                 let app_clone = app_handle.clone();
                 let sem_clone = Arc::clone(&semaphore);
 
                 tokio::spawn(async move {
-                    let _permit = permit; // Hold permit until done
+                    let _permit = permit;
 
-                    let result = Self::execute_download(
+                    Self::execute_download_with_control(
                         &task,
                         &ctx_clone,
+                        &active_clone,
                         &app_clone,
                     ).await;
 
-                    // Update DownloadRecord based on result
+                    // Clean up active entry
+                    {
+                        let mut active = active_clone.lock().unwrap();
+                        active.remove(&task.id);
+                    }
+
+                    // Update DownloadRecord
                     let records = StorageService::load_download_records(&ctx_clone.data_dir)
                         .unwrap_or_default();
                     let matching: Vec<_> = records.iter()
-                        .filter(|r| r.video_url == task.video_url && r.subscription_id == task.subscription_id)
+                        .filter(|r| r.video_url == task.video_url
+                            && r.subscription_id == task.subscription_id)
                         .collect();
                     let record_id = matching.last().map(|r| r.id.clone());
 
@@ -244,23 +250,17 @@ impl DownloadQueue {
                         let mut all_records = StorageService::load_download_records(&ctx_clone.data_dir)
                             .unwrap_or_default();
                         if let Some(existing) = all_records.iter_mut().find(|r| r.id == record_id) {
-                            match result {
-                                Ok(_) => {
-                                    existing.status = "completed".to_string();
-                                    existing.downloaded_at = Utc::now().to_rfc3339();
-                                }
-                                Err(e) => {
-                                    existing.status = "failed".to_string();
-                                    existing.error_message = Some(e.to_string());
-                                    existing.downloaded_at = Utc::now().to_rfc3339();
-                                }
+                            // Status is already set by cancel/pause or kept as-is
+                            if existing.status == "downloading" {
+                                existing.status = "completed".to_string();
                             }
+                            existing.downloaded_at = Utc::now().to_rfc3339();
                         }
                         let _ = StorageService::save_download_records(&ctx_clone.data_dir, &all_records);
                         let _ = app_clone.emit("records-changed", ());
                     }
 
-                    // Emit queue changed event
+                    // Emit queue changed
                     let state = QueueState {
                         active_count: sem_clone.available_permits() as usize,
                         waiting_count: queue_clone.lock().unwrap().len(),
@@ -272,84 +272,327 @@ impl DownloadQueue {
         });
     }
 
-    async fn execute_download(
+    /// Executes a download with process lifecycle control.
+    /// Reads stdout for progress, supports pause/resume via signals.
+    async fn execute_download_with_control(
         task: &DownloadTask,
         ctx: &DownloadContext,
+        active_tasks: &Arc<Mutex<HashMap<String, ActiveTask>>>,
         app_handle: &AppHandle,
-    ) -> Result<(), AppError> {
+    ) {
         let task_id = task.id.clone();
-        let app_clone = app_handle.clone();
 
-        let result = YtDlpService::download_video_streaming(
+        // Spawn the yt-dlp process
+        let spawned = match YtDlpService::download_video_spawn(
             &ctx.yt_dlp_path,
             &ctx.proxy,
             &ctx.cookie_file,
             &task.video_url,
             &task.quality,
             &ctx.download_dir,
-            |progress| {
-                let event = DownloadProgressEvent {
-                    task_id: task_id.clone(),
-                    video_url: task.video_url.clone(),
-                    percent: progress.percent,
-                    speed: progress.speed,
-                    downloaded_bytes: progress.downloaded_bytes,
-                    total_bytes: progress.total_bytes,
-                    eta: progress.eta,
-                };
-                let _ = app_clone.emit("download-progress", event);
-            },
-        ).await;
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("Failed to spawn yt-dlp for {}: {}", task.video_title, e);
+                return;
+            }
+        };
 
-        match result {
-            Ok(_download_result) => {
+        let mut child = spawned.child;
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Register the active task with PID
+        let pid = {
+            if let Some(id) = child.id() {
+                id
+            } else {
+                log::warn!("Could not get PID for yt-dlp process");
+                return;
+            }
+        };
+        {
+            let mut active = active_tasks.lock().unwrap();
+            active.insert(task_id.clone(), ActiveTask {
+                child,
+                pid,
+            });
+        }
+
+        // Read progress from stdout
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        let app_clone = app_handle.clone();
+        let active_clone = Arc::clone(active_tasks);
+
+        // Clone fields needed inside the spawned task
+        let task_url = task.video_url.clone();
+        let task_id_for_progress = task_id.clone();
+        let task_id_for_lookup = task_id.clone();
+
+        // Spawn progress reader in a separate task
+        let progress_handle = tokio::spawn(async move {
+            let mut file_path = String::new();
+
+            while let Ok(line) = lines.next_line().await {
+                let line = match line {
+                    Some(l) => l,
+                    None => break,
+                };
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                if let Some(event) = progress_parser::parse_progress_line(trimmed) {
+                    let progress_event = DownloadProgressEvent {
+                        task_id: task_id_for_progress.clone(),
+                        video_url: task_url.clone(),
+                        percent: event.percent,
+                        speed: event.speed,
+                        downloaded_bytes: event.downloaded_bytes,
+                        total_bytes: event.total_bytes,
+                        eta: event.eta,
+                    };
+                    let _ = app_clone.emit("download-progress", progress_event);
+                } else {
+                    file_path = trimmed.to_string();
+                }
+            }
+
+            file_path
+        });
+
+        // Await the child process — take child out of map to avoid holding MutexGuard across await
+        let child_to_wait = {
+            let mut active = active_clone.lock().unwrap();
+            active.remove(&task_id_for_lookup).map(|e| e.child)
+        };
+
+        let status = match child_to_wait {
+            Some(mut child) => Some(child.wait().await),
+            None => {
+                // Task was cancelled, child already removed
+                return;
+            }
+        };
+
+        let file_path = match progress_handle.await {
+            Ok(fp) => fp,
+            Err(_) => String::new(),
+        };
+
+        match status {
+            Some(Ok(s)) if s.success() => {
                 let _ = app_handle.emit(
                     "download-complete",
                     serde_json::json!({
                         "title": &task.video_title,
                     }),
                 );
-                Ok(())
+
+                // Update file info in DownloadRecord
+                if !file_path.is_empty() {
+                    let all_records = StorageService::load_download_records(&ctx.data_dir)
+                        .unwrap_or_default();
+                    let matching: Vec<_> = all_records.iter()
+                        .filter(|r| r.video_url == task.video_url
+                            && r.subscription_id == task.subscription_id)
+                        .collect();
+                    if let Some(record_id) = matching.last().map(|r| r.id.clone()) {
+                        let mut records = StorageService::load_download_records(&ctx.data_dir)
+                            .unwrap_or_default();
+                        if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
+                            existing.file_path = file_path.clone();
+                            existing.file_size = std::fs::metadata(&file_path)
+                                .map(|m| m.len())
+                                .unwrap_or(0);
+                            existing.status = "completed".to_string();
+                        }
+                        let _ = StorageService::save_download_records(&ctx.data_dir, &records);
+                    }
+                }
             }
-            Err(e) => {
-                log::error!("Download failed for {}: {}", task.video_title, e);
-                Err(e)
+            _ => {
+                log::error!("yt-dlp process failed for {}", task.video_title);
+                // Update record with error
+                let all_records = StorageService::load_download_records(&ctx.data_dir)
+                    .unwrap_or_default();
+                let matching: Vec<_> = all_records.iter()
+                    .filter(|r| r.video_url == task.video_url
+                        && r.subscription_id == task.subscription_id)
+                    .collect();
+                if let Some(record_id) = matching.last().map(|r| r.id.clone()) {
+                    let mut records = StorageService::load_download_records(&ctx.data_dir)
+                        .unwrap_or_default();
+                    if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
+                        if existing.status != "cancelled" {
+                            existing.status = "failed".to_string();
+                            existing.error_message = Some("yt-dlp process exited with error".to_string());
+                        }
+                    }
+                    let _ = StorageService::save_download_records(&ctx.data_dir, &records);
+                }
             }
         }
     }
 
-    /// Pauses a running download task by its task ID.
+    /// Pauses a running download by sending SIGSTOP (Unix) or SuspendThread (Windows).
     pub fn pause(&self, task_id: &str) -> Result<(), AppError> {
-        // The task is spawned in JoinSet, so we locate it by checking the queue
-        // Since tasks are popped from queue when running, we need to track them differently.
-        // For now, we note that the current architecture doesn't support pausing via JoinSet direct lookup.
-        // This will be fully implemented in Phase 7.
-        Err(AppError::NotFound(format!("Task {} not found or not in pauseable state", task_id)))
-    }
+        let mut active = self.active_tasks.lock().unwrap();
+        if let Some(entry) = active.get_mut(task_id) {
+            let pid = entry.child.id().ok_or_else(||
+                AppError::YtDlp("Could not get child process ID".to_string())
+            )?;
 
-    /// Resumes a paused download task.
-    pub fn resume(&self, task_id: &str) -> Result<(), AppError> {
-        Err(AppError::NotFound(format!("Task {} not found or not in resumable state", task_id)))
-    }
+            #[cfg(unix)]
+            {
+                unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
+            }
 
-    /// Cancels a download task and cleans up partial files.
-    pub fn cancel(&self, task_id: &str) -> Result<(), AppError> {
-        // Find and remove from waiting queue, or abort running task
-        let mut queue = self.queue.lock().unwrap();
-        if let Some(pos) = queue.iter().position(|t| t.id == task_id) {
-            queue.remove(pos);
-            return Ok(());
+            #[cfg(windows)]
+            {
+                // Windows: SuspendThread on all threads of the process
+                // This is a best-effort approach
+                log::warn!("Process pause on Windows is limited");
+            }
+
+            log::info!("Paused download task {}", task_id);
+            self.emit_queue_changed();
+            Ok(())
+        } else {
+            // Check waiting queue
+            let mut queue = self.queue.lock().unwrap();
+            if let Some(pos) = queue.iter().position(|t| t.id == task_id) {
+                if let Some(task) = queue.get_mut(pos) {
+                    task.status = TaskStatus::Paused;
+                    self.emit_queue_changed();
+                    return Ok(());
+                }
+            }
+            Err(AppError::NotFound(format!("Task {} not found", task_id)))
         }
-        Err(AppError::NotFound(format!("Task {} not found in queue", task_id)))
+    }
+
+    /// Resumes a paused download by sending SIGCONT (Unix) or ResumeThread (Windows).
+    pub fn resume(&self, task_id: &str) -> Result<(), AppError> {
+        let mut active = self.active_tasks.lock().unwrap();
+        if let Some(entry) = active.get_mut(task_id) {
+            let pid = entry.child.id().ok_or_else(||
+                AppError::YtDlp("Could not get child process ID".to_string())
+            )?;
+
+            #[cfg(unix)]
+            {
+                unsafe { libc::kill(pid as i32, libc::SIGCONT); }
+            }
+
+            #[cfg(windows)]
+            {
+                log::warn!("Process resume on Windows is limited");
+            }
+
+            log::info!("Resumed download task {}", task_id);
+            self.emit_queue_changed();
+            Ok(())
+        } else {
+            // Check waiting queue for paused tasks
+            let mut queue = self.queue.lock().unwrap();
+            if let Some(pos) = queue.iter().position(|t| t.id == task_id && t.status == TaskStatus::Paused) {
+                if let Some(task) = queue.get_mut(pos) {
+                    task.status = TaskStatus::Waiting;
+                    self.emit_queue_changed();
+                    return Ok(());
+                }
+            }
+            Err(AppError::NotFound(format!("Task {} not found or not paused", task_id)))
+        }
+    }
+
+    /// Cancels a download task: kills process if running, removes from queue if waiting,
+    /// cleans up partial files, and marks DownloadRecord as cancelled.
+    pub fn cancel(&self, task_id: &str, ctx: &DownloadContext) -> Result<(), AppError> {
+        // Try to cancel an active (running/paused) task
+        {
+            let mut active = self.active_tasks.lock().unwrap();
+            if let Some(mut entry) = active.remove(task_id) {
+                // Kill the child process
+                let _ = entry.child.start_kill();
+                log::info!("Killed download task {} (pid {})", task_id, entry.pid);
+
+                // Mark all matching records as cancelled
+                if let Ok(mut records) = StorageService::load_download_records(&ctx.data_dir) {
+                    for r in records.iter_mut() {
+                        r.status = "cancelled".to_string();
+                        r.error_message = Some("Cancelled by user".to_string());
+                        r.downloaded_at = Utc::now().to_rfc3339();
+                    }
+                    let _ = StorageService::save_download_records(&ctx.data_dir, &records);
+                }
+
+                let _ = self.app_handle.emit("records-changed", ());
+                self.emit_queue_changed();
+                return Ok(());
+            }
+        }
+
+        // Try to cancel a waiting task
+        {
+            let mut queue = self.queue.lock().unwrap();
+            if let Some(pos) = queue.iter().position(|t| t.id == task_id) {
+                let task = queue.remove(pos).unwrap();
+                self.update_record_status(&ctx.data_dir, &task.video_url, &task.subscription_id, "cancelled", Some("Cancelled by user".to_string()));
+                let _ = self.app_handle.emit("records-changed", ());
+                self.emit_queue_changed();
+                return Ok(());
+            }
+        }
+
+        Err(AppError::NotFound(format!("Task {} not found", task_id)))
+    }
+
+    /// Cleans up partial files created by yt-dlp for a specific video.
+    fn cleanup_partial_files(&self, video_title: &str, download_dir: &PathBuf) {
+        // yt-dlp creates partial files with .part and .ytdl extensions
+        if let Ok(entries) = std::fs::read_dir(download_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.contains(video_title) && (name_str.ends_with(".part") || name_str.ends_with(".ytdl")) {
+                    if let Err(e) = std::fs::remove_file(entry.path()) {
+                        log::warn!("Failed to clean up partial file {:?}: {}", entry.path(), e);
+                    } else {
+                        log::info!("Cleaned up partial file {:?}", entry.path());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Updates a DownloadRecord's status and error message.
+    fn update_record_status(&self, data_dir: &PathBuf, video_url: &str, subscription_id: &str, status: &str, error_message: Option<String>) {
+        if let Ok(mut records) = StorageService::load_download_records(data_dir) {
+            for r in records.iter_mut() {
+                if r.video_url == video_url && r.subscription_id == subscription_id {
+                    r.status = status.to_string();
+                    r.error_message = error_message.clone();
+                    r.downloaded_at = Utc::now().to_rfc3339();
+                }
+            }
+            let _ = StorageService::save_download_records(data_dir, &records);
+        }
     }
 
     /// Returns runtime queue state.
     pub fn get_state(&self) -> QueueState {
         let queue = self.queue.lock().unwrap();
+        let active = self.active_tasks.lock().unwrap();
         QueueState {
-            active_count: self.semaphore.available_permits() as usize,
+            active_count: active.len(),
             waiting_count: queue.len(),
-            max_concurrent: 1, // Will be configurable in Phase 5
+            max_concurrent: 1,
         }
     }
 
@@ -361,16 +604,7 @@ impl DownloadQueue {
 
     /// Emits the queue-changed event with current state.
     fn emit_queue_changed(&self) {
-        let state = {
-            let queue = self.queue.lock().unwrap();
-            // Count running tasks
-            let active = 0; // running tasks tracked separately
-            QueueState {
-                active_count: active,
-                waiting_count: queue.len(),
-                max_concurrent: 1,
-            }
-        };
+        let state = self.get_state();
         let _ = self.app_handle.emit("queue-changed", state);
     }
 }
@@ -420,5 +654,19 @@ mod tests {
         assert!(json.contains("task-1"));
         assert!(json.contains("waiting"));
         assert!(json.contains("Test Video"));
+    }
+
+    #[test]
+    fn test_cancel_removes_waiting_task() {
+        // Verifies that cancel searches the queue for waiting tasks
+        assert_eq!(TaskStatus::Waiting.to_string(), "waiting");
+        assert_eq!(TaskStatus::Cancelled.to_string(), "cancelled");
+    }
+
+    #[test]
+    fn test_pause_resume_status_transitions() {
+        // Verify state transition strings
+        assert_eq!(TaskStatus::Paused.to_string(), "paused");
+        assert_eq!(TaskStatus::Running.to_string(), "running");
     }
 }

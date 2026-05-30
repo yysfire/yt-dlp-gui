@@ -420,6 +420,56 @@ pub async fn get_queue_state(
     }
 }
 
+/// Pauses a running download task by its task ID.
+#[tauri::command]
+pub async fn pause_download(
+    id: String,
+    queue_ctx: State<'_, QueueContext>,
+) -> Result<(), String> {
+    let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
+    match guard.as_ref() {
+        Some(q) => q.pause(&id).map_err(|e| e.to_string()),
+        None => Err("Download queue not initialized".to_string()),
+    }
+}
+
+/// Resumes a paused download task by its task ID.
+#[tauri::command]
+pub async fn resume_download(
+    id: String,
+    queue_ctx: State<'_, QueueContext>,
+) -> Result<(), String> {
+    let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
+    match guard.as_ref() {
+        Some(q) => q.resume(&id).map_err(|e| e.to_string()),
+        None => Err("Download queue not initialized".to_string()),
+    }
+}
+
+/// Cancels a download task and cleans up partial files.
+#[tauri::command]
+pub async fn cancel_download(
+    id: String,
+    queue_ctx: State<'_, QueueContext>,
+    state: State<'_, AppContext>,
+) -> Result<(), String> {
+    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+    let ctx = crate::services::download_queue::DownloadContext {
+        yt_dlp_path: settings.yt_dlp_path.clone(),
+        proxy: Some(settings.proxy_url.clone()),
+        cookie_file: Some(settings.cookie_file.clone()),
+        download_dir: std::path::PathBuf::from(&settings.download_dir),
+        data_dir: state.data_dir.clone(),
+    };
+    drop(settings);
+
+    let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
+    match guard.as_ref() {
+        Some(q) => q.cancel(&id, &ctx).map_err(|e| e.to_string()),
+        None => Err("Download queue not initialized".to_string()),
+    }
+}
+
 /// Manually triggers a full check of all subscriptions (same as check_all_subscriptions).
 /// This is the user-facing "Check All" action.
 #[tauri::command]

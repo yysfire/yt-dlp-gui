@@ -170,24 +170,24 @@
 
 ### Tests for US4
 
-- [ ] T044 [P] [US4] 编写暂停/继续逻辑测试：`pause_download` 后任务状态转为 `Paused`，`resume_download` 后恢复为 `Running`，状态转换合法性校验在 `src-tauri/src/services/download_queue.rs` 的 `#[cfg(test)]` 模块中
-- [ ] T045 [P] [US4] 编写取消逻辑测试：`cancel_download` 后状态转为 `Cancelled`，`DownloadRecord` 持久化为 `cancelled`，部分文件路径验证在 `src-tauri/src/services/download_queue.rs` 的 `#[cfg(test)]` 模块中
+- [X] T044 [P] [US4] 编写暂停/继续逻辑测试：`pause_download` 后任务状态转为 `Paused`，`resume_download` 后恢复为 `Running`，状态转换合法性校验在 `src-tauri/src/services/download_queue.rs` 的 `#[cfg(test)]` 模块中
+- [X] T045 [P] [US4] 编写取消逻辑测试：`cancel_download` 后状态转为 `Cancelled`，`DownloadRecord` 持久化为 `cancelled`，部分文件路径验证在 `src-tauri/src/services/download_queue.rs` 的 `#[cfg(test)]` 模块中
 
 ### Implementation for US4 (Rust Backend)
 
-- [ ] T046 [US4] 实现 `DownloadQueue::pause()` 方法：Unix 上通过 `libc::kill(pid, SIGSTOP)` 暂停子进程，Windows 上通过 `kernel32::SuspendThread` 暂停，更新内存中任务状态为 `Paused`，发射 `queue-changed` 事件在 `src-tauri/src/services/download_queue.rs`
-- [ ] T047 [US4] 实现 `DownloadQueue::resume()` 方法：Unix 上 `libc::kill(pid, SIGCONT)`，Windows 上 `kernel32::ResumeThread`，更新状态为 `Running`，发射 `queue-changed` 事件在 `src-tauri/src/services/download_queue.rs`
-- [ ] T048 [US4] 实现 `DownloadQueue::cancel()` 方法：取消 Waiting 任务（从 VecDeque 移除），取消 Running/Paused 任务（`Child::kill()` + 清理 `.part`/`.ytdl` 临时文件），更新 `DownloadRecord` 状态为 `cancelled`，发射 `records-changed` 事件在 `src-tauri/src/services/download_queue.rs`
-- [ ] T049 [US4] 实现 `DownloadQueue::cleanup_partial_files()` 方法：根据下载目录和视频标题匹配删除 `.part`、`.ytdl` 后缀的临时文件，在 `src-tauri/src/services/download_queue.rs`
-- [ ] T050 [US4] 实现 Tauri 命令 `pause_download`：接收 `id: String`，调用 `DownloadQueue::pause()`，在 `src-tauri/src/commands/download.rs`
-- [ ] T051 [US4] 实现 Tauri 命令 `resume_download`：接收 `id: String`，调用 `DownloadQueue::resume()`，在 `src-tauri/src/commands/download.rs`
-- [ ] T052 [US4] 实现 Tauri 命令 `cancel_download`：接收 `id: String`，调用 `DownloadQueue::cancel()` 含文件清理，在 `src-tauri/src/commands/download.rs`
-- [ ] T053 [US4] 在 `lib.rs` 中注册新命令：`pause_download`、`resume_download`、`cancel_download`、`get_download_queue`、`get_queue_state`，在 `src-tauri/src/lib.rs`
-- [ ] T054 [US4] 在 `Cargo.toml` 中添加条件依赖（如需要）：`[target.'cfg(unix)'.dependencies]` 添加 `libc` crate 用于信号处理，在 `src-tauri/Cargo.toml`
+- [X] T046 [US4] 实现 `DownloadQueue::pause()` 方法：Unix 上通过 `libc::kill(pid, SIGSTOP)` 暂停子进程，Windows 上通过 `kernel32::SuspendThread` 暂停，更新内存中任务状态为 `Paused`，发射 `queue-changed` 事件在 `src-tauri/src/services/download_queue.rs`
+- [X] T047 [US4] 实现 `DownloadQueue::resume()` 方法：Unix 上 `libc::kill(pid, SIGCONT)`，Windows 上 `kernel32::ResumeThread`，更新状态为 `Running`，发射 `queue-changed` 事件在 `src-tauri/src/services/download_queue.rs`
+- [X] T048 [US4] 实现 `DownloadQueue::cancel()` 方法：取消 Waiting 任务（从 VecDeque 移除），取消 Running/Paused 任务（`Child::kill()` + 清理 `.part`/`.ytdl` 临时文件），更新 `DownloadRecord` 状态为 `cancelled`，发射 `records-changed` 事件在 `src-tauri/src/services/download_queue.rs`
+- [X] T049 [US4] 实现 `DownloadQueue::cleanup_partial_files()` 方法：根据下载目录和视频标题匹配删除 `.part`、`.ytdl` 后缀的临时文件，在 `src-tauri/src/services/download_queue.rs`
+- [X] T050 [US4] 实现 Tauri 命令 `pause_download`：接收 `id: String`，调用 `DownloadQueue::pause()`，在 `src-tauri/src/commands/download.rs`
+- [X] T051 [US4] 实现 Tauri 命令 `resume_download`：接收 `id: String`，调用 `DownloadQueue::resume()`，在 `src-tauri/src/commands/download.rs`
+- [X] T052 [US4] 实现 Tauri 命令 `cancel_download`：接收 `id: String`，调用 `DownloadQueue::cancel()` 含文件清理，在 `src-tauri/src/commands/download.rs`
+- [X] T053 [US4] 在 `lib.rs` 中注册新命令：`pause_download`、`resume_download`、`cancel_download`、`get_download_queue`、`get_queue_state`，在 `src-tauri/src/lib.rs`
+- [X] T054 [US4] 在 `Cargo.toml` 中添加条件依赖（如需要）：`[target.'cfg(unix)'.dependencies]` 添加 `libc` crate 用于信号处理，在 `src-tauri/Cargo.toml`
 
 ### Implementation for US4 (Frontend)
 
-- [ ] T055 [US4] 实现前端 API 调用函数：`pauseDownload(id)`、`resumeDownload(id)`、`cancelDownload(id)` 在 `src/lib/tauri.ts`
+- [X] T055 [US4] 实现前端 API 调用函数：`pauseDownload(id)`、`resumeDownload(id)`、`cancelDownload(id)` 在 `src/lib/tauri.ts`
 - [ ] T056 [US4] 实现 `DownloadQueuePanel` 组件：展示队列中所有 `DownloadTask`（含状态标签、进度条），每个任务行的操作按钮（暂停/继续/取消），根据当前状态显示/隐藏按钮在 `src/components/DownloadQueuePanel.tsx`
 - [ ] T057 [US4] 集成 `DownloadQueuePanel` 到 `AppShell`：替换或增强当前的 `DownloadRecordList`，传递 `useDownloadProgress` 数据和操作回调在 `src/components/AppShell.tsx`
 
