@@ -120,7 +120,7 @@ export default function SubscriptionItem({
             <Select
               value={subscription.group_name || "未分组"}
               onChange={(e) => {
-                onUpdateGroup(subscription.id, e.target.value === "未分组" ? "" : e.target.value);
+                onUpdateGroup(subscription.id, e.target.value);
                 setEditingGroup(false);
               }}
               onBlur={() => setEditingGroup(false)}
