@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::models::Subscription;
 use crate::services::{StorageService, YtDlpService};
@@ -181,7 +181,6 @@ pub async fn update_subscription_group(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::models::subscription::Subscription;
     use crate::services::StorageService;
     use tempfile::TempDir;
