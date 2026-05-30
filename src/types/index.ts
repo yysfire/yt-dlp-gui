@@ -50,3 +50,7 @@ export interface AppState {
   last_check_time: string | null;
   total_downloads: number;
 }
+
+/** Predefined subscription groups. */
+export const GROUPS = ["未分组", "学习", "娱乐", "音乐", "科技", "其他"] as const;
+export type GroupName = typeof GROUPS[number];

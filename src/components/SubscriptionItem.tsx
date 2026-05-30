@@ -22,8 +22,8 @@ import {
   Language as OtherIcon,
 } from "@mui/icons-material";
 import type { Subscription } from "@/types";
+import { GROUPS } from "@/types";
 
-const GROUPS = ["未分组", "学习", "娱乐", "音乐", "科技", "其他"];
 
 interface SubscriptionItemProps {
   subscription: Subscription;

@@ -18,9 +18,10 @@ import {
   FileUpload as ImportIcon,
 } from "@mui/icons-material";
 import type { Subscription } from "@/types";
+import { GROUPS } from "@/types";
 import SubscriptionItem from "./SubscriptionItem";
 
-const GROUPS = ["全部", "未分组", "学习", "娱乐", "音乐", "科技", "其他"];
+const ALL_GROUPS = ["全部", ...GROUPS];
 
 interface SubscriptionListProps {
   subscriptions: Subscription[];
@@ -85,7 +86,7 @@ export default function SubscriptionList({
             displayEmpty
             sx={{ fontSize: "0.75rem" }}
           >
-            {GROUPS.map((g) => (
+            {ALL_GROUPS.map((g) => (
               <MenuItem key={g} value={g} dense sx={{ fontSize: "0.75rem" }}>
                 {g}
               </MenuItem>
