@@ -144,19 +144,19 @@
 
 ### Tests for US3
 
-- [ ] T037 [P] [US3] 编写流式下载测试：构造 `yt-dlp --progress-template` 输出模拟管道，验证 `LineStream` 行级解析和 `parse_progress_line()` 返回正确 `ProgressEvent` 在 `src-tauri/src/services/ytdlp.rs` 的 `#[cfg(test)]` 模块中
+- [X] T037 [P] [US3] 编写流式下载测试：构造 `yt-dlp --progress-template` 输出模拟管道，验证 `LineStream` 行级解析和 `parse_progress_line()` 返回正确 `ProgressEvent` 在 `src-tauri/src/services/ytdlp.rs` 的 `#[cfg(test)]` 模块中
 
 ### Implementation for US3 (Rust Backend)
 
-- [ ] T038 [US3] 实现 `YtDlpService::download_video_streaming()`：使用 `tokio::process::Command` 替代 `std::process::Command`，添加 `--progress-template` 参数，通过 `stdout` pipe 行级读取进度输出，在 `src-tauri/src/services/ytdlp.rs`
-- [ ] T039 [US3] 在 `DownloadQueue::start()` 中替换下载调用：使用 `download_video_streaming()` 替代 `download_video()`，解析进度行并通过 `app_handle.emit("download-progress", ...)` 推送 `ProgressEvent`，在 `src-tauri/src/services/download_queue.rs`
-- [ ] T040 [US3] 新增 Tauri Event `download-progress` payload 类型定义：`DownloadProgressEvent { task_id, percent, speed, downloaded_bytes, total_bytes, eta }`，在 `src-tauri/src/services/download_queue.rs` 或单独模块
+- [X] T038 [US3] 实现 `YtDlpService::download_video_streaming()`：使用 `tokio::process::Command` 替代 `std::process::Command`，添加 `--progress-template` 参数，通过 `stdout` pipe 行级读取进度输出，在 `src-tauri/src/services/ytdlp.rs`
+- [X] T039 [US3] 在 `DownloadQueue::start()` 中替换下载调用：使用 `download_video_streaming()` 替代 `download_video()`，解析进度行并通过 `app_handle.emit("download-progress", ...)` 推送 `ProgressEvent`，在 `src-tauri/src/services/download_queue.rs`
+- [X] T040 [US3] 新增 Tauri Event `download-progress` payload 类型定义：`DownloadProgressEvent { task_id, percent, speed, downloaded_bytes, total_bytes, eta }`，在 `src-tauri/src/services/download_queue.rs` 或单独模块
 
 ### Implementation for US3 (Frontend)
 
-- [ ] T041 [US3] 实现 `useDownloadProgress` hook：监听 `download-progress` 事件，维护 `Map<taskId, DownloadProgress>` 状态，提供 `getProgress(taskId)` 方法，在 `src/hooks/useDownloadProgress.ts`
-- [ ] T042 [US3] 实现 `DownloadProgressBar` 组件：显示进度条（`LinearProgress`）、百分比、速度、已下载/总大小、ETA，接收 `DownloadProgress` props，在 `src/components/DownloadProgressBar.tsx`
-- [ ] T043 [US3] 更新 `App.tsx`：添加 `download-progress` 事件监听，传递 progress 数据到 `AppShell`，在 `src/App.tsx`
+- [X] T041 [US3] 实现 `useDownloadProgress` hook：监听 `download-progress` 事件，维护 `Map<taskId, DownloadProgress>` 状态，提供 `getProgress(taskId)` 方法，在 `src/hooks/useDownloadProgress.ts`
+- [X] T042 [US3] 实现 `DownloadProgressBar` 组件：显示进度条（`LinearProgress`）、百分比、速度、已下载/总大小、ETA，接收 `DownloadProgress` props，在 `src/components/DownloadProgressBar.tsx`
+- [X] T043 [US3] 更新 `App.tsx`：添加 `download-progress` 事件监听，传递 progress 数据到 `AppShell`，在 `src/App.tsx`
 
 **Checkpoint**: US3 独立可测 — 下载过程中进度条实时更新，百分比/速度/大小/ETA 可见
 

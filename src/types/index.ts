@@ -32,6 +32,7 @@ export type TaskStatus = "waiting" | "running" | "paused" | "completed" | "faile
 /** Real-time download progress */
 export interface DownloadProgress {
   task_id: string;
+  video_url: string;
   percent: number;
   speed: string;
   downloaded_bytes: number;

@@ -7,6 +7,7 @@ import {
 import { listen } from "@tauri-apps/api/event";
 import { useSubscriptions } from "@/hooks/useSubscriptions";
 import { useDownloadRecords } from "@/hooks/useDownloadRecords";
+import { useDownloadProgress } from "@/hooks/useDownloadProgress";
 import AppShell from "@/components/AppShell";
 import * as api from "@/lib/tauri";
 import type { AppSettings } from "@/types";
@@ -89,6 +90,8 @@ export default function App() {
     checkAll,
     refresh: refreshRecords,
   } = useDownloadRecords();
+
+  const { progressMap } = useDownloadProgress();
 
   // Load dark mode preference from settings on mount
   useEffect(() => {
@@ -188,6 +191,7 @@ export default function App() {
           await checkAll();
         }}
         onUpdateGroup={updateGroup}
+        progressMap={progressMap}
       />
     </ThemeProvider>
   );

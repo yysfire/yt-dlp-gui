@@ -1,7 +1,10 @@
 use std::path::Path;
 use std::process::Command;
 
+use tokio::io::{AsyncBufReadExt, BufReader};
+
 use crate::utils::AppError;
+use crate::utils::progress_parser::{self, ProgressEvent};
 
 /// Information returned when parsing a channel/playlist page.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -233,6 +236,134 @@ impl YtDlpService {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let file_path = stdout.lines().last().unwrap_or("").trim().to_string();
+
+        if file_path.is_empty() {
+            return Err(AppError::YtDlp(
+                "yt-dlp completed but no output file path was returned".to_string(),
+            ));
+        }
+
+        let file_size = std::fs::metadata(&file_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        Ok(DownloadResult {
+            file_path,
+            file_size,
+        })
+    }
+
+    /// Downloads a single video with real-time progress streaming.
+    ///
+    /// Uses `tokio::process::Command` for async execution and `--progress-template`
+    /// to output structured progress lines. The `on_progress` callback is called
+    /// for each progress line parsed from stdout.
+    ///
+    /// Progress template format: `percent|speed|downloaded_bytes|total_bytes|eta`
+    pub async fn download_video_streaming(
+        yt_dlp_path: &str,
+        proxy: &Option<String>,
+        cookie_file: &Option<String>,
+        url: &str,
+        quality: &str,
+        output_dir: &Path,
+        on_progress: impl Fn(ProgressEvent),
+    ) -> Result<DownloadResult, AppError> {
+        // Ensure output directory exists
+        std::fs::create_dir_all(output_dir)?;
+
+        let output_template = output_dir.join("%(title)s.%(ext)s");
+
+        let mut cmd = tokio::process::Command::new(yt_dlp_path);
+
+        // Build format string based on quality preset
+        let format_str = match quality {
+            "best" => "best".to_string(),
+            "2160p" => "bestvideo[height<=2160]+bestaudio/best[height<=2160]".to_string(),
+            "1440p" => "bestvideo[height<=1440]+bestaudio/best[height<=1440]".to_string(),
+            "720p" => "bestvideo[height<=720]+bestaudio/best[height<=720]".to_string(),
+            "480p" => "bestvideo[height<=480]+bestaudio/best[height<=480]".to_string(),
+            _ => "bestvideo[height<=1080]+bestaudio/best[height<=1080]".to_string(),
+        };
+
+        cmd.args([
+            "-f", &format_str,
+            "-o", &output_template.to_string_lossy(),
+            "--no-playlist",
+            "--progress-template",
+            "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_estimate)s|%(progress._eta_str)s",
+            "--print", "after_move:filepath",
+            url,
+        ]);
+
+        if let Some(ref proxy_url) = proxy {
+            if !proxy_url.is_empty() {
+                cmd.arg("--proxy").arg(proxy_url);
+            }
+        }
+
+        if let Some(ref cf) = cookie_file {
+            if !cf.is_empty() {
+                cmd.arg("--cookies").arg(cf);
+            }
+        }
+
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| AppError::YtDlp(format!(
+            "Failed to execute yt-dlp: {}",
+            e
+        )))?;
+
+        let stdout = child.stdout.take().ok_or_else(|| AppError::YtDlp(
+            "Failed to capture yt-dlp stdout".to_string(),
+        ))?;
+        let stderr = child.stderr.take();
+
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+
+        let mut file_path = String::new();
+
+        // Read stdout line by line
+        while let Ok(Some(line)) = lines.next_line().await {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Try parsing as progress event first
+            if let Some(event) = progress_parser::parse_progress_line(trimmed) {
+                on_progress(event);
+            } else {
+                // Not a progress line — could be the file path output
+                file_path = trimmed.to_string();
+            }
+        }
+
+        // Await child process completion
+        let status = child.wait().await.map_err(|e| AppError::YtDlp(format!(
+            "Failed to wait for yt-dlp process: {}",
+            e
+        )))?;
+
+        if !status.success() {
+            let mut error_msg = String::new();
+            if let Some(stderr_pipe) = stderr {
+                let mut stderr_reader = BufReader::new(stderr_pipe);
+                let mut buf = String::new();
+                while let Ok(n) = stderr_reader.read_line(&mut buf).await {
+                    if n == 0 { break; }
+                    error_msg.push_str(&buf);
+                    buf.clear();
+                }
+            }
+            return Err(AppError::YtDlp(format!(
+                "yt-dlp download failed: {}",
+                error_msg.trim()
+            )));
+        }
 
         if file_path.is_empty() {
             return Err(AppError::YtDlp(
@@ -493,5 +624,30 @@ mod tests {
         let cookie_file: Option<String> = Some("/path/to/cookies.txt".to_string());
         let should_add = cookie_file.as_ref().map_or(false, |c| !c.is_empty());
         assert!(should_add, "cookies arg should be added when cookie_file is non-empty");
+    }
+
+    // ── Progress parsing tests (T037) ──────────────────────────────
+
+    #[test]
+    fn test_progress_line_parsing_via_parser() {
+        use crate::utils::progress_parser::parse_progress_line;
+
+        // Normal progress line (5 parts: percent|speed|downloaded|total|eta)
+        let line = "45.2|2.3MiB/s|125800000|278400000|00:02:15";
+        let result = parse_progress_line(line).expect("should parse normal progress");
+        assert!((result.percent - 45.2).abs() < 0.01);
+        assert_eq!(result.speed, "2.3MiB/s");
+        assert_eq!(result.downloaded_bytes, 125800000);
+        assert_eq!(result.total_bytes, 278400000);
+        assert_eq!(result.eta, "00:02:15");
+
+        // Completed progress
+        let line = "100.0|0.0KiB/s|0|0|00:00:00";
+        let result = parse_progress_line(line).expect("should parse complete");
+        assert!((result.percent - 100.0).abs() < 0.01);
+
+        // Unknown format (should fail gracefully)
+        assert!(parse_progress_line("not a progress line").is_none());
+        assert!(parse_progress_line("").is_none());
     }
 }

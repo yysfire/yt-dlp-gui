@@ -10,10 +10,12 @@ import {
   Error as FailedIcon,
   InsertDriveFile as FileIcon,
 } from "@mui/icons-material";
-import type { DownloadRecord } from "@/types";
+import type { DownloadRecord, DownloadProgress } from "@/types";
+import DownloadProgressBar from "./DownloadProgressBar";
 
 interface DownloadRecordItemProps {
   record: DownloadRecord;
+  progress?: DownloadProgress | null;
 }
 
 /** Formats a file size in bytes to a human-readable string. */
@@ -47,6 +49,7 @@ function formatDate(iso: string): string {
 /** Single download record row with status icon and metadata. */
 export default function DownloadRecordItem({
   record,
+  progress,
 }: DownloadRecordItemProps) {
   const statusIcon = () => {
     switch (record.status) {
@@ -119,6 +122,9 @@ export default function DownloadRecordItem({
         }
         sx={{ my: 0 }}
       />
+      {record.status === "downloading" && progress && (
+        <DownloadProgressBar progress={progress} status="downloading" />
+      )}
     </ListItem>
   );
 }

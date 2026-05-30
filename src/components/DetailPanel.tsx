@@ -1,11 +1,12 @@
 import { Box, Typography, Avatar, Chip, Alert } from "@mui/material";
-import type { Subscription, DownloadRecord } from "@/types";
+import type { Subscription, DownloadRecord, DownloadProgress } from "@/types";
 import DownloadRecordList from "./DownloadRecordList";
 
 interface DetailPanelProps {
   subscription: Subscription | null;
   records: DownloadRecord[];
   error?: string | null;
+  progressMap?: Map<string, DownloadProgress>;
 }
 
 /** Right-side detail panel showing channel info and download records. */
@@ -13,6 +14,7 @@ export default function DetailPanel({
   subscription,
   records,
   error,
+  progressMap,
 }: DetailPanelProps) {
   if (!subscription) {
     return (
@@ -97,7 +99,7 @@ export default function DetailPanel({
             {error}
           </Alert>
         )}
-        <DownloadRecordList records={records} />
+        <DownloadRecordList records={records} progressMap={progressMap} />
       </div>
     </div>
   );

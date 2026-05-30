@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { Subscription, DownloadRecord } from "@/types";
+import type { Subscription, DownloadRecord, DownloadProgress } from "@/types";
 import TopBar from "./TopBar";
 import StatusBar from "./StatusBar";
 import SubscriptionList from "./SubscriptionList";
@@ -24,6 +24,7 @@ interface AppShellProps {
   onCheckSubscription: (id: string) => Promise<void>;
   onManualCheckAll: () => Promise<void>;
   onUpdateGroup: (id: string, groupName: string) => Promise<void>;
+  progressMap?: Map<string, DownloadProgress>;
 }
 
 /**
@@ -44,6 +45,7 @@ export default function AppShell({
   onCheckSubscription,
   onManualCheckAll,
   onUpdateGroup,
+  progressMap,
 }: AppShellProps) {
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -97,6 +99,7 @@ export default function AppShell({
               subscription={selectedSub}
               records={filteredRecords}
               error={recordsError}
+              progressMap={progressMap}
             />
           </div>
           <StatusBar />

@@ -62,6 +62,18 @@ pub struct ProgressInfo {
     pub eta: String,
 }
 
+/// Progress event emitted to the frontend during downloads.
+#[derive(Debug, Clone, Serialize)]
+pub struct DownloadProgressEvent {
+    pub task_id: String,
+    pub video_url: String,
+    pub percent: f32,
+    pub speed: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+    pub eta: String,
+}
+
 /// Runtime state of the download queue.
 #[derive(Debug, Clone, Serialize)]
 pub struct QueueState {
@@ -265,20 +277,32 @@ impl DownloadQueue {
         ctx: &DownloadContext,
         app_handle: &AppHandle,
     ) -> Result<(), AppError> {
-        // Call the existing download_video function
-        let result = YtDlpService::download_video(
+        let task_id = task.id.clone();
+        let app_clone = app_handle.clone();
+
+        let result = YtDlpService::download_video_streaming(
             &ctx.yt_dlp_path,
             &ctx.proxy,
             &ctx.cookie_file,
             &task.video_url,
             &task.quality,
             &ctx.download_dir,
-        );
+            |progress| {
+                let event = DownloadProgressEvent {
+                    task_id: task_id.clone(),
+                    video_url: task.video_url.clone(),
+                    percent: progress.percent,
+                    speed: progress.speed,
+                    downloaded_bytes: progress.downloaded_bytes,
+                    total_bytes: progress.total_bytes,
+                    eta: progress.eta,
+                };
+                let _ = app_clone.emit("download-progress", event);
+            },
+        ).await;
 
         match result {
             Ok(_download_result) => {
-                // Send desktop notification if enabled
-                // (simplified — similar to check_and_download logic)
                 let _ = app_handle.emit(
                     "download-complete",
                     serde_json::json!({

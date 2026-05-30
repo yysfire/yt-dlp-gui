@@ -1,14 +1,16 @@
 import { List, Typography, Box } from "@mui/material";
-import type { DownloadRecord } from "@/types";
+import type { DownloadRecord, DownloadProgress } from "@/types";
 import DownloadRecordItem from "./DownloadRecordItem";
 
 interface DownloadRecordListProps {
   records: DownloadRecord[];
+  progressMap?: Map<string, DownloadProgress>;
 }
 
 /** Scrollable list of download records for a subscription. */
 export default function DownloadRecordList({
   records,
+  progressMap,
 }: DownloadRecordListProps) {
   const sorted = [...records].sort(
     (a, b) =>
@@ -29,7 +31,11 @@ export default function DownloadRecordList({
   return (
     <List disablePadding dense>
       {sorted.map((record) => (
-        <DownloadRecordItem key={record.id} record={record} />
+        <DownloadRecordItem
+          key={record.id}
+          record={record}
+          progress={progressMap?.get(record.video_url) ?? null}
+        />
       ))}
     </List>
   );
