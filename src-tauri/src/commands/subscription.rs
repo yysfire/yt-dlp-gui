@@ -1,4 +1,4 @@
-use tauri::{Manager, State};
+use tauri::State;
 
 use crate::models::Subscription;
 use crate::services::{StorageService, YtDlpService};
@@ -154,11 +154,10 @@ pub async fn update_subscription_quality(
 /// Validates the group name against the predefined valid groups.
 #[tauri::command]
 pub async fn update_subscription_group(
-    app: tauri::AppHandle,
     id: String,
     group_name: String,
+    state: State<'_, AppContext>,
 ) -> Result<Subscription, String> {
-    let ctx = app.state::<crate::AppContext>();
     let valid_groups = ["未分组", "学习", "娱乐", "音乐", "科技", "其他"];
     if !valid_groups.contains(&group_name.as_str()) {
         return Err(format!(
@@ -167,7 +166,7 @@ pub async fn update_subscription_group(
             valid_groups.join("、")
         ));
     }
-    let mut subs = StorageService::load_subscriptions(&ctx.data_dir)
+    let mut subs = StorageService::load_subscriptions(&state.data_dir)
         .map_err(|e| e.to_string())?;
     let sub = subs
         .iter_mut()
@@ -175,7 +174,7 @@ pub async fn update_subscription_group(
         .ok_or_else(|| format!("订阅不存在: {}", id))?;
     sub.group_name = group_name.clone();
     let updated = sub.clone();
-    StorageService::save_subscriptions(&ctx.data_dir, &subs)
+    StorageService::save_subscriptions(&state.data_dir, &subs)
         .map_err(|e| e.to_string())?;
     Ok(updated)
 }
