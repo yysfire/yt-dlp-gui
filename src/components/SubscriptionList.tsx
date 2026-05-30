@@ -58,7 +58,7 @@ export default function SubscriptionList({
 
   const filteredSubscriptions = useMemo(() => {
     if (groupFilter === "全部") return subscriptions;
-    if (groupFilter === "未分组") return subscriptions.filter((s) => !s.group_name);
+    if (groupFilter === "未分组") return subscriptions.filter((s) => s.group_name === "未分组");
     return subscriptions.filter((s) => s.group_name === groupFilter);
   }, [subscriptions, groupFilter]);
 
