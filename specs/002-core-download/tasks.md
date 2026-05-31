@@ -188,8 +188,8 @@
 ### Implementation for US4 (Frontend)
 
 - [X] T055 [US4] 实现前端 API 调用函数：`pauseDownload(id)`、`resumeDownload(id)`、`cancelDownload(id)` 在 `src/lib/tauri.ts`
-- [ ] T056 [US4] 实现 `DownloadQueuePanel` 组件：展示队列中所有 `DownloadTask`（含状态标签、进度条），每个任务行的操作按钮（暂停/继续/取消），根据当前状态显示/隐藏按钮在 `src/components/DownloadQueuePanel.tsx`
-- [ ] T057 [US4] 集成 `DownloadQueuePanel` 到 `AppShell`：替换或增强当前的 `DownloadRecordList`，传递 `useDownloadProgress` 数据和操作回调在 `src/components/AppShell.tsx`
+- [X] T056 [US4] 实现 `DownloadQueuePanel` 组件：展示队列中所有 `DownloadTask`（含状态标签、进度条），每个任务行的操作按钮（暂停/继续/取消），根据当前状态显示/隐藏按钮在 `src/components/DownloadQueuePanel.tsx`
+- [X] T057 [US4] 集成 `DownloadQueuePanel` 到 `AppShell`：替换或增强当前的 `DownloadRecordList`，传递 `useDownloadProgress` 数据和操作回调在 `src/components/AppShell.tsx`
 
 **Checkpoint**: US4 独立可测 — 暂停/继续/取消操作正常，文件清理正确，UI 状态联动
 

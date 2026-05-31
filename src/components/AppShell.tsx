@@ -8,6 +8,7 @@ import DetailPanel from "./DetailPanel";
 import SettingsDialog from "./SettingsDialog";
 import ExportDialog from "./ExportDialog";
 import ImportDialog from "./ImportDialog";
+import DownloadQueuePanel from "./DownloadQueuePanel";
 
 interface AppShellProps {
   subscriptions: Subscription[];
@@ -103,6 +104,7 @@ export default function AppShell({
             />
           </div>
           <StatusBar />
+              <DownloadQueuePanel />
         </div>
       </div>
 
