@@ -98,6 +98,7 @@ pub struct DownloadContext {
 struct ActiveTask {
     child: tokio::process::Child,
     pid: u32,
+    task: DownloadTask,
 }
 
 /// FIFO download queue with concurrency control and process lifecycle management.
@@ -318,6 +319,7 @@ impl DownloadQueue {
             active.insert(task_id.clone(), ActiveTask {
                 child,
                 pid,
+                task: task.clone(),
             });
         }
 
@@ -596,10 +598,18 @@ impl DownloadQueue {
         }
     }
 
-    /// Returns all tasks currently in the queue.
+    /// Returns all tasks currently in the queue (waiting + active).
     pub fn get_tasks(&self) -> Vec<DownloadTask> {
         let queue = self.queue.lock().unwrap();
-        queue.iter().cloned().collect()
+        let mut tasks: Vec<DownloadTask> = queue.iter().cloned().collect();
+
+        // Include active tasks
+        let active = self.active_tasks.lock().unwrap();
+        for entry in active.values() {
+            tasks.push(entry.task.clone());
+        }
+
+        tasks
     }
 
     /// Emits the queue-changed event with current state.
