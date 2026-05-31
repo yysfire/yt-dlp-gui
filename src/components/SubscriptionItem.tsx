@@ -75,6 +75,7 @@ export default function SubscriptionItem({
         onClick={onSelect}
         sx={{
           opacity: subscription.paused ? 0.55 : 1,
+          pr: 6, // leave room for the More button
           "&.Mui-selected": {
             bgcolor: "primary.50",
           },
@@ -103,7 +104,7 @@ export default function SubscriptionItem({
               </Typography>
             </span>
           }
-          sx={{ my: 0 }}
+          sx={{ my: 0, overflow: "hidden" }}
         />
 
         {subscription.paused && (
@@ -111,12 +112,12 @@ export default function SubscriptionItem({
             label="已暂停"
             size="small"
             variant="outlined"
-            sx={{ mr: 1, height: 20, fontSize: "0.65rem" }}
+            sx={{ mr: 0.5, height: 20, fontSize: "0.65rem", flexShrink: 0 }}
           />
         )}
 
         {editingGroup ? (
-          <FormControl size="small" sx={{ minWidth: 72 }} onClick={(e) => e.stopPropagation()}>
+          <FormControl size="small" sx={{ minWidth: 72, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
             <Select
               value={subscription.group_name || "未分组"}
               open={editingGroup}
@@ -140,7 +141,7 @@ export default function SubscriptionItem({
             label={subscription.group_name || "未分组"}
             size="small"
             variant="outlined"
-            sx={{ mr: 1, height: 20, fontSize: "0.65rem", cursor: "pointer" }}
+            sx={{ mr: 0.5, height: 20, fontSize: "0.65rem", cursor: "pointer", flexShrink: 0 }}
             onClick={(e) => {
               e.stopPropagation();
               setEditingGroup(true);

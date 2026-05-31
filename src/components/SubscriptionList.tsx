@@ -68,41 +68,42 @@ export default function SubscriptionList({
       {/* Toolbar */}
       <Box
         sx={{
-          display: "flex",
-          alignItems: "center",
           px: 1.5,
           py: 0.5,
           borderBottom: 1,
           borderColor: "divider",
         }}
       >
-        <Typography variant="body2" fontWeight={600} sx={{ flexGrow: 1 }}>
+        {/* Title row */}
+        <Typography variant="body2" fontWeight={600} textAlign="center">
           订阅列表
         </Typography>
-        <FormControl size="small" sx={{ minWidth: 80, mr: 0.5 }}>
-          <Select
-            value={groupFilter}
-            onChange={(e) => setGroupFilter(e.target.value)}
-            displayEmpty
-            sx={{ fontSize: "0.75rem" }}
-          >
-            {ALL_GROUPS.map((g) => (
-              <MenuItem key={g} value={g} dense sx={{ fontSize: "0.75rem" }}>
-                {g}
-              </MenuItem>
-            ))}
-          </Select>
-        </FormControl>
-        <Tooltip title="导入">
-          <IconButton size="small" onClick={onOpenImport}>
-            <ImportIcon fontSize="small" />
-          </IconButton>
-        </Tooltip>
-        <Tooltip title="导出">
-          <IconButton size="small" onClick={onOpenExport}>
-            <ExportIcon fontSize="small" />
-          </IconButton>
-        </Tooltip>
+        {/* Controls row */}
+        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", mt: 0.5 }}>
+          <FormControl size="small" sx={{ minWidth: 80, mr: 0.5 }}>
+            <Select
+              value={groupFilter}
+              onChange={(e) => setGroupFilter(e.target.value)}
+              displayEmpty
+              sx={{ fontSize: "0.75rem" }}
+            >
+              {ALL_GROUPS.map((g) => (
+                <MenuItem key={g} value={g} dense sx={{ fontSize: "0.75rem" }}>
+                  {g}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <Tooltip title="导入">
+            <IconButton size="small" onClick={onOpenImport}>
+              <ImportIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="导出">
+            <IconButton size="small" onClick={onOpenExport}>
+              <ExportIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
         <Tooltip title="检查全部">
           <IconButton size="small" onClick={onManualCheckAll}>
             <CheckAllIcon fontSize="small" />
@@ -113,6 +114,7 @@ export default function SubscriptionList({
             <RefreshIcon fontSize="small" />
           </IconButton>
         </Tooltip>
+        </Box>
       </Box>
 
       {/* Content */}
