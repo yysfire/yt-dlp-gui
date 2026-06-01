@@ -120,11 +120,10 @@ export default function SubscriptionItem({
           <FormControl size="small" sx={{ minWidth: 72, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
             <Select
               value={subscription.group_name || "未分组"}
-              open={editingGroup}
-              onOpen={() => setEditingGroup(true)}
+              autoFocus
               onClose={() => setEditingGroup(false)}
               onChange={(e) => {
-                onUpdateGroup(subscription.id, e.target.value);
+                onUpdateGroup(subscription.id, e.target.value as string);
                 setEditingGroup(false);
               }}
               sx={{ height: 22, fontSize: "0.65rem" }}

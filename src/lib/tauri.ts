@@ -40,7 +40,7 @@ export async function updateSubscriptionQuality(
 ): Promise<Subscription> {
   return invoke<Subscription>("update_subscription_quality", {
     id,
-    quality_preset: qualityPreset,
+    qualityPreset,
   });
 }
 
@@ -51,7 +51,7 @@ export async function updateSubscriptionGroup(
 ): Promise<Subscription> {
   return invoke<Subscription>("update_subscription_group", {
     id,
-    group_name: groupName,
+    groupName,
   });
 }
 
@@ -166,6 +166,6 @@ export async function batchImportSubscriptions(
 ): Promise<ImportResult> {
   return invoke<ImportResult>("batch_import_subscriptions", {
     urls,
-    file_path: filePath ?? null,
+    filePath: filePath ?? null,
   });
 }
