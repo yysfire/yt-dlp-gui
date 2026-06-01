@@ -34,16 +34,16 @@ pub(crate) async fn check_and_download(
                         .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
                 });
             match parsed {
-                Ok(dt) => dt.format("%Y%m%d").to_string(),
-                Err(_) => "19700101".to_string(),
+                Ok(dt) => Some(dt.format("%Y%m%d").to_string()),
+                Err(_) => None,
             }
         }
-        None => "19700101".to_string(),
+        None => None,
     };
 
     // Check for new videos
-    log::info!("check_and_download: since={}, url={}", since, sub.url);
-    let videos = YtDlpService::check_new_videos(yt_dlp_path, proxy, cookie_file, &sub.url, &since)?;
+    log::info!("check_and_download: since={:?}, url={}", since, sub.url);
+    let videos = YtDlpService::check_new_videos(yt_dlp_path, proxy, cookie_file, &sub.url, since.as_deref())?;
 
     let mut new_records: Vec<DownloadRecord> = Vec::new();
     // Track seen video IDs and URLs to avoid duplicates.
@@ -310,14 +310,14 @@ pub(crate) async fn check_and_enqueue(
                         .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
                 });
             match parsed {
-                Ok(dt) => dt.format("%Y%m%d").to_string(),
-                Err(_) => "19700101".to_string(),
+                Ok(dt) => Some(dt.format("%Y%m%d").to_string()),
+                Err(_) => None,
             }
         }
-        None => "19700101".to_string(),
+        None => None,
     };
 
-    let videos = YtDlpService::check_new_videos(yt_dlp_path, proxy, cookie_file, &sub.url, &since)?;
+    let videos = YtDlpService::check_new_videos(yt_dlp_path, proxy, cookie_file, &sub.url, since.as_deref())?;
 
     // Dedup: prefer video_id, fall back to video_url. Failed records can retry.
     let mut seen_ids: std::collections::HashSet<String> = existing_records

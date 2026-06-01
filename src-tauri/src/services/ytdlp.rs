@@ -111,25 +111,26 @@ impl YtDlpService {
 
     /// Checks a channel for new videos since the given date.
     ///
-    /// Executes: `yt-dlp --flat-playlist --dump-json --playlist-end 5 --dateafter <YYYYMMDD> <url>`
-    /// Returns a list of videos published after `since` (limited to most recent 5).
+    /// Executes: `yt-dlp --flat-playlist --dump-json [--dateafter <YYYYMMDD>] <url>`
+    /// When `since` is `None`, no date filter is applied (all videos returned).
     pub fn check_new_videos(
         yt_dlp_path: &str,
         proxy: &Option<String>,
         cookie_file: &Option<String>,
         url: &str,
-        since: &str,
+        since: Option<&str>,
     ) -> Result<Vec<VideoInfo>, AppError> {
         let mut cmd = Command::new(yt_dlp_path);
         cmd.args([
             "--flat-playlist",
             "--dump-json",
-            "--playlist-end",
-            "5",
-            "--dateafter",
-            since,
-        ])
-        .arg(url);
+        ]);
+
+        if let Some(date) = since {
+            cmd.arg("--dateafter").arg(date);
+        }
+
+        cmd.arg(url);
 
         if let Some(ref proxy_url) = proxy {
             if !proxy_url.is_empty() {
@@ -631,12 +632,10 @@ mod tests {
 
     #[test]
     fn test_check_new_videos_args_structure() {
-        let expected_args = vec!["--flat-playlist", "--dump-json", "--playlist-end", "--dateafter"];
-        assert_eq!(expected_args.len(), 4);
+        let expected_args = vec!["--flat-playlist", "--dump-json"];
+        assert_eq!(expected_args.len(), 2);
         assert_eq!(expected_args[0], "--flat-playlist");
         assert_eq!(expected_args[1], "--dump-json");
-        assert_eq!(expected_args[2], "--playlist-end");
-        assert_eq!(expected_args[3], "--dateafter");
     }
 
     #[test]
