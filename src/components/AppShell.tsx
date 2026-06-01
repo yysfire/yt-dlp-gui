@@ -1,5 +1,5 @@
-import { useState } from "react";
-import type { Subscription, DownloadRecord, DownloadProgress } from "@/types";
+import { useState, useEffect, useCallback } from "react";
+import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask } from "@/types";
 import TopBar from "./TopBar";
 import StatusBar from "./StatusBar";
 import SubscriptionList from "./SubscriptionList";
@@ -8,7 +8,7 @@ import DetailPanel from "./DetailPanel";
 import SettingsDialog from "./SettingsDialog";
 import ExportDialog from "./ExportDialog";
 import ImportDialog from "./ImportDialog";
-import DownloadQueuePanel from "./DownloadQueuePanel";
+import * as api from "@/lib/tauri";
 
 interface AppShellProps {
   subscriptions: Subscription[];
@@ -53,11 +53,53 @@ export default function AppShell({
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [queueTasks, setQueueTasks] = useState<DownloadTask[]>([]);
 
   const selectedSub = subscriptions.find((s) => s.id === selectedId) ?? null;
   const filteredRecords = selectedId
     ? records.filter((r) => r.subscription_id === selectedId)
     : [];
+
+  const refreshQueue = useCallback(async () => {
+    try {
+      const tasks = await api.getDownloadQueue();
+      setQueueTasks(tasks);
+    } catch {
+      // Ignore errors
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshQueue();
+    const interval = setInterval(refreshQueue, 3000);
+    return () => clearInterval(interval);
+  }, [refreshQueue]);
+
+  const handlePause = useCallback(async (videoUrl: string) => {
+    try {
+      await api.pauseDownloadByUrl(videoUrl);
+      refreshQueue();
+    } catch (e) {
+      console.error("Failed to pause:", e);
+    }
+  }, [refreshQueue]);
+
+  const handleCancel = useCallback(async (videoUrl: string) => {
+    try {
+      await api.cancelDownloadByUrl(videoUrl);
+      refreshQueue();
+    } catch (e) {
+      console.error("Failed to cancel:", e);
+    }
+  }, [refreshQueue]);
+
+  const handleRetry = useCallback(async (subscriptionId: string) => {
+    try {
+      await api.checkSubscription(subscriptionId);
+    } catch (e) {
+      console.error("Failed to retry:", e);
+    }
+  }, []);
 
   return (
     <div className="flex flex-col h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100">
@@ -99,12 +141,15 @@ export default function AppShell({
             <DetailPanel
               subscription={selectedSub}
               records={filteredRecords}
+              queueTasks={queueTasks}
               error={recordsError}
               progressMap={progressMap}
+              onPauseDownload={handlePause}
+              onCancelDownload={handleCancel}
+              onRetryDownload={handleRetry}
             />
           </div>
           <StatusBar />
-              <DownloadQueuePanel />
         </div>
       </div>
 

@@ -1,20 +1,28 @@
 import { Box, Typography, Avatar, Chip, Alert } from "@mui/material";
-import type { Subscription, DownloadRecord, DownloadProgress } from "@/types";
+import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask } from "@/types";
 import DownloadRecordList from "./DownloadRecordList";
 
 interface DetailPanelProps {
   subscription: Subscription | null;
   records: DownloadRecord[];
+  queueTasks: DownloadTask[];
   error?: string | null;
   progressMap?: Map<string, DownloadProgress>;
+  onPauseDownload: (videoUrl: string) => void;
+  onCancelDownload: (videoUrl: string) => void;
+  onRetryDownload: (subscriptionId: string) => void;
 }
 
 /** Right-side detail panel showing channel info and download records. */
 export default function DetailPanel({
   subscription,
   records,
+  queueTasks,
   error,
   progressMap,
+  onPauseDownload,
+  onCancelDownload,
+  onRetryDownload,
 }: DetailPanelProps) {
   if (!subscription) {
     return (
@@ -99,7 +107,14 @@ export default function DetailPanel({
             {error}
           </Alert>
         )}
-        <DownloadRecordList records={records} progressMap={progressMap} />
+        <DownloadRecordList
+          records={records}
+          queueTasks={queueTasks}
+          progressMap={progressMap}
+          onPause={onPauseDownload}
+          onCancel={onCancelDownload}
+          onRetry={onRetryDownload}
+        />
       </div>
     </div>
   );

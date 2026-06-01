@@ -174,6 +174,8 @@ pub fn run() {
             commands::download::pause_download,
             commands::download::resume_download,
             commands::download::cancel_download,
+            commands::download::pause_download_by_url,
+            commands::download::cancel_download_by_url,
             commands::settings::get_settings,
             commands::settings::update_settings,
             commands::settings::get_app_state,

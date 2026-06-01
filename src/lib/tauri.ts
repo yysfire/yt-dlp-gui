@@ -103,6 +103,16 @@ export async function cancelDownload(id: string): Promise<void> {
   return invoke<void>("cancel_download", { id });
 }
 
+/** Pauses an active download identified by video URL. */
+export async function pauseDownloadByUrl(videoUrl: string): Promise<void> {
+  return invoke<void>("pause_download_by_url", { videoUrl });
+}
+
+/** Cancels a download identified by video URL. */
+export async function cancelDownloadByUrl(videoUrl: string): Promise<void> {
+  return invoke<void>("cancel_download_by_url", { videoUrl });
+}
+
 /** Returns the current in-memory download queue. */
 export async function getDownloadQueue(): Promise<DownloadTask[]> {
   return invoke<DownloadTask[]>("get_download_queue");

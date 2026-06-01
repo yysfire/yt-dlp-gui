@@ -83,37 +83,40 @@ pub(crate) async fn check_and_download(
         // Emit event so frontend can refresh immediately
         let _ = app_handle.emit("records-changed", ());
 
-        // Attempt download
+        // Attempt download using spawned process (supports pause)
         let quality = sub.quality_preset.clone();
-        match YtDlpService::download_video(
-            yt_dlp_path, proxy, cookie_file, &video.url, &quality, download_dir,
-        ) {
-            Ok(result) => {
-                record.status = "completed".to_string();
-                record.file_path = result.file_path;
-                record.file_size = result.file_size;
-                record.downloaded_at = Utc::now().to_rfc3339();
 
-                // Send desktop notification if enabled
-                if let Some(ctx) = app_handle.try_state::<crate::AppContext>() {
-                    if let Ok(settings) = ctx.settings.lock() {
-                        if settings.notifications_enabled {
-                            let _ = app_handle.emit(
-                                "download-complete",
-                                serde_json::json!({
-                                    "title": &record.video_title,
-                                    "channel": &sub.channel_name,
-                                }),
-                            );
-                        }
-                    }
+        // Try to use queue for process control; fall back to direct download
+        let use_queue = app_handle.try_state::<QueueContext>().is_some();
+
+        if use_queue {
+            let queue_guard = app_handle.state::<QueueContext>();
+            let maybe_queue = queue_guard.queue.lock().ok();
+            if let Some(guard) = maybe_queue {
+                if let Some(ref queue) = *guard {
+                    // Enqueue through download queue (supports pause/resume/cancel)
+                    queue.enqueue_from_video(
+                        sub,
+                        record.video_title.clone(),
+                        record.video_url.clone(),
+                        record.video_id.clone(),
+                        quality,
+                        data_dir,
+                    )?;
+                    queue.start_processing(
+                        crate::services::download_queue::DownloadContext {
+                            yt_dlp_path: yt_dlp_path.to_string(),
+                            proxy: proxy.clone(),
+                            cookie_file: cookie_file.clone(),
+                            download_dir: download_dir.clone(),
+                            data_dir: data_dir.clone(),
+                        },
+                    );
+                    // Record will be updated by queue upon completion
+                    record.status = "downloading".to_string();
+                    new_records.push(record);
+                    continue;
                 }
-            }
-            Err(e) => {
-                log::error!("Download failed for {}: {}", video.title, e);
-                record.status = "failed".to_string();
-                record.error_message = Some(e.to_string());
-                record.downloaded_at = Utc::now().to_rfc3339();
             }
         }
 
@@ -466,6 +469,43 @@ pub async fn cancel_download(
     let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
     match guard.as_ref() {
         Some(q) => q.cancel(&id, &ctx).map_err(|e| e.to_string()),
+        None => Err("Download queue not initialized".to_string()),
+    }
+}
+
+/// Pauses a running download task identified by video_url.
+#[tauri::command]
+pub async fn pause_download_by_url(
+    video_url: String,
+    queue_ctx: State<'_, QueueContext>,
+) -> Result<(), String> {
+    let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
+    match guard.as_ref() {
+        Some(q) => q.pause_by_url(&video_url).map_err(|e| e.to_string()),
+        None => Err("Download queue not initialized".to_string()),
+    }
+}
+
+/// Cancels a download task identified by video_url.
+#[tauri::command]
+pub async fn cancel_download_by_url(
+    video_url: String,
+    queue_ctx: State<'_, QueueContext>,
+    state: State<'_, AppContext>,
+) -> Result<(), String> {
+    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+    let ctx = crate::services::download_queue::DownloadContext {
+        yt_dlp_path: settings.yt_dlp_path.clone(),
+        proxy: Some(settings.proxy_url.clone()),
+        cookie_file: Some(settings.cookie_file.clone()),
+        download_dir: std::path::PathBuf::from(&settings.download_dir),
+        data_dir: state.data_dir.clone(),
+    };
+    drop(settings);
+
+    let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
+    match guard.as_ref() {
+        Some(q) => q.cancel_by_url(&video_url, &ctx).map_err(|e| e.to_string()),
         None => Err("Download queue not initialized".to_string()),
     }
 }

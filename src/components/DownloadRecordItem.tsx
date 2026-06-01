@@ -3,19 +3,30 @@ import {
   ListItemIcon,
   ListItemText,
   Typography,
+  IconButton,
+  Box,
 } from "@mui/material";
 import {
   CheckCircle as CompletedIcon,
   Downloading as DownloadingIcon,
   Error as FailedIcon,
   InsertDriveFile as FileIcon,
+  Pause as PauseIcon,
+  Replay as ReplayIcon,
+  Cancel as CancelIcon,
+  PlayArrow as ResumeIcon,
+  HourglassEmpty as WaitingIcon,
 } from "@mui/icons-material";
 import type { DownloadRecord, DownloadProgress } from "@/types";
 import DownloadProgressBar from "./DownloadProgressBar";
 
 interface DownloadRecordItemProps {
-  record: DownloadRecord;
+  record: DownloadRecord & { _isQueueTask?: boolean; _taskId?: string };
   progress?: DownloadProgress | null;
+  onPause?: () => void;
+  onCancel?: () => void;
+  onRetry?: () => void;
+  isQueueTask?: boolean;
 }
 
 /** Formats a file size in bytes to a human-readable string. */
@@ -46,10 +57,14 @@ function formatDate(iso: string): string {
   }
 }
 
-/** Single download record row with status icon and metadata. */
+/** Single download record row with status icon, progress, and action buttons. */
 export default function DownloadRecordItem({
   record,
   progress,
+  onPause,
+  onCancel,
+  onRetry,
+  isQueueTask,
 }: DownloadRecordItemProps) {
   const statusIcon = () => {
     switch (record.status) {
@@ -57,36 +72,36 @@ export default function DownloadRecordItem({
         return <CompletedIcon fontSize="small" color="success" />;
       case "downloading":
         return <DownloadingIcon fontSize="small" color="info" />;
+      case "paused":
+        return <PauseIcon fontSize="small" color="warning" />;
       case "failed":
         return <FailedIcon fontSize="small" color="error" />;
+      case "cancelled":
+        return <CancelIcon fontSize="small" />;
       default:
-        return <FileIcon fontSize="small" />;
+        return isQueueTask ? <WaitingIcon fontSize="small" color="disabled" /> : <FileIcon fontSize="small" />;
     }
   };
 
   const statusColor = () => {
     switch (record.status) {
-      case "completed":
-        return "success.main";
-      case "downloading":
-        return "info.main";
-      case "failed":
-        return "error.main";
-      default:
-        return "text.secondary";
+      case "completed": return "success.main";
+      case "downloading": return "info.main";
+      case "paused": return "warning.main";
+      case "failed": return "error.main";
+      case "cancelled": return "text.disabled";
+      default: return "text.secondary";
     }
   };
 
   const statusLabel = () => {
     switch (record.status) {
-      case "completed":
-        return "已完成";
-      case "downloading":
-        return "下载中";
-      case "failed":
-        return "失败";
-      default:
-        return record.status;
+      case "completed": return "已完成";
+      case "downloading": return isQueueTask ? "下载中" : "下载中";
+      case "paused": return "已暂停";
+      case "failed": return "失败";
+      case "cancelled": return "已取消";
+      default: return record.status;
     }
   };
 
@@ -106,7 +121,7 @@ export default function DownloadRecordItem({
           </Typography>
         }
         secondary={
-          <span className="flex items-center gap-2">
+          <Box component="span" sx={{ display: "flex", alignItems: "center", gap: 1 }}>
             <Typography variant="caption" color={statusColor()}>
               {statusLabel()}
             </Typography>
@@ -118,13 +133,35 @@ export default function DownloadRecordItem({
             <Typography variant="caption" color="text.disabled">
               {formatDate(record.downloaded_at)}
             </Typography>
-          </span>
+          </Box>
         }
         sx={{ my: 0 }}
       />
-      {record.status === "downloading" && progress && (
-        <DownloadProgressBar progress={progress} status="downloading" />
+      {(record.status === "downloading" || record.status === "paused") && progress && (
+        <DownloadProgressBar progress={progress} status={record.status} />
       )}
+      <Box sx={{ display: "flex", gap: 0.5, ml: 1, flexShrink: 0 }}>
+        {record.status === "downloading" && onPause && (
+          <IconButton size="small" onClick={onPause} title="暂停">
+            <PauseIcon fontSize="small" />
+          </IconButton>
+        )}
+        {record.status === "paused" && onPause && (
+          <IconButton size="small" onClick={onPause} title="继续">
+            <ResumeIcon fontSize="small" />
+          </IconButton>
+        )}
+        {(record.status === "downloading" || record.status === "paused" || isQueueTask) && onCancel && (
+          <IconButton size="small" onClick={onCancel} title="取消">
+            <CancelIcon fontSize="small" color="error" />
+          </IconButton>
+        )}
+        {record.status === "failed" && onRetry && (
+          <IconButton size="small" onClick={onRetry} title="重试">
+            <ReplayIcon fontSize="small" color="warning" />
+          </IconButton>
+        )}
+      </Box>
     </ListItem>
   );
 }

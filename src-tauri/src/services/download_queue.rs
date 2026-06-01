@@ -96,7 +96,7 @@ pub struct DownloadContext {
 
 /// Holds the child process handle and PID for an active download.
 struct ActiveTask {
-    child: tokio::process::Child,
+    child: Option<tokio::process::Child>,
     pid: u32,
     task: DownloadTask,
 }
@@ -317,7 +317,7 @@ impl DownloadQueue {
         {
             let mut active = active_tasks.lock().unwrap();
             active.insert(task_id.clone(), ActiveTask {
-                child,
+                child: Some(child),
                 pid,
                 task: task.clone(),
             });
@@ -367,10 +367,11 @@ impl DownloadQueue {
             file_path
         });
 
-        // Await the child process — take child out of map to avoid holding MutexGuard across await
+        // Await the child process — take child out without removing the ActiveTask,
+        // so get_tasks() and get_state() can still see the active task during download
         let child_to_wait = {
             let mut active = active_clone.lock().unwrap();
-            active.remove(&task_id_for_lookup).map(|e| e.child)
+            active.get_mut(&task_id_for_lookup).and_then(|entry| entry.child.take())
         };
 
         let status = match child_to_wait {
@@ -416,6 +417,12 @@ impl DownloadQueue {
                         let _ = StorageService::save_download_records(&ctx.data_dir, &records);
                     }
                 }
+
+                // Increment total downloads counter
+                if let Ok(mut app_state) = StorageService::load_state(&ctx.data_dir) {
+                    app_state.total_downloads += 1;
+                    let _ = StorageService::save_state(&ctx.data_dir, &app_state);
+                }
             }
             _ => {
                 log::error!("yt-dlp process failed for {}", task.video_title);
@@ -445,9 +452,7 @@ impl DownloadQueue {
     pub fn pause(&self, task_id: &str) -> Result<(), AppError> {
         let mut active = self.active_tasks.lock().unwrap();
         if let Some(entry) = active.get_mut(task_id) {
-            let pid = entry.child.id().ok_or_else(||
-                AppError::YtDlp("Could not get child process ID".to_string())
-            )?;
+            let pid = entry.pid;
 
             #[cfg(unix)]
             {
@@ -482,9 +487,7 @@ impl DownloadQueue {
     pub fn resume(&self, task_id: &str) -> Result<(), AppError> {
         let mut active = self.active_tasks.lock().unwrap();
         if let Some(entry) = active.get_mut(task_id) {
-            let pid = entry.child.id().ok_or_else(||
-                AppError::YtDlp("Could not get child process ID".to_string())
-            )?;
+            let pid = entry.pid;
 
             #[cfg(unix)]
             {
@@ -513,6 +516,38 @@ impl DownloadQueue {
         }
     }
 
+    /// Pauses a running download identified by video_url.
+    pub fn pause_by_url(&self, video_url: &str) -> Result<(), AppError> {
+        let active = self.active_tasks.lock().unwrap();
+        for (_task_id, entry) in active.iter() {
+            if entry.task.video_url == video_url {
+                let pid = entry.pid;
+                #[cfg(unix)]
+                {
+                    unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
+                }
+                log::info!("Paused download by url {}", video_url);
+                self.emit_queue_changed();
+                return Ok(());
+            }
+        }
+        Err(AppError::NotFound(format!("No active task found for url {}", video_url)))
+    }
+
+    /// Cancels a download identified by video_url (calls cancel by task_id internally).
+    pub fn cancel_by_url(&self, video_url: &str, ctx: &DownloadContext) -> Result<(), AppError> {
+        let active = self.active_tasks.lock().unwrap();
+        let task_id = active.iter()
+            .find(|(_, entry)| entry.task.video_url == video_url)
+            .map(|(id, _)| id.clone());
+        drop(active);
+
+        match task_id {
+            Some(id) => self.cancel(&id, ctx),
+            None => Err(AppError::NotFound(format!("No active task found for url {}", video_url))),
+        }
+    }
+
     /// Cancels a download task: kills process if running, removes from queue if waiting,
     /// cleans up partial files, and marks DownloadRecord as cancelled.
     pub fn cancel(&self, task_id: &str, ctx: &DownloadContext) -> Result<(), AppError> {
@@ -520,8 +555,10 @@ impl DownloadQueue {
         {
             let mut active = self.active_tasks.lock().unwrap();
             if let Some(mut entry) = active.remove(task_id) {
-                // Kill the child process
-                let _ = entry.child.start_kill();
+                // Kill the child process if still running
+                if let Some(child) = entry.child.as_mut() {
+                    let _ = child.start_kill();
+                }
                 log::info!("Killed download task {} (pid {})", task_id, entry.pid);
 
                 // Mark all matching records as cancelled
