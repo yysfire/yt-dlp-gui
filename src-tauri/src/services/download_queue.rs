@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use chrono::Utc;
 use serde::Serialize;
@@ -107,6 +108,7 @@ pub struct DownloadQueue {
     semaphore: Arc<Semaphore>,
     active_tasks: Arc<Mutex<HashMap<String, ActiveTask>>>,
     app_handle: AppHandle,
+    max_concurrent: Arc<AtomicU32>,
 }
 
 impl DownloadQueue {
@@ -117,6 +119,7 @@ impl DownloadQueue {
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
             app_handle,
+            max_concurrent: Arc::new(AtomicU32::new(max_concurrent)),
         }
     }
 
@@ -198,6 +201,7 @@ impl DownloadQueue {
         let semaphore = Arc::clone(&self.semaphore);
         let active_tasks = Arc::clone(&self.active_tasks);
         let app_handle = self.app_handle.clone();
+        let max_conc = Arc::clone(&self.max_concurrent);
 
         tokio::spawn(async move {
             loop {
@@ -221,6 +225,7 @@ impl DownloadQueue {
                 let active_clone = Arc::clone(&active_tasks);
                 let app_clone = app_handle.clone();
                 let sem_clone = Arc::clone(&semaphore);
+                let max_conc_clone = Arc::clone(&max_conc);
 
                 tokio::spawn(async move {
                     let _permit = permit;
@@ -238,34 +243,11 @@ impl DownloadQueue {
                         active.remove(&task.id);
                     }
 
-                    // Update DownloadRecord
-                    let records = StorageService::load_download_records(&ctx_clone.data_dir)
-                        .unwrap_or_default();
-                    let matching: Vec<_> = records.iter()
-                        .filter(|r| r.video_url == task.video_url
-                            && r.subscription_id == task.subscription_id)
-                        .collect();
-                    let record_id = matching.last().map(|r| r.id.clone());
-
-                    if let Some(record_id) = record_id {
-                        let mut all_records = StorageService::load_download_records(&ctx_clone.data_dir)
-                            .unwrap_or_default();
-                        if let Some(existing) = all_records.iter_mut().find(|r| r.id == record_id) {
-                            // Status is already set by cancel/pause or kept as-is
-                            if existing.status == "downloading" {
-                                existing.status = "completed".to_string();
-                            }
-                            existing.downloaded_at = Utc::now().to_rfc3339();
-                        }
-                        let _ = StorageService::save_download_records(&ctx_clone.data_dir, &all_records);
-                        let _ = app_clone.emit("records-changed", ());
-                    }
-
                     // Emit queue changed
                     let state = QueueState {
                         active_count: sem_clone.available_permits() as usize,
                         waiting_count: queue_clone.lock().unwrap().len(),
-                        max_concurrent: sem_clone.available_permits() as u32 + 1,
+                        max_concurrent: max_conc_clone.load(Ordering::Relaxed),
                     };
                     let _ = app_clone.emit("queue-changed", state);
                 });
@@ -423,6 +405,8 @@ impl DownloadQueue {
                     app_state.total_downloads += 1;
                     let _ = StorageService::save_state(&ctx.data_dir, &app_state);
                 }
+
+                let _ = app_handle.emit("records-changed", ());
             }
             _ => {
                 log::error!("yt-dlp process failed for {}", task.video_title);
@@ -444,6 +428,8 @@ impl DownloadQueue {
                     }
                     let _ = StorageService::save_download_records(&ctx.data_dir, &records);
                 }
+
+                let _ = app_handle.emit("records-changed", ());
             }
         }
     }
@@ -715,8 +701,29 @@ impl DownloadQueue {
         QueueState {
             active_count: active.len(),
             waiting_count: queue.len(),
-            max_concurrent: 1,
+            max_concurrent: self.max_concurrent.load(Ordering::Relaxed),
         }
+    }
+
+    /// Dynamically updates the maximum concurrent download count.
+    /// When increasing: adds permits to the semaphore.
+    /// When decreasing: attempts to acquire and forget excess permits (non-blocking).
+    pub fn update_max_concurrent(&self, new_max: u32) {
+        let old = self.max_concurrent.swap(new_max, Ordering::SeqCst);
+        if new_max > old {
+            self.semaphore.add_permits((new_max - old) as usize);
+        }
+        if new_max < old {
+            let excess = (old - new_max) as usize;
+            for _ in 0..excess {
+                if self.semaphore.try_acquire().is_ok() {
+                    // Acquired and dropped — effectively forgetting the permit
+                } else {
+                    break; // No available permits to reclaim
+                }
+            }
+        }
+        log::info!("Updated max concurrent downloads: {} → {}", old, new_max);
     }
 
     /// Returns all tasks currently in the queue (waiting + active).
