@@ -24,10 +24,7 @@ pub fn parse_progress_line(line: &str) -> Option<ProgressEvent> {
 
     let parts: Vec<&str> = line.split('|').collect();
     if parts.len() != 5 {
-        // Try to parse anyway with fewer parts (best effort)
-        if parts.is_empty() {
-            return None;
-        }
+        return None;
     }
 
     let percent: f32 = parts.first()?.parse().ok()?;
@@ -83,12 +80,9 @@ mod tests {
 
     #[test]
     fn test_parse_missing_parts() {
-        // Only percent is present
+        // Only percent is present — must fail with strict 5-part requirement
         let line = "50.0";
-        let result = parse_progress_line(line).expect("should parse with only percent");
-        assert!((result.percent - 50.0).abs() < 0.01);
-        assert_eq!(result.speed, "");
-        assert_eq!(result.downloaded_bytes, 0);
+        assert!(parse_progress_line(line).is_none(), "less than 5 parts must return None");
     }
 
     #[test]

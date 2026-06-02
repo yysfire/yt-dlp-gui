@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask } from "@/types";
+import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask, QueueState } from "@/types";
+import { listen } from "@tauri-apps/api/event";
 import TopBar from "./TopBar";
 import StatusBar from "./StatusBar";
 import SubscriptionList from "./SubscriptionList";
@@ -71,8 +72,16 @@ export default function AppShell({
 
   useEffect(() => {
     refreshQueue();
-    const interval = setInterval(refreshQueue, 3000);
-    return () => clearInterval(interval);
+    const unlistenQueuePromise = listen<QueueState>("queue-changed", () => {
+      refreshQueue();
+    });
+    const unlistenRecordsPromise = listen("records-changed", () => {
+      refreshQueue();
+    });
+    return () => {
+      unlistenQueuePromise.then((fn) => fn());
+      unlistenRecordsPromise.then((fn) => fn());
+    };
   }, [refreshQueue]);
 
   const handlePause = useCallback(async (videoUrl: string) => {

@@ -71,35 +71,20 @@ pub(crate) async fn check_and_download(
             continue;
         }
 
-        // Create a "downloading" record
-        let mut record =
-            DownloadRecord::new(sub.id.clone(), video.title.clone(), video.url.clone(), video.id.clone().unwrap_or_default());
-
-        // Save the record immediately so the frontend sees "downloading"
-        let mut all_records = StorageService::load_download_records(data_dir)?;
-        all_records.push(record.clone());
-        StorageService::save_download_records(data_dir, &all_records)?;
-
-        // Emit event so frontend can refresh immediately
-        let _ = app_handle.emit("records-changed", ());
-
-        // Attempt download using spawned process (supports pause)
         let quality = sub.quality_preset.clone();
 
-        // Try to use queue for process control; fall back to direct download
+        // Queue path: enqueue_from_video handles record creation and saving
         let use_queue = app_handle.try_state::<QueueContext>().is_some();
-
         if use_queue {
             let queue_guard = app_handle.state::<QueueContext>();
             let maybe_queue = queue_guard.queue.lock().ok();
             if let Some(guard) = maybe_queue {
                 if let Some(ref queue) = *guard {
-                    // Enqueue through download queue (supports pause/resume/cancel)
                     queue.enqueue_from_video(
                         sub,
-                        record.video_title.clone(),
-                        record.video_url.clone(),
-                        record.video_id.clone(),
+                        video.title.clone(),
+                        video.url.clone(),
+                        vid.clone(),
                         quality,
                         data_dir,
                     )?;
@@ -112,22 +97,19 @@ pub(crate) async fn check_and_download(
                             data_dir: data_dir.clone(),
                         },
                     );
-                    // Record will be updated by queue upon completion
-                    record.status = "downloading".to_string();
-                    new_records.push(record);
                     continue;
                 }
             }
         }
 
-        // Update the record in storage
-        all_records = StorageService::load_download_records(data_dir)?;
-        if let Some(existing) = all_records.iter_mut().find(|r| r.id == record.id) {
-            *existing = record.clone();
-        }
-        StorageService::save_download_records(data_dir, &all_records)?;
+        // Non-queue fallback: create record directly
+        let record =
+            DownloadRecord::new(sub.id.clone(), video.title.clone(), video.url.clone(), vid.clone());
 
-        // Emit event for status update
+        // Save the record immediately so the frontend sees "downloading"
+        let mut all_records = StorageService::load_download_records(data_dir)?;
+        all_records.push(record.clone());
+        StorageService::save_download_records(data_dir, &all_records)?;
         let _ = app_handle.emit("records-changed", ());
 
         new_records.push(record);
