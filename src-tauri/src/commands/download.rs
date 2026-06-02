@@ -428,10 +428,11 @@ pub async fn get_queue_state(
 pub async fn pause_download(
     id: String,
     queue_ctx: State<'_, QueueContext>,
+    state: State<'_, AppContext>,
 ) -> Result<(), String> {
     let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
     match guard.as_ref() {
-        Some(q) => q.pause(&id).map_err(|e| e.to_string()),
+        Some(q) => q.pause(&id, &state.data_dir).map_err(|e| e.to_string()),
         None => Err("Download queue not initialized".to_string()),
     }
 }
@@ -441,10 +442,11 @@ pub async fn pause_download(
 pub async fn resume_download(
     id: String,
     queue_ctx: State<'_, QueueContext>,
+    state: State<'_, AppContext>,
 ) -> Result<(), String> {
     let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
     match guard.as_ref() {
-        Some(q) => q.resume(&id).map_err(|e| e.to_string()),
+        Some(q) => q.resume(&id, &state.data_dir).map_err(|e| e.to_string()),
         None => Err("Download queue not initialized".to_string()),
     }
 }
@@ -478,10 +480,11 @@ pub async fn cancel_download(
 pub async fn pause_download_by_url(
     video_url: String,
     queue_ctx: State<'_, QueueContext>,
+    state: State<'_, AppContext>,
 ) -> Result<(), String> {
     let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
     match guard.as_ref() {
-        Some(q) => q.pause_by_url(&video_url).map_err(|e| e.to_string()),
+        Some(q) => q.pause_by_url(&video_url, &state.data_dir).map_err(|e| e.to_string()),
         None => Err("Download queue not initialized".to_string()),
     }
 }

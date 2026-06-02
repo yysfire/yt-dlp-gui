@@ -9,6 +9,7 @@ interface DetailPanelProps {
   error?: string | null;
   progressMap?: Map<string, DownloadProgress>;
   onPauseDownload: (videoUrl: string) => void;
+  onResumeDownload: (taskId: string) => void;
   onCancelDownload: (videoUrl: string) => void;
   onRetryDownload: (subscriptionId: string) => void;
 }
@@ -21,6 +22,7 @@ export default function DetailPanel({
   error,
   progressMap,
   onPauseDownload,
+  onResumeDownload,
   onCancelDownload,
   onRetryDownload,
 }: DetailPanelProps) {
@@ -112,6 +114,7 @@ export default function DetailPanel({
           queueTasks={queueTasks}
           progressMap={progressMap}
           onPause={onPauseDownload}
+          onResume={onResumeDownload}
           onCancel={onCancelDownload}
           onRetry={onRetryDownload}
         />

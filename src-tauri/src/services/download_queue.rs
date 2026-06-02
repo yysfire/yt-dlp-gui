@@ -449,89 +449,156 @@ impl DownloadQueue {
     }
 
     /// Pauses a running download by sending SIGSTOP (Unix) or SuspendThread (Windows).
-    pub fn pause(&self, task_id: &str) -> Result<(), AppError> {
-        let mut active = self.active_tasks.lock().unwrap();
-        if let Some(entry) = active.get_mut(task_id) {
-            let pid = entry.pid;
-
-            #[cfg(unix)]
-            {
-                unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
-            }
-
-            #[cfg(windows)]
-            {
-                // Windows: SuspendThread on all threads of the process
-                // This is a best-effort approach
-                log::warn!("Process pause on Windows is limited");
-            }
-
-            log::info!("Paused download task {}", task_id);
-            self.emit_queue_changed();
-            Ok(())
-        } else {
-            // Check waiting queue
-            let mut queue = self.queue.lock().unwrap();
-            if let Some(pos) = queue.iter().position(|t| t.id == task_id) {
-                if let Some(task) = queue.get_mut(pos) {
-                    task.status = TaskStatus::Paused;
-                    self.emit_queue_changed();
-                    return Ok(());
-                }
-            }
-            Err(AppError::NotFound(format!("Task {} not found", task_id)))
-        }
-    }
-
-    /// Resumes a paused download by sending SIGCONT (Unix) or ResumeThread (Windows).
-    pub fn resume(&self, task_id: &str) -> Result<(), AppError> {
-        let mut active = self.active_tasks.lock().unwrap();
-        if let Some(entry) = active.get_mut(task_id) {
-            let pid = entry.pid;
-
-            #[cfg(unix)]
-            {
-                unsafe { libc::kill(pid as i32, libc::SIGCONT); }
-            }
-
-            #[cfg(windows)]
-            {
-                log::warn!("Process resume on Windows is limited");
-            }
-
-            log::info!("Resumed download task {}", task_id);
-            self.emit_queue_changed();
-            Ok(())
-        } else {
-            // Check waiting queue for paused tasks
-            let mut queue = self.queue.lock().unwrap();
-            if let Some(pos) = queue.iter().position(|t| t.id == task_id && t.status == TaskStatus::Paused) {
-                if let Some(task) = queue.get_mut(pos) {
-                    task.status = TaskStatus::Waiting;
-                    self.emit_queue_changed();
-                    return Ok(());
-                }
-            }
-            Err(AppError::NotFound(format!("Task {} not found or not paused", task_id)))
-        }
-    }
-
-    /// Pauses a running download identified by video_url.
-    pub fn pause_by_url(&self, video_url: &str) -> Result<(), AppError> {
-        let active = self.active_tasks.lock().unwrap();
-        for (_task_id, entry) in active.iter() {
-            if entry.task.video_url == video_url {
+    pub fn pause(&self, task_id: &str, data_dir: &PathBuf) -> Result<(), AppError> {
+        // Try to pause an active task — must release lock before calling emit_queue_changed
+        let paused_info = {
+            let mut active = self.active_tasks.lock().unwrap();
+            if let Some(entry) = active.get_mut(task_id) {
                 let pid = entry.pid;
+
                 #[cfg(unix)]
                 {
                     unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
                 }
-                log::info!("Paused download by url {}", video_url);
-                self.emit_queue_changed();
-                return Ok(());
+
+                #[cfg(windows)]
+                {
+                    log::warn!("Process pause on Windows is limited");
+                }
+
+                entry.task.status = TaskStatus::Paused;
+                log::info!("Paused download task {}", task_id);
+                Some((entry.task.video_url.clone(), entry.task.subscription_id.clone()))
+            } else {
+                None
             }
+            // active lock guard dropped here — safe to call emit_queue_changed
+        };
+
+        if let Some((video_url, subscription_id)) = paused_info {
+            self.update_record_status(data_dir, &video_url, &subscription_id, "paused", None);
+            let _ = self.app_handle.emit("records-changed", ());
+            self.emit_queue_changed();
+            return Ok(());
         }
-        Err(AppError::NotFound(format!("No active task found for url {}", video_url)))
+
+        // Check waiting queue
+        let waiting_paused = {
+            let mut queue = self.queue.lock().unwrap();
+            if let Some(pos) = queue.iter().position(|t| t.id == task_id) {
+                if let Some(task) = queue.get_mut(pos) {
+                    task.status = TaskStatus::Paused;
+                    Some((task.video_url.clone(), task.subscription_id.clone()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+            // queue lock guard dropped here
+        };
+
+        if let Some((video_url, subscription_id)) = waiting_paused {
+            self.update_record_status(data_dir, &video_url, &subscription_id, "paused", None);
+            let _ = self.app_handle.emit("records-changed", ());
+            self.emit_queue_changed();
+            return Ok(());
+        }
+
+        Err(AppError::NotFound(format!("Task {} not found", task_id)))
+    }
+
+    /// Resumes a paused download by sending SIGCONT (Unix) or ResumeThread (Windows).
+    pub fn resume(&self, task_id: &str, data_dir: &PathBuf) -> Result<(), AppError> {
+        // Try to resume an active task — must release lock before calling emit_queue_changed
+        let resumed_info = {
+            let mut active = self.active_tasks.lock().unwrap();
+            if let Some(entry) = active.get_mut(task_id) {
+                let pid = entry.pid;
+
+                #[cfg(unix)]
+                {
+                    unsafe { libc::kill(pid as i32, libc::SIGCONT); }
+                }
+
+                #[cfg(windows)]
+                {
+                    log::warn!("Process resume on Windows is limited");
+                }
+
+                entry.task.status = TaskStatus::Running;
+                log::info!("Resumed download task {}", task_id);
+                Some((entry.task.video_url.clone(), entry.task.subscription_id.clone()))
+            } else {
+                None
+            }
+            // active lock guard dropped here — safe to call emit_queue_changed
+        };
+
+        if let Some((video_url, subscription_id)) = resumed_info {
+            self.update_record_status(data_dir, &video_url, &subscription_id, "downloading", None);
+            let _ = self.app_handle.emit("records-changed", ());
+            self.emit_queue_changed();
+            return Ok(());
+        }
+
+        // Check waiting queue for paused tasks
+        let waiting_resumed = {
+            let mut queue = self.queue.lock().unwrap();
+            if let Some(pos) = queue.iter().position(|t| t.id == task_id && t.status == TaskStatus::Paused) {
+                if let Some(task) = queue.get_mut(pos) {
+                    task.status = TaskStatus::Waiting;
+                    Some((task.video_url.clone(), task.subscription_id.clone()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+            // queue lock guard dropped here
+        };
+
+        if let Some((video_url, subscription_id)) = waiting_resumed {
+            self.update_record_status(data_dir, &video_url, &subscription_id, "downloading", None);
+            let _ = self.app_handle.emit("records-changed", ());
+            self.emit_queue_changed();
+            return Ok(());
+        }
+
+        Err(AppError::NotFound(format!("Task {} not found or not paused", task_id)))
+    }
+
+    /// Pauses a running download identified by video_url.
+    pub fn pause_by_url(&self, video_url: &str, data_dir: &PathBuf) -> Result<(), AppError> {
+        let paused_info = {
+            let mut active = self.active_tasks.lock().unwrap();
+            let mut found = None;
+            for (_task_id, entry) in active.iter_mut() {
+                if entry.task.video_url == video_url {
+                    let pid = entry.pid;
+                    #[cfg(unix)]
+                    {
+                        unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
+                    }
+                    entry.task.status = TaskStatus::Paused;
+                    found = Some((entry.task.video_url.clone(), entry.task.subscription_id.clone()));
+                    break;
+                }
+            }
+            found
+            // lock guard dropped here
+        };
+
+        match paused_info {
+            Some((url, sub_id)) => {
+                log::info!("Paused download by url {}", video_url);
+                self.update_record_status(data_dir, &url, &sub_id, "paused", None);
+                let _ = self.app_handle.emit("records-changed", ());
+                self.emit_queue_changed();
+                Ok(())
+            }
+            None => Err(AppError::NotFound(format!("No active task found for url {}", video_url))),
+        }
     }
 
     /// Cancels a download identified by video_url (calls cancel by task_id internally).
@@ -551,42 +618,59 @@ impl DownloadQueue {
     /// Cancels a download task: kills process if running, removes from queue if waiting,
     /// cleans up partial files, and marks DownloadRecord as cancelled.
     pub fn cancel(&self, task_id: &str, ctx: &DownloadContext) -> Result<(), AppError> {
-        // Try to cancel an active (running/paused) task
-        {
+        // Try to cancel an active (running/paused) task first.
+        // Must drop the lock guard before calling emit_queue_changed.
+        let removed_entry = {
             let mut active = self.active_tasks.lock().unwrap();
-            if let Some(mut entry) = active.remove(task_id) {
-                // Kill the child process if still running
-                if let Some(child) = entry.child.as_mut() {
-                    let _ = child.start_kill();
-                }
-                log::info!("Killed download task {} (pid {})", task_id, entry.pid);
+            active.remove(task_id)
+            // lock guard dropped here
+        };
 
-                // Mark all matching records as cancelled
-                if let Ok(mut records) = StorageService::load_download_records(&ctx.data_dir) {
-                    for r in records.iter_mut() {
+        if let Some(mut entry) = removed_entry {
+            // Kill the child process if still running
+            if let Some(child) = entry.child.as_mut() {
+                let _ = child.start_kill();
+            }
+            log::info!("Killed download task {} (pid {})", task_id, entry.pid);
+
+            // Clean up partial files
+            self.cleanup_partial_files(&entry.task.video_title, &ctx.download_dir);
+
+            // Mark matching records as cancelled
+            if let Ok(mut records) = StorageService::load_download_records(&ctx.data_dir) {
+                for r in records.iter_mut() {
+                    if r.video_url == entry.task.video_url
+                        && r.subscription_id == entry.task.subscription_id
+                    {
                         r.status = "cancelled".to_string();
                         r.error_message = Some("Cancelled by user".to_string());
                         r.downloaded_at = Utc::now().to_rfc3339();
                     }
-                    let _ = StorageService::save_download_records(&ctx.data_dir, &records);
                 }
-
-                let _ = self.app_handle.emit("records-changed", ());
-                self.emit_queue_changed();
-                return Ok(());
+                let _ = StorageService::save_download_records(&ctx.data_dir, &records);
             }
+
+            let _ = self.app_handle.emit("records-changed", ());
+            self.emit_queue_changed();
+            return Ok(());
         }
 
-        // Try to cancel a waiting task
-        {
+        // Try to cancel a waiting task — must release queue lock before emit_queue_changed
+        let cancelled_task = {
             let mut queue = self.queue.lock().unwrap();
             if let Some(pos) = queue.iter().position(|t| t.id == task_id) {
-                let task = queue.remove(pos).unwrap();
-                self.update_record_status(&ctx.data_dir, &task.video_url, &task.subscription_id, "cancelled", Some("Cancelled by user".to_string()));
-                let _ = self.app_handle.emit("records-changed", ());
-                self.emit_queue_changed();
-                return Ok(());
+                Some(queue.remove(pos).unwrap())
+            } else {
+                None
             }
+            // queue lock guard dropped here
+        };
+
+        if let Some(task) = cancelled_task {
+            self.update_record_status(&ctx.data_dir, &task.video_url, &task.subscription_id, "cancelled", Some("Cancelled by user".to_string()));
+            let _ = self.app_handle.emit("records-changed", ());
+            self.emit_queue_changed();
+            return Ok(());
         }
 
         Err(AppError::NotFound(format!("Task {} not found", task_id)))

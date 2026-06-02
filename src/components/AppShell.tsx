@@ -93,6 +93,15 @@ export default function AppShell({
     }
   }, [refreshQueue]);
 
+  const handleResume = useCallback(async (taskId: string) => {
+    try {
+      await api.resumeDownload(taskId);
+      refreshQueue();
+    } catch (e) {
+      console.error("Failed to resume:", e);
+    }
+  }, [refreshQueue]);
+
   const handleRetry = useCallback(async (subscriptionId: string) => {
     try {
       await api.checkSubscription(subscriptionId);
@@ -145,6 +154,7 @@ export default function AppShell({
               error={recordsError}
               progressMap={progressMap}
               onPauseDownload={handlePause}
+              onResumeDownload={handleResume}
               onCancelDownload={handleCancel}
               onRetryDownload={handleRetry}
             />

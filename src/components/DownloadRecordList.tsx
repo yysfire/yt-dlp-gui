@@ -8,6 +8,7 @@ interface DownloadRecordListProps {
   queueTasks: DownloadTask[];
   progressMap?: Map<string, DownloadProgress>;
   onPause: (videoUrl: string) => void;
+  onResume: (taskId: string) => void;
   onCancel: (videoUrl: string) => void;
   onRetry: (subscriptionId: string) => void;
 }
@@ -32,6 +33,7 @@ export default function DownloadRecordList({
   queueTasks,
   progressMap,
   onPause,
+  onResume,
   onCancel,
   onRetry,
 }: DownloadRecordListProps) {
@@ -96,6 +98,7 @@ export default function DownloadRecordList({
           record={item}
           progress={progressMap?.get(item.video_url) ?? null}
           onPause={item._isQueueTask ? () => onPause(item.video_url) : undefined}
+          onResume={item._isQueueTask && item._taskId ? () => onResume(item._taskId!) : undefined}
           onCancel={item._isQueueTask ? () => onCancel(item.video_url) : undefined}
           onRetry={item.status === "failed" ? () => onRetry(item.subscription_id) : undefined}
           isQueueTask={item._isQueueTask}

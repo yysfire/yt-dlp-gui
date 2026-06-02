@@ -24,6 +24,7 @@ interface DownloadRecordItemProps {
   record: DownloadRecord & { _isQueueTask?: boolean; _taskId?: string };
   progress?: DownloadProgress | null;
   onPause?: () => void;
+  onResume?: () => void;
   onCancel?: () => void;
   onRetry?: () => void;
   isQueueTask?: boolean;
@@ -62,6 +63,7 @@ export default function DownloadRecordItem({
   record,
   progress,
   onPause,
+  onResume,
   onCancel,
   onRetry,
   isQueueTask,
@@ -146,8 +148,8 @@ export default function DownloadRecordItem({
             <PauseIcon fontSize="small" />
           </IconButton>
         )}
-        {record.status === "paused" && onPause && (
-          <IconButton size="small" onClick={onPause} title="继续">
+        {record.status === "paused" && onResume && (
+          <IconButton size="small" onClick={onResume} title="继续">
             <ResumeIcon fontSize="small" />
           </IconButton>
         )}
