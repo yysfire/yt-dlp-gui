@@ -591,22 +591,68 @@ impl DownloadQueue {
                 self.emit_queue_changed();
                 Ok(())
             }
-            None => Err(AppError::NotFound(format!("No active task found for url {}", video_url))),
+            None => {
+                // Fallback: check the waiting queue
+                let waiting_paused = {
+                    let mut queue = self.queue.lock().unwrap();
+                    let mut found = None;
+                    for task in queue.iter_mut() {
+                        if task.video_url == video_url {
+                            task.status = TaskStatus::Paused;
+                            found = Some((task.video_url.clone(), task.subscription_id.clone()));
+                            break;
+                        }
+                    }
+                    found
+                    // queue lock guard dropped here
+                };
+                match waiting_paused {
+                    Some((url, sub_id)) => {
+                        log::info!("Paused waiting download by url {}", video_url);
+                        self.update_record_status(data_dir, &url, &sub_id, "paused", None);
+                        let _ = self.app_handle.emit("records-changed", ());
+                        self.emit_queue_changed();
+                        Ok(())
+                    }
+                    None => Err(AppError::NotFound(format!("No active task found for url {}", video_url))),
+                }
+            }
         }
     }
 
     /// Cancels a download identified by video_url (calls cancel by task_id internally).
     pub fn cancel_by_url(&self, video_url: &str, ctx: &DownloadContext) -> Result<(), AppError> {
+        // Search active tasks
         let active = self.active_tasks.lock().unwrap();
         let task_id = active.iter()
             .find(|(_, entry)| entry.task.video_url == video_url)
             .map(|(id, _)| id.clone());
         drop(active);
 
-        match task_id {
-            Some(id) => self.cancel(&id, ctx),
-            None => Err(AppError::NotFound(format!("No active task found for url {}", video_url))),
+        if let Some(id) = task_id {
+            return self.cancel(&id, ctx);
         }
+
+        // Fallback: search the waiting queue
+        let waiting_id = {
+            let mut queue = self.queue.lock().unwrap();
+            if let Some(pos) = queue.iter().position(|t| t.video_url == video_url) {
+                let task = queue.remove(pos).unwrap();
+                Some(task.id)
+            } else {
+                None
+            }
+            // queue lock guard dropped here
+        };
+
+        if let Some(id) = waiting_id {
+            self.update_record_status(&ctx.data_dir, video_url, "", "cancelled", Some("Cancelled by user".to_string()));
+            let _ = self.app_handle.emit("records-changed", ());
+            self.emit_queue_changed();
+            return Ok(());
+        }
+
+        Err(AppError::NotFound(format!("No active task found for url {}", video_url)))
     }
 
     /// Cancels a download task: kills process if running, removes from queue if waiting,
