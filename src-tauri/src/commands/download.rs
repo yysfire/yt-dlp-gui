@@ -532,3 +532,177 @@ pub async fn manual_check_all(
 ) -> Result<Vec<DownloadRecord>, String> {
     check_all_subscriptions(state, app_handle).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn make_record(
+        sub_id: &str,
+        title: &str,
+        url: &str,
+        vid: &str,
+        status: &str,
+    ) -> DownloadRecord {
+        let mut r = DownloadRecord::new(
+            sub_id.to_string(),
+            title.to_string(),
+            url.to_string(),
+            vid.to_string(),
+        );
+        r.status = status.to_string();
+        r
+    }
+
+    // ── recover_state tests (T031) ─────────────────────────────────
+
+    #[test]
+    fn test_recover_state_marks_downloading_as_failed() {
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let records = vec![
+            make_record("sub-1", "Video A", "https://youtube.com/watch?v=a", "vid-a", "downloading"),
+            make_record("sub-1", "Video B", "https://youtube.com/watch?v=b", "vid-b", "completed"),
+        ];
+        StorageService::save_download_records(tmp.path(), &records)
+            .expect("save should succeed");
+
+        recover_state(&tmp.path().to_path_buf()).expect("recover should succeed");
+
+        let recovered = StorageService::load_download_records(tmp.path())
+            .expect("load should succeed");
+        assert_eq!(recovered.len(), 2);
+        // Video A was "downloading" → should be "failed"
+        assert_eq!(recovered[0].status, "failed");
+        assert_eq!(recovered[0].error_message, Some("Application restarted".to_string()));
+        // Video B was "completed" → should stay "completed"
+        assert_eq!(recovered[1].status, "completed");
+        assert_eq!(recovered[1].error_message, None);
+    }
+
+    #[test]
+    fn test_recover_state_marks_paused_as_failed() {
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let records = vec![
+            make_record("sub-1", "Video", "https://youtube.com/watch?v=c", "vid-c", "paused"),
+        ];
+        StorageService::save_download_records(tmp.path(), &records)
+            .expect("save should succeed");
+
+        recover_state(&tmp.path().to_path_buf()).expect("recover should succeed");
+
+        let recovered = StorageService::load_download_records(tmp.path())
+            .expect("load should succeed");
+        assert_eq!(recovered[0].status, "failed");
+        assert_eq!(recovered[0].error_message, Some("Application restarted".to_string()));
+    }
+
+    #[test]
+    fn test_recover_state_leaves_completed_and_failed_unchanged() {
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let records = vec![
+            make_record("sub-1", "Video A", "https://youtube.com/watch?v=a", "vid-a", "completed"),
+            make_record("sub-1", "Video B", "https://youtube.com/watch?v=b", "vid-b", "failed"),
+            make_record("sub-1", "Video C", "https://youtube.com/watch?v=c", "vid-c", "cancelled"),
+        ];
+        StorageService::save_download_records(tmp.path(), &records)
+            .expect("save should succeed");
+
+        recover_state(&tmp.path().to_path_buf()).expect("recover should succeed");
+
+        let recovered = StorageService::load_download_records(tmp.path())
+            .expect("load should succeed");
+        assert_eq!(recovered.len(), 3);
+        assert_eq!(recovered[0].status, "completed");
+        assert_eq!(recovered[1].status, "failed");
+        assert_eq!(recovered[2].status, "cancelled");
+    }
+
+    #[test]
+    fn test_recover_state_no_changes_when_nothing_to_recover() {
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let records = vec![
+            make_record("sub-1", "Video", "https://youtube.com/watch?v=a", "vid-a", "completed"),
+        ];
+        StorageService::save_download_records(tmp.path(), &records)
+            .expect("save should succeed");
+
+        recover_state(&tmp.path().to_path_buf()).expect("recover should succeed");
+
+        let recovered = StorageService::load_download_records(tmp.path())
+            .expect("load should succeed");
+        assert_eq!(recovered[0].status, "completed");
+    }
+
+    // ── Dedup logic tests (T014) ───────────────────────────────────
+
+    /// Helper that mimics the dedup logic in check_and_download:
+    /// builds seen_ids and seen_urls HashSet from existing records,
+    /// skipping "failed" records to allow retry.
+    fn should_skip(
+        existing: &[DownloadRecord],
+        video_id: &str,
+        video_url: &str,
+    ) -> bool {
+        let seen_ids: std::collections::HashSet<String> = existing
+            .iter()
+            .filter(|r| r.status != "failed")
+            .filter(|r| !r.video_id.is_empty())
+            .map(|r| r.video_id.clone())
+            .collect();
+        let seen_urls: std::collections::HashSet<String> = existing
+            .iter()
+            .filter(|r| r.status != "failed")
+            .map(|r| r.video_url.clone())
+            .collect();
+
+        if !video_id.is_empty() {
+            seen_ids.contains(video_id)
+        } else {
+            seen_urls.contains(video_url)
+        }
+    }
+
+    #[test]
+    fn test_dedup_skips_existing_completed_video_id() {
+        let existing = vec![
+            make_record("sub-1", "Video", "https://youtube.com/watch?v=abc", "abc", "completed"),
+        ];
+        assert!(should_skip(&existing, "abc", "https://youtube.com/watch?v=abc"));
+    }
+
+    #[test]
+    fn test_dedup_skips_existing_completed_video_url_fallback() {
+        let existing = vec![
+            make_record("sub-1", "Video", "https://youtube.com/watch?v=abc", "", "completed"),
+        ];
+        assert!(should_skip(&existing, "", "https://youtube.com/watch?v=abc"));
+    }
+
+    #[test]
+    fn test_dedup_allows_retry_for_failed_record() {
+        let existing = vec![
+            make_record("sub-1", "Video", "https://youtube.com/watch?v=abc", "abc", "failed"),
+        ];
+        // Failed records are excluded from seen_ids/seen_urls, so this should return false
+        assert!(!should_skip(&existing, "abc", "https://youtube.com/watch?v=abc"));
+    }
+
+    #[test]
+    fn test_dedup_allows_new_video() {
+        let existing = vec![
+            make_record("sub-1", "Video A", "https://youtube.com/watch?v=abc", "abc", "completed"),
+        ];
+        // Different video_id
+        assert!(!should_skip(&existing, "xyz", "https://youtube.com/watch?v=xyz"));
+    }
+
+    #[test]
+    fn test_dedup_skips_cancelled_record() {
+        let existing = vec![
+            make_record("sub-1", "Video", "https://youtube.com/watch?v=abc", "abc", "cancelled"),
+        ];
+        // Cancelled records are in seen_ids (not "failed"), so should be skipped
+        assert!(should_skip(&existing, "abc", "https://youtube.com/watch?v=abc"));
+    }
+}
