@@ -168,7 +168,7 @@ export default function AppShell({
               onRetryDownload={handleRetry}
             />
           </div>
-          <StatusBar />
+          <StatusBar refreshTrigger={selectedId} />
         </div>
       </div>
 

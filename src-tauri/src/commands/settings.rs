@@ -36,7 +36,16 @@ pub async fn update_settings(
 pub async fn get_app_state(
     state: State<'_, AppContext>,
 ) -> Result<AppState, String> {
-    StorageService::load_state(&state.data_dir).map_err(|e| e.to_string())
+    let mut app_state = StorageService::load_state(&state.data_dir).map_err(|e| e.to_string())?;
+    // Recompute from actual records in case state.json is stale
+    if let Ok(records) = StorageService::load_download_records(&state.data_dir) {
+        let actual = records.iter().filter(|r| r.status == "completed").count() as u32;
+        if app_state.total_downloads != actual {
+            app_state.total_downloads = actual;
+            let _ = StorageService::save_state(&state.data_dir, &app_state);
+        }
+    }
+    Ok(app_state)
 }
 
 /// Starts the background scheduler that periodically checks all subscriptions.

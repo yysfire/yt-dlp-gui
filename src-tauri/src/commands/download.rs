@@ -125,17 +125,19 @@ pub async fn check_subscription(
     state: State<'_, AppContext>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<DownloadRecord>, String> {
-    let subs = StorageService::load_subscriptions(&state.data_dir)
+    let mut subs = StorageService::load_subscriptions(&state.data_dir)
         .map_err(|e| e.to_string())?;
-    let sub = subs
+    let sub_idx = subs
         .iter()
-        .find(|s| s.id == id)
+        .position(|s| s.id == id)
         .ok_or_else(|| AppError::NotFound(format!("Subscription not found: {}", id)))
         .map_err(|e| e.to_string())?;
 
-    if sub.paused {
+    if subs[sub_idx].paused {
         return Ok(Vec::new());
     }
+
+    let sub = &subs[sub_idx];
 
     // Clone settings values and drop the MutexGuard before awaiting
     let (yt_dlp_path, proxy, cookie_file, download_dir) = {
@@ -166,6 +168,13 @@ pub async fn check_subscription(
     .await
     .map_err(|e| e.to_string())?;
 
+    // Update per-subscription data — download_count is managed by queue callback
+    let sub = &mut subs[sub_idx];
+    sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
+    sub.last_check_status = Some("success".to_string());
+    sub.last_check_error = None;
+    StorageService::save_subscriptions(&state.data_dir, &subs).map_err(|e| e.to_string())?;
+
     Ok(new_records)
 }
 
@@ -175,7 +184,7 @@ pub async fn check_all_subscriptions(
     state: State<'_, AppContext>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<DownloadRecord>, String> {
-    let subs = StorageService::load_subscriptions(&state.data_dir)
+    let mut subs = StorageService::load_subscriptions(&state.data_dir)
         .map_err(|e| e.to_string())?;
 
     // Clone settings values and drop the MutexGuard before awaiting
@@ -194,7 +203,7 @@ pub async fn check_all_subscriptions(
         StorageService::load_download_records(&state.data_dir).map_err(|e| e.to_string())?;
 
     let mut all_new: Vec<DownloadRecord> = Vec::new();
-    let mut total_completed: u32 = 0;
+    let mut subs_changed = false;
 
     log::info!(
         "check_all: {} subscriptions, cookie={}, proxy={}, ytdlp={}",
@@ -204,11 +213,12 @@ pub async fn check_all_subscriptions(
         yt_dlp_path,
     );
 
-    for sub in &subs {
-        if sub.paused {
+    for idx in 0..subs.len() {
+        if subs[idx].paused {
             continue;
         }
 
+        let sub = &subs[idx];
         match check_and_download(
             sub,
             &yt_dlp_path,
@@ -223,24 +233,37 @@ pub async fn check_all_subscriptions(
         .await
         {
             Ok(new_records) => {
-                total_completed +=
-                    new_records.iter().filter(|r| r.status == "completed").count() as u32;
+                // download_count is managed by the download queue callback
+                let sub = &mut subs[idx];
+                sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
+                sub.last_check_status = Some("success".to_string());
+                sub.last_check_error = None;
+                subs_changed = true;
                 all_new.extend(new_records);
             }
             Err(e) => {
-                return Err(format!(
-                    "Error checking {}: {}",
+                let sub = &mut subs[idx];
+                sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
+                sub.last_check_status = Some("failed".to_string());
+                sub.last_check_error = Some(e.to_string());
+                subs_changed = true;
+                log::error!(
+                    "check_all: error checking {}: {}",
                     sub.channel_name,
-                    e
-                ));
+                    sub.last_check_error.as_deref().unwrap_or("")
+                );
             }
         }
     }
 
-    // Update application state
+    if subs_changed {
+        StorageService::save_subscriptions(&state.data_dir, &subs).map_err(|e| e.to_string())?;
+    }
+
+    // Update application state — only last_check_time.
+    // total_downloads is managed by the download queue completion callback.
     let mut updated_state = app_state.clone();
     updated_state.last_check_time = Some(Utc::now().to_rfc3339());
-    updated_state.total_downloads += total_completed;
     StorageService::save_state(&state.data_dir, &updated_state)
         .map_err(|e| e.to_string())?;
 

@@ -25,6 +25,15 @@ pub struct Subscription {
     pub created_at: String,
     /// ISO 8601 timestamp of the last check, or None if never checked
     pub last_checked_at: Option<String>,
+    /// Number of videos successfully downloaded from this subscription
+    #[serde(default)]
+    pub download_count: u32,
+    /// Status of the last check: "success" or "failed"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_check_status: Option<String>,
+    /// Error message from the last failed check
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_check_error: Option<String>,
 }
 
 impl Subscription {
@@ -47,6 +56,9 @@ impl Subscription {
             group_name: "未分组".to_string(),
             created_at: Utc::now().to_rfc3339(),
             last_checked_at: None,
+            download_count: 0,
+            last_check_status: None,
+            last_check_error: None,
         }
     }
 }
@@ -154,5 +166,76 @@ mod tests {
             "https://example.com/avatar.jpg".to_string(),
         );
         assert_eq!(sub.group_name, "未分组");
+    }
+
+    // ── Per-subscription tracking fields (TDD) ─────────────────────
+
+    #[test]
+    fn test_subscription_new_download_count_default() {
+        let sub = Subscription::new(
+            "https://youtube.com/@test".to_string(),
+            "youtube".to_string(),
+            "Test".to_string(),
+            "".to_string(),
+        );
+        assert_eq!(sub.download_count, 0);
+    }
+
+    #[test]
+    fn test_subscription_new_check_status_default() {
+        let sub = Subscription::new(
+            "https://youtube.com/@test".to_string(),
+            "youtube".to_string(),
+            "Test".to_string(),
+            "".to_string(),
+        );
+        assert_eq!(sub.last_check_status, None);
+        assert_eq!(sub.last_check_error, None);
+    }
+
+    #[test]
+    fn test_subscription_new_fields_serde_roundtrip() {
+        let mut sub = Subscription::new(
+            "https://youtube.com/@test".to_string(),
+            "youtube".to_string(),
+            "Test Channel".to_string(),
+            "https://example.com/avatar.jpg".to_string(),
+        );
+        sub.download_count = 5;
+        sub.last_checked_at = Some("2026-06-02T12:00:00Z".to_string());
+        sub.last_check_status = Some("success".to_string());
+        sub.last_check_error = None;
+
+        let json = serde_json::to_string(&sub).expect("serialization should succeed");
+        assert!(json.contains("\"download_count\":5"));
+        assert!(json.contains("\"last_checked_at\":\"2026-06-02T12:00:00Z\""));
+        assert!(json.contains("\"last_check_status\":\"success\""));
+
+        let deserialized: Subscription =
+            serde_json::from_str(&json).expect("deserialization should succeed");
+        assert_eq!(deserialized.download_count, 5);
+        assert_eq!(deserialized.last_check_status, Some("success".to_string()));
+        assert_eq!(deserialized.last_check_error, None);
+    }
+
+    #[test]
+    fn test_subscription_new_fields_error_state() {
+        let mut sub = Subscription::new(
+            "https://youtube.com/@test".to_string(),
+            "youtube".to_string(),
+            "Test Channel".to_string(),
+            "".to_string(),
+        );
+        sub.last_check_status = Some("failed".to_string());
+        sub.last_check_error = Some("Network error".to_string());
+
+        let json = serde_json::to_string(&sub).expect("serialization should succeed");
+        assert!(json.contains("\"failed\""));
+        assert!(json.contains("\"Network error\""));
+
+        let deserialized: Subscription =
+            serde_json::from_str(&json).expect("deserialization should succeed");
+        assert_eq!(deserialized.last_check_status, Some("failed".to_string()));
+        assert_eq!(deserialized.last_check_error, Some("Network error".to_string()));
     }
 }

@@ -73,6 +73,12 @@ pub fn run() {
             // Deduplicate download records from previous sessions
             let _ = StorageService::deduplicate_records(&data_dir_clone);
 
+            // Recompute total_downloads from actual completed records
+            let _ = StorageService::recompute_total_downloads(&data_dir_clone);
+
+            // Recompute per-subscription download counts from records
+            let _ = StorageService::recompute_subscription_download_counts(&data_dir_clone);
+
             // Initialize the global download queue
             let app_handle = app.handle().clone();
             let queue = DownloadQueue::new(app_handle.clone(), max_concurrent);
@@ -93,7 +99,7 @@ pub fn run() {
                     interval.tick().await;
                     log::info!("Scheduler: checking subscriptions...");
 
-                    let subs = StorageService::load_subscriptions(&data_dir_clone)
+                    let mut subs = StorageService::load_subscriptions(&data_dir_clone)
                         .unwrap_or_default();
                     let records = StorageService::load_download_records(&data_dir_clone)
                         .unwrap_or_default();
@@ -106,13 +112,13 @@ pub fn run() {
                     let download_dir =
                         std::path::PathBuf::from(&settings_clone.download_dir);
 
-                    let mut total_completed: u32 = 0;
-
-                    for sub in &subs {
-                        if sub.paused {
+                    let mut subs_changed = false;
+                    for idx in 0..subs.len() {
+                        if subs[idx].paused {
                             continue;
                         }
 
+                        let sub = &subs[idx];
                         match commands::download::check_and_download(
                             sub,
                             &yt_dlp_path,
@@ -127,12 +133,20 @@ pub fn run() {
                         .await
                         {
                             Ok(new_records) => {
-                                total_completed += new_records
-                                    .iter()
-                                    .filter(|r| r.status == "completed")
-                                    .count() as u32;
+                                // download_count is managed by the download queue callback
+                                let sub = &mut subs[idx];
+                                sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
+                                sub.last_check_status = Some("success".to_string());
+                                sub.last_check_error = None;
+                                subs_changed = true;
+                                let _ = new_records; // avoid unused warning
                             }
                             Err(e) => {
+                                let sub = &mut subs[idx];
+                                sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
+                                sub.last_check_status = Some("failed".to_string());
+                                sub.last_check_error = Some(e.to_string());
+                                subs_changed = true;
                                 log::error!(
                                     "Scheduler: error checking {}: {}",
                                     sub.channel_name,
@@ -142,11 +156,15 @@ pub fn run() {
                         }
                     }
 
-                    // Update application state
+                    if subs_changed {
+                        let _ = StorageService::save_subscriptions(&data_dir_clone, &subs);
+                    }
+
+                    // Update application state — only last_check_time.
+                    // total_downloads is managed by the download queue completion callback.
                     let mut updated_state = app_state;
                     updated_state.last_check_time =
                         Some(chrono::Utc::now().to_rfc3339());
-                    updated_state.total_downloads += total_completed;
                     let _ = StorageService::save_state(
                         &data_dir_clone,
                         &updated_state,

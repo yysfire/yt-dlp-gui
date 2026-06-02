@@ -1,6 +1,19 @@
 import { Box, Typography, Avatar, Chip, Alert } from "@mui/material";
+import {
+  CheckCircle as SuccessIcon,
+  Error as ErrorIcon,
+} from "@mui/icons-material";
 import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask } from "@/types";
 import DownloadRecordList from "./DownloadRecordList";
+
+function formatTime(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString("zh-CN");
+  } catch {
+    return iso;
+  }
+}
 
 interface DetailPanelProps {
   subscription: Subscription | null;
@@ -91,6 +104,28 @@ export default function DetailPanel({
               />
             )}
           </div>
+          {/* Per-subscription stats */}
+          <div className="flex items-center gap-2 mt-1">
+            <Typography variant="caption" color="text.secondary">
+              已下载: {subscription.download_count} 个
+            </Typography>
+            {subscription.last_checked_at && (
+              <Typography variant="caption" color="text.disabled">
+                · 上次检查: {formatTime(subscription.last_checked_at)}
+              </Typography>
+            )}
+            {subscription.last_check_status === "success" && (
+              <SuccessIcon sx={{ fontSize: 14, color: "success.main" }} />
+            )}
+            {subscription.last_check_status === "failed" && (
+              <ErrorIcon sx={{ fontSize: 14, color: "error.main" }} />
+            )}
+          </div>
+          {subscription.last_check_status === "failed" && subscription.last_check_error && (
+            <Typography variant="caption" color="error.main" component="div" className="mt-0.5">
+              错误: {subscription.last_check_error}
+            </Typography>
+          )}
           <Typography
             variant="caption"
             color="text.disabled"

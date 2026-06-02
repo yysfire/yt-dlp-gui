@@ -1,29 +1,41 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Box, Typography } from "@mui/material";
+import { listen } from "@tauri-apps/api/event";
 import * as api from "@/lib/tauri";
 import type { AppState } from "@/types";
 
 /** Bottom status bar showing last check time, download count, and scheduler status. */
-export default function StatusBar() {
+export default function StatusBar({ refreshTrigger }: { refreshTrigger?: string | null }) {
   const [state, setState] = useState<AppState>({
     last_check_time: null,
     total_downloads: 0,
   });
 
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const s = await api.getAppState();
-        setState(s);
-      } catch {
-        // Silently ignore — status bar is informational only
-      }
-    };
-    load();
-    // Refresh every 30 seconds
-    const interval = setInterval(load, 30_000);
-    return () => clearInterval(interval);
+  const refresh = useCallback(async () => {
+    try {
+      const s = await api.getAppState();
+      setState(s);
+    } catch {
+      // Silently ignore — status bar is informational only
+    }
   }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh, refreshTrigger]);
+
+  useEffect(() => {
+    // Periodic refresh as safety net
+    const interval = setInterval(refresh, 60_000);
+    // Instant refresh on record changes and scheduler completion
+    const unlistenRecordsPromise = listen("records-changed", () => { refresh(); });
+    const unlistenSchedulerPromise = listen("scheduler-check-complete", () => { refresh(); });
+    return () => {
+      clearInterval(interval);
+      unlistenRecordsPromise.then((fn) => fn());
+      unlistenSchedulerPromise.then((fn) => fn());
+    };
+  }, [refresh]);
 
   const formatTime = (iso: string | null): string => {
     if (!iso) return "从未";

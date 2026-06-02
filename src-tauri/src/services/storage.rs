@@ -109,6 +109,56 @@ impl StorageService {
         Ok(removed)
     }
 
+    /// Recomputes total_downloads from actual download records and syncs state.json.
+    /// Fixes any discrepancy caused by race conditions or interrupted writes.
+    pub fn recompute_total_downloads(data_dir: &Path) -> Result<u32, AppError> {
+        let records = Self::load_download_records(data_dir)?;
+        let actual = records.iter().filter(|r| r.status == "completed").count() as u32;
+        if let Ok(mut state) = Self::load_state(data_dir) {
+            if state.total_downloads != actual {
+                log::info!(
+                    "Recomputing total_downloads: {} → {} (from {} records, {} completed)",
+                    state.total_downloads,
+                    actual,
+                    records.len(),
+                    actual
+                );
+                state.total_downloads = actual;
+                Self::save_state(data_dir, &state)?;
+            }
+        }
+        Ok(actual)
+    }
+
+    /// Recomputes per-subscription download_count from actual completed records.
+    pub fn recompute_subscription_download_counts(data_dir: &Path) -> Result<(), AppError> {
+        let mut subs = Self::load_subscriptions(data_dir)?;
+        let records = Self::load_download_records(data_dir)?;
+        let mut changed = false;
+
+        for sub in subs.iter_mut() {
+            let count = records
+                .iter()
+                .filter(|r| r.subscription_id == sub.id && r.status == "completed")
+                .count() as u32;
+            if sub.download_count != count {
+                log::info!(
+                    "Recomputing download_count for {}: {} → {}",
+                    sub.channel_name,
+                    sub.download_count,
+                    count
+                );
+                sub.download_count = count;
+                changed = true;
+            }
+        }
+
+        if changed {
+            Self::save_subscriptions(data_dir, &subs)?;
+        }
+        Ok(())
+    }
+
     // ── Settings ────────────────────────────────────────────────────
 
     /// Loads settings from `settings.json`. Returns defaults if the file

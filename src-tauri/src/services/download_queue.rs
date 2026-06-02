@@ -406,6 +406,14 @@ impl DownloadQueue {
                     let _ = StorageService::save_state(&ctx.data_dir, &app_state);
                 }
 
+                // Increment per-subscription download count
+                if let Ok(mut subs) = StorageService::load_subscriptions(&ctx.data_dir) {
+                    if let Some(sub) = subs.iter_mut().find(|s| s.id == task.subscription_id) {
+                        sub.download_count += 1;
+                        let _ = StorageService::save_subscriptions(&ctx.data_dir, &subs);
+                    }
+                }
+
                 let _ = app_handle.emit("records-changed", ());
             }
             _ => {

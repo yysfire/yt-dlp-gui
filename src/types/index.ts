@@ -10,6 +10,9 @@ export interface Subscription {
   group_name: string;
   created_at: string; // ISO 8601
   last_checked_at: string | null;
+  download_count: number;
+  last_check_status: "success" | "failed" | null;
+  last_check_error: string | null;
 }
 
 /** Represents a single video download record. */
