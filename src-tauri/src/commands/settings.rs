@@ -25,7 +25,14 @@ pub async fn update_settings(
 
     // Update runtime cache
     let mut cached = state.settings.lock().map_err(|e| e.to_string())?;
+    let interval_changed = cached.check_interval_minutes != settings.check_interval_minutes;
     *cached = settings.clone();
+    drop(cached); // release lock before await
+
+    // Notify scheduler if interval changed so it wakes up immediately
+    if interval_changed {
+        let _ = state.scheduler_notify.send(());
+    }
 
     log::info!("Settings updated");
     Ok(settings)
@@ -48,97 +55,14 @@ pub async fn get_app_state(
     Ok(app_state)
 }
 
-/// Starts the background scheduler that periodically checks all subscriptions.
+/// The background scheduler is managed by lib.rs setup. This command exists
+/// for API compatibility and logs that the scheduler is already running.
 #[tauri::command]
 pub async fn start_scheduler(
-    app_handle: tauri::AppHandle,
-    state: State<'_, AppContext>,
+    _app_handle: tauri::AppHandle,
+    _state: State<'_, AppContext>,
 ) -> Result<(), String> {
-    let (interval_mins, data_dir, settings_clone) = {
-        let settings = state.settings.lock().map_err(|e| e.to_string())?;
-        (
-            settings.check_interval_minutes,
-            state.data_dir.clone(),
-            settings.clone(),
-        )
-    };
-
-    log::info!(
-        "Starting scheduler with interval {} minutes",
-        interval_mins
-    );
-
-    // Spawn a background tokio task that periodically checks all subscriptions
-    let handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(
-            tokio::time::Duration::from_secs((interval_mins as u64) * 60),
-        );
-        // Skip the first immediate tick
-        interval.tick().await;
-
-        loop {
-            interval.tick().await;
-            log::info!("Scheduler: checking subscriptions...");
-
-            let subs = StorageService::load_subscriptions(&data_dir).unwrap_or_default();
-            let records =
-                StorageService::load_download_records(&data_dir).unwrap_or_default();
-            let app_state = StorageService::load_state(&data_dir).unwrap_or_default();
-
-            let yt_dlp_path = settings_clone.yt_dlp_path.clone();
-            let proxy = Some(settings_clone.proxy_url.clone());
-            let cookie_file = Some(settings_clone.cookie_file.clone());
-            let download_dir = std::path::PathBuf::from(&settings_clone.download_dir);
-
-            let mut total_completed: u32 = 0;
-
-            for sub in &subs {
-                if sub.paused {
-                    continue;
-                }
-
-                match crate::commands::download::check_and_download(
-                    sub,
-                    &yt_dlp_path,
-                    &proxy,
-                    &cookie_file,
-                    &download_dir,
-                    &data_dir,
-                    &app_state.last_check_time,
-                    &records,
-                    &app_handle,
-                )
-                .await
-                {
-                    Ok(new_records) => {
-                        total_completed += new_records
-                            .iter()
-                            .filter(|r| r.status == "completed")
-                            .count() as u32;
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "Scheduler: error checking {}: {}",
-                            sub.channel_name,
-                            e
-                        );
-                    }
-                }
-            }
-
-            // Update state
-            let mut updated_state = app_state;
-            updated_state.last_check_time =
-                Some(chrono::Utc::now().to_rfc3339());
-            updated_state.total_downloads += total_completed;
-            let _ = StorageService::save_state(&data_dir, &updated_state);
-        }
-    });
-
-    // Leak the handle to keep the scheduler alive (improved in T05)
-    log::info!("Scheduler started successfully");
-    let _ = Box::leak(Box::new(handle));
-
+    log::info!("start_scheduler called — scheduler is managed by lib.rs setup");
     Ok(())
 }
 

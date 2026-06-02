@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use tauri::{Emitter, Manager};
+use tokio::sync::watch;
 
 mod models;
 mod utils;
@@ -17,6 +18,8 @@ pub struct AppContext {
     pub data_dir: PathBuf,
     /// Runtime settings cache, protected by a mutex for interior mutability.
     pub settings: Mutex<models::settings::AppSettings>,
+    /// Watch channel to notify the scheduler when settings (interval) change.
+    pub scheduler_notify: watch::Sender<()>,
 }
 
 /// Holds the global download queue instance.
@@ -55,6 +58,7 @@ pub fn run() {
                 &StorageService::load_state(&data_dir).unwrap_or_default(),
             );
 
+            let (scheduler_tx, scheduler_rx) = watch::channel(());
             let interval_mins = settings.check_interval_minutes;
             let max_concurrent = settings.max_concurrent_downloads;
             let data_dir_clone = data_dir.clone();
@@ -63,6 +67,7 @@ pub fn run() {
             let ctx = AppContext {
                 data_dir,
                 settings: Mutex::new(settings),
+                scheduler_notify: scheduler_tx,
             };
 
             app.manage(ctx);
@@ -89,14 +94,15 @@ pub fn run() {
 
             // Start the background scheduler in a tokio task
             tauri::async_runtime::spawn(async move {
-                let mut interval = tokio::time::interval(
-                    tokio::time::Duration::from_secs((interval_mins as u64) * 60),
-                );
+                let mut interval_mins = interval_mins;
+                let mut rx = scheduler_rx;
+
                 // Skip first immediate tick
-                interval.tick().await;
+                tokio::time::sleep(
+                    tokio::time::Duration::from_secs((interval_mins as u64) * 60),
+                ).await;
 
                 loop {
-                    interval.tick().await;
                     log::info!("Scheduler: checking subscriptions...");
 
                     let mut subs = StorageService::load_subscriptions(&data_dir_clone)
@@ -172,6 +178,19 @@ pub fn run() {
 
                     // Emit an event to notify the frontend to refresh
                     let _ = app_handle.emit("scheduler-check-complete", ());
+
+                    // Wait for interval OR immediate wake on settings change
+                    tokio::select! {
+                        _ = tokio::time::sleep(
+                            tokio::time::Duration::from_secs((interval_mins as u64) * 60),
+                        ) => {},
+                        _ = rx.changed() => {
+                            // Settings changed — reload interval for immediate effect
+                            let settings = StorageService::load_settings(&data_dir_clone);
+                            interval_mins = settings.check_interval_minutes;
+                            log::info!("Scheduler: interval updated to {} minutes", interval_mins);
+                        }
+                    }
                 }
             });
 

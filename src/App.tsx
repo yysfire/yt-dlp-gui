@@ -146,6 +146,17 @@ export default function App() {
     };
   }, [refreshRecords]);
 
+  // Listen for scheduler-check-complete (background check finished)
+  useEffect(() => {
+    const unlistenPromise = listen("scheduler-check-complete", () => {
+      refreshRecords();
+      refreshSubs();
+    });
+    return () => {
+      unlistenPromise.then((fn) => fn());
+    };
+  }, [refreshRecords, refreshSubs]);
+
   // Handle dark mode toggle (called when settings are updated externally)
   const handleDarkModeChange = useCallback((isDark: boolean) => {
     setDarkMode(isDark);
