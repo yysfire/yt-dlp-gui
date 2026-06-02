@@ -248,6 +248,7 @@ pub async fn check_all_subscriptions(
 }
 
 /// Returns download records, optionally filtered by subscription ID.
+/// Records are deduplicated by video_id before returning.
 #[tauri::command]
 pub async fn get_download_records(
     subscription_id: Option<String>,
@@ -255,19 +256,23 @@ pub async fn get_download_records(
 ) -> Result<Vec<DownloadRecord>, String> {
     let records = StorageService::load_download_records(&state.data_dir)
         .map_err(|e| e.to_string())?;
+    let deduped = StorageService::deduplicate_vec(records);
 
     match subscription_id {
-        Some(sid) => Ok(records.into_iter().filter(|r| r.subscription_id == sid).collect()),
-        None => Ok(records),
+        Some(sid) => Ok(deduped.into_iter().filter(|r| r.subscription_id == sid).collect()),
+        None => Ok(deduped),
     }
 }
 
 /// Returns all download records without filtering.
+/// Records are deduplicated by video_id before returning.
 #[tauri::command]
 pub async fn get_all_download_records(
     state: State<'_, AppContext>,
 ) -> Result<Vec<DownloadRecord>, String> {
-    StorageService::load_download_records(&state.data_dir).map_err(|e| e.to_string())
+    let records = StorageService::load_download_records(&state.data_dir)
+        .map_err(|e| e.to_string())?;
+    Ok(StorageService::deduplicate_vec(records))
 }
 
 /// Returns the current in-memory download queue tasks.

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::models::{AppSettings, AppState, DownloadRecord, Subscription};
@@ -40,6 +41,72 @@ impl StorageService {
     ) -> Result<(), AppError> {
         let path = data_dir.join("download_records.json");
         Self::write_json(&path, records)
+    }
+
+    /// Deduplicate a vec of DownloadRecords in memory (no disk I/O).
+    /// Same priority rules as deduplicate_records().
+    pub fn deduplicate_vec(records: Vec<DownloadRecord>) -> Vec<DownloadRecord> {
+        let status_rank = |s: &str| -> usize {
+            match s {
+                "completed" => 0,
+                "downloading" => 1,
+                "failed" => 2,
+                "paused" => 3,
+                "cancelled" => 4,
+                _ => 9,
+            }
+        };
+
+        let mut groups: HashMap<String, Vec<DownloadRecord>> =
+            HashMap::new();
+        let mut no_id_records: Vec<DownloadRecord> = Vec::new();
+
+        for r in records {
+            if r.video_id.is_empty() {
+                no_id_records.push(r);
+            } else {
+                groups.entry(r.video_id.clone()).or_default().push(r);
+            }
+        }
+
+        let mut deduped: Vec<DownloadRecord> = Vec::new();
+        for (_vid, mut group) in groups {
+            if group.len() == 1 {
+                deduped.push(group.pop().unwrap());
+            } else {
+                group.sort_by(|a, b| {
+                    let ra = status_rank(&a.status);
+                    let rb = status_rank(&b.status);
+                    ra.cmp(&rb).then_with(|| b.downloaded_at.cmp(&a.downloaded_at))
+                });
+                deduped.push(group.remove(0));
+            }
+        }
+        deduped.extend(no_id_records);
+        deduped
+    }
+
+    /// Deduplicates download records by video_id.
+    /// Priority: completed > downloading > failed > paused > cancelled.
+    /// Within the same status, keeps the one with the latest downloaded_at.
+    /// Records without a video_id are kept as-is.
+    /// Returns the number of duplicate records removed.
+    pub fn deduplicate_records(data_dir: &Path) -> Result<usize, AppError> {
+        let records = Self::load_download_records(data_dir)?;
+        let original_count = records.len();
+        let deduped = Self::deduplicate_vec(records);
+        let removed = original_count - deduped.len();
+        if removed > 0 {
+            log::info!(
+                "Deduplicated download records: removed {} duplicate(s), {} → {} records",
+                removed,
+                original_count,
+                deduped.len()
+            );
+            Self::save_download_records(data_dir, &deduped)?;
+        }
+
+        Ok(removed)
     }
 
     // ── Settings ────────────────────────────────────────────────────
@@ -265,6 +332,57 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].subscription_id, sub_id_b);
         assert_eq!(loaded[0].video_title, "Video B1");
+    }
+
+    #[test]
+    fn test_deduplicate_vec_keeps_completed_over_failed() {
+        let mut r1 = make_record("sub-1", "Video");
+        r1.video_id = "vid-1".to_string();
+        r1.status = "failed".to_string();
+        r1.downloaded_at = "2026-06-01T12:00:00Z".to_string();
+
+        let mut r2 = make_record("sub-1", "Video");
+        r2.video_id = "vid-1".to_string();
+        r2.status = "completed".to_string();
+        r2.downloaded_at = "2026-06-01T11:00:00Z".to_string();
+
+        let result = StorageService::deduplicate_vec(vec![r1.clone(), r2.clone()]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].status, "completed");
+    }
+
+    #[test]
+    fn test_deduplicate_vec_same_status_keeps_latest() {
+        let mut r1 = make_record("sub-1", "Video");
+        r1.video_id = "vid-1".to_string();
+        r1.status = "failed".to_string();
+        r1.downloaded_at = "2026-06-01T12:00:00Z".to_string();
+
+        let mut r2 = make_record("sub-1", "Video");
+        r2.video_id = "vid-1".to_string();
+        r2.status = "failed".to_string();
+        r2.downloaded_at = "2026-06-01T13:00:00Z".to_string();
+
+        let result = StorageService::deduplicate_vec(vec![r1.clone(), r2.clone()]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].downloaded_at, "2026-06-01T13:00:00Z");
+    }
+
+    #[test]
+    fn test_deduplicate_vec_single_record_unchanged() {
+        let mut r = make_record("sub-1", "Video");
+        r.video_id = "vid-1".to_string();
+        let result = StorageService::deduplicate_vec(vec![r.clone()]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].video_id, "vid-1");
+    }
+
+    #[test]
+    fn test_deduplicate_vec_empty_id_kept() {
+        let r1 = make_record("sub-1", "Video A");
+        let r2 = make_record("sub-1", "Video B");
+        let result = StorageService::deduplicate_vec(vec![r1.clone(), r2.clone()]);
+        assert_eq!(result.len(), 2);
     }
 
     // ── Settings storage tests ─────────────────────────────────────

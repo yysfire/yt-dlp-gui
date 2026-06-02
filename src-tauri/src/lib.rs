@@ -70,6 +70,9 @@ pub fn run() {
             // Recover download state from previous session
             let _ = commands::download::recover_state(&data_dir_clone);
 
+            // Deduplicate download records from previous sessions
+            let _ = StorageService::deduplicate_records(&data_dir_clone);
+
             // Initialize the global download queue
             let app_handle = app.handle().clone();
             let queue = DownloadQueue::new(app_handle.clone(), max_concurrent);
