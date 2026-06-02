@@ -175,6 +175,12 @@ pub async fn check_subscription(
     sub.last_check_error = None;
     StorageService::save_subscriptions(&state.data_dir, &subs).map_err(|e| e.to_string())?;
 
+    // Also update global last_check_time
+    if let Ok(mut app_state) = StorageService::load_state(&state.data_dir) {
+        app_state.last_check_time = Some(chrono::Utc::now().to_rfc3339());
+        let _ = StorageService::save_state(&state.data_dir, &app_state);
+    }
+
     Ok(new_records)
 }
 

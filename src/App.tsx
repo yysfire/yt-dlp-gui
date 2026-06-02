@@ -186,9 +186,13 @@ export default function App() {
         recordsError={recordsError}
         onCheckSubscription={async (id) => {
           await checkSubscription(id);
+          await refreshSubs();
+          await refreshRecords();
         }}
         onManualCheckAll={async () => {
           await checkAll();
+          await refreshSubs();
+          await refreshRecords();
         }}
         onUpdateGroup={updateGroup}
         progressMap={progressMap}
