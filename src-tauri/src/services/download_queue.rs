@@ -14,6 +14,82 @@ use crate::services::{StorageService, YtDlpService};
 use crate::utils::AppError;
 use crate::utils::progress_parser;
 
+// ── Windows process suspension (S-07) ────────────────────────────
+
+#[cfg(windows)]
+mod windows_process {
+    use std::mem;
+
+    const TH32CS_SNAPTHREAD: u32 = 0x00000004;
+    const THREAD_SUSPEND_RESUME: u32 = 0x0002;
+
+    #[repr(C)]
+    struct ThreadEntry32 {
+        dw_size: u32,
+        _cnt_usage: u32,
+        th32_thread_id: u32,
+        th32_owner_process_id: u32,
+        _tp_base_pri: i32,
+        _tp_delta_pri: i32,
+        _dw_flags: u32,
+    }
+
+    extern "system" {
+        fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> isize;
+        fn Thread32First(h_snapshot: isize, lpte: *mut ThreadEntry32) -> i32;
+        fn Thread32Next(h_snapshot: isize, lpte: *mut ThreadEntry32) -> i32;
+        fn OpenThread(dw_desired_access: u32, b_inherit_handle: i32, dw_thread_id: u32) -> isize;
+        fn SuspendThread(h_thread: isize) -> u32;
+        fn ResumeThread(h_thread: isize) -> u32;
+        fn CloseHandle(h_object: isize) -> i32;
+    }
+
+    unsafe fn with_process_threads(pid: u32, action: fn(isize)) {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == -1isize {
+            return;
+        }
+
+        let mut te: ThreadEntry32 = mem::zeroed();
+        te.dw_size = mem::size_of::<ThreadEntry32>() as u32;
+
+        if Thread32First(snapshot, &mut te) != 0 {
+            loop {
+                if te.th32_owner_process_id == pid {
+                    let h = OpenThread(THREAD_SUSPEND_RESUME, 0, te.th32_thread_id);
+                    if h != -1isize && h != 0 {
+                        action(h);
+                        CloseHandle(h);
+                    }
+                }
+                te.dw_size = mem::size_of::<ThreadEntry32>() as u32;
+                if Thread32Next(snapshot, &mut te) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+    }
+
+    pub fn suspend_process(pid: u32) {
+        unsafe {
+            with_process_threads(pid, |h| {
+                SuspendThread(h);
+            });
+        }
+        log::info!("Windows: suspended process pid={}", pid);
+    }
+
+    pub fn resume_process(pid: u32) {
+        unsafe {
+            with_process_threads(pid, |h| {
+                ResumeThread(h);
+            });
+        }
+        log::info!("Windows: resumed process pid={}", pid);
+    }
+}
+
 /// Status of a download task in the in-memory queue.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -457,7 +533,7 @@ impl DownloadQueue {
 
                 #[cfg(windows)]
                 {
-                    log::warn!("Process pause on Windows is limited");
+                    windows_process::suspend_process(pid);
                 }
 
                 entry.task.status = TaskStatus::Paused;
@@ -517,7 +593,7 @@ impl DownloadQueue {
 
                 #[cfg(windows)]
                 {
-                    log::warn!("Process resume on Windows is limited");
+                    windows_process::resume_process(pid);
                 }
 
                 entry.task.status = TaskStatus::Running;
