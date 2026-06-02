@@ -6,6 +6,7 @@ import DownloadRecordItem from "./DownloadRecordItem";
 interface DownloadRecordListProps {
   records: DownloadRecord[];
   queueTasks: DownloadTask[];
+  subscriptionId?: string;
   progressMap?: Map<string, DownloadProgress>;
   onPause: (videoUrl: string) => void;
   onResume: (taskId: string) => void;
@@ -31,19 +32,25 @@ function statusPriority(status: string): number {
 export default function DownloadRecordList({
   records,
   queueTasks,
+  subscriptionId,
   progressMap,
   onPause,
   onResume,
   onCancel,
   onRetry,
 }: DownloadRecordListProps) {
+  const filteredQueueTasks = useMemo(() => {
+    if (!subscriptionId) return queueTasks;
+    return queueTasks.filter((t) => t.subscription_id === subscriptionId);
+  }, [queueTasks, subscriptionId]);
+
   const merged = useMemo(() => {
     // Track seen URLs to avoid duplicates
     const seen = new Set<string>();
     const items: (DownloadRecord & { _isQueueTask?: boolean; _taskId?: string })[] = [];
 
     // Queue tasks first (more real-time)
-    for (const task of queueTasks) {
+    for (const task of filteredQueueTasks) {
       if (task.status === "completed" || task.status === "cancelled") continue;
       seen.add(task.video_url);
       items.push({
@@ -78,7 +85,7 @@ export default function DownloadRecordList({
     });
 
     return items;
-  }, [records, queueTasks]);
+  }, [records, filteredQueueTasks]);
 
   if (merged.length === 0) {
     return (

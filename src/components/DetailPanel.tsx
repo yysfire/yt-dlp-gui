@@ -147,6 +147,7 @@ export default function DetailPanel({
         <DownloadRecordList
           records={records}
           queueTasks={queueTasks}
+          subscriptionId={subscription.id}
           progressMap={progressMap}
           onPause={onPauseDownload}
           onResume={onResumeDownload}
