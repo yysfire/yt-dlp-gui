@@ -65,7 +65,7 @@ Phase 3: 进程控制（依赖 Phase 2）
   └── 3.3 单元测试：状态转换正确性
 
 Phase 4: 前端集成（依赖 Phase 2-3）
-  ├── 4.1 DownloadQueuePanel 组件
+  ├── 4.1 DownloadRecordItem 合并队列和记录（统一暂停/取消/重试）
   ├── 4.2 DownloadProgressBar 组件
   ├── 4.3 useDownloadProgress hook
   └── 4.4 tauri.ts 新增 API 封装
@@ -94,7 +94,7 @@ src/
 ├── lib/tauri.ts                 # 修改：新增 invoke 封装
 ├── hooks/useDownloadRecords.ts  # 修改：新增方法
 ├── hooks/useDownloadProgress.ts # 新增：进度事件 hook
-├── components/DownloadQueuePanel.tsx  # 新增：队列面板
+├── components/DownloadRecordItem.tsx  # 修改：合并队列和记录
 └── components/DownloadProgressBar.tsx # 新增：进度条组件
 ```
 

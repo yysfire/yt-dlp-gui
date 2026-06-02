@@ -188,8 +188,8 @@
 ### Implementation for US4 (Frontend)
 
 - [X] T055 [US4] 实现前端 API 调用函数：`pauseDownload(id)`、`resumeDownload(id)`、`cancelDownload(id)` 在 `src/lib/tauri.ts`
-- [X] T056 [US4] 实现 `DownloadQueuePanel` 组件：展示队列中所有 `DownloadTask`（含状态标签、进度条），每个任务行的操作按钮（暂停/继续/取消），根据当前状态显示/隐藏按钮在 `src/components/DownloadQueuePanel.tsx`
-- [X] T057 [US4] 集成 `DownloadQueuePanel` 到 `AppShell`：替换或增强当前的 `DownloadRecordList`，传递 `useDownloadProgress` 数据和操作回调在 `src/components/AppShell.tsx`
+- [X] T056 [US4] 废弃 DownloadQueuePanel，在 DownloadRecordList 中合并队列任务和持久化记录（video_url 去重），DownloadRecordItem 统一暂停/取消/重试按钮
+- [X] T057 [US4] AppShell 移除 DownloadQueuePanel，新增 queueTasks 状态 fetch 和暂停/取消/重试回调，传递给 DetailPanel → DownloadRecordList
 
 **Checkpoint**: US4 独立可测 — 暂停/继续/取消操作正常，文件清理正确，UI 状态联动
 
@@ -278,7 +278,7 @@ US4: T044-T057 (暂停/继续/取消)
 ```bash
 # 前端组件可并行开发：
 T042 ─ DownloadProgressBar 组件
-T056 ─ DownloadQueuePanel 组件
+T056 ─ DownloadRecordList 合并队列和记录
 ```
 
 ---
@@ -336,5 +336,5 @@ Phase 8 (Polish) → 完整版本
 |------|--------|------|
 | Rust 新增 | 2 | `download_queue.rs`, `progress_parser.rs` |
 | Rust 修改 | 6 | `download.rs`, `settings.rs`, `ytdlp.rs`, `scheduler.rs`, `error.rs`, `lib.rs` |
-| TypeScript 新增 | 3 | `DownloadQueuePanel.tsx`, `DownloadProgressBar.tsx`, `useDownloadProgress.ts` |
-| TypeScript 修改 | 4 | `types/index.ts`, `lib/tauri.ts`, `useDownloadRecords.ts`, `AppShell.tsx` |
+| TypeScript 新增 | 2 | `DownloadProgressBar.tsx`, `useDownloadProgress.ts` |
+| TypeScript 修改 | 5 | `types/index.ts`, `lib/tauri.ts`, `useDownloadRecords.ts`, `DownloadRecordItem.tsx`, `DownloadRecordList.tsx` |

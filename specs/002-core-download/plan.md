@@ -102,14 +102,13 @@ src-tauri/src/
 
 src/
 ├── components/
-│   ├── DownloadQueuePanel.tsx # [新增] 下载队列面板（替换当前记录列表）
-│   ├── DownloadProgressBar.tsx# [新增] 单个下载进度条组件
-│   └── AppShell.tsx            # [修改] 集成 DownloadQueuePanel
+│   ├── DownloadRecordItem.tsx  # [修改] 合并队列任务和持久化记录，统一暂停/取消/重试按钮
+│   └── DownloadProgressBar.tsx# [新增] 单个下载进度条组件
 ├── hooks/
-│   ├── useDownloadRecords.ts  # [修改] 新增 pause/resume/cancel API 封装
-│   └── useDownloadProgress.ts # [新增] 实时进度事件监听器
-├── lib/tauri.ts               # [修改] 新增 pause/resume/cancel invoke 调用
-└── types/index.ts             # [修改] DownloadRecord 新增字段，新增 DownloadProgress
+│   ├── useDownloadRecords.ts   # [修改] 新增 pause/resume/cancel API 封装
+│   └── useDownloadProgress.ts  # [新增] 实时进度事件监听器
+├── lib/tauri.ts                # [修改] 新增 pause/resume/cancel invoke 调用
+└── types/index.ts              # [修改] DownloadRecord 新增字段，新增 DownloadProgress
 ```
 
 ## Complexity Tracking
