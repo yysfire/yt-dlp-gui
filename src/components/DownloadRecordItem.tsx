@@ -80,6 +80,8 @@ export default function DownloadRecordItem({
         return <FailedIcon fontSize="small" color="error" />;
       case "cancelled":
         return <CancelIcon fontSize="small" />;
+      case "waiting":
+        return <WaitingIcon fontSize="small" color="disabled" />;
       default:
         return isQueueTask ? <WaitingIcon fontSize="small" color="disabled" /> : <FileIcon fontSize="small" />;
     }
@@ -92,6 +94,7 @@ export default function DownloadRecordItem({
       case "paused": return "warning.main";
       case "failed": return "error.main";
       case "cancelled": return "text.disabled";
+      case "waiting": return "text.disabled";
       default: return "text.secondary";
     }
   };
@@ -103,6 +106,7 @@ export default function DownloadRecordItem({
       case "paused": return "已暂停";
       case "failed": return "失败";
       case "cancelled": return "已取消";
+      case "waiting": return "等待中";
       default: return record.status;
     }
   };

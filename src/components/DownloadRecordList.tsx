@@ -61,7 +61,7 @@ export default function DownloadRecordList({
         subscription_id: task.subscription_id,
         file_path: "",
         file_size: 0,
-        status: task.status === "failed" ? "failed" : task.status === "running" ? "downloading" : task.status === "paused" ? "paused" : "downloading",
+        status: task.status === "failed" ? "failed" : task.status === "running" ? "downloading" : task.status === "paused" ? "paused" : task.status === "waiting" ? "waiting" : task.status,
         error_message: task.error_message,
         downloaded_at: task.created_at,
         _isQueueTask: true,

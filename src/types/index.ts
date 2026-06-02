@@ -24,7 +24,7 @@ export interface DownloadRecord {
   video_url: string;
   file_path: string;
   file_size: number;
-  status: "downloading" | "completed" | "failed" | "paused" | "cancelled";
+  status: "downloading" | "completed" | "failed" | "paused" | "cancelled" | "waiting";
   error_message: string | null;
   downloaded_at: string; // ISO 8601
 }
