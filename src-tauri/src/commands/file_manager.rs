@@ -11,12 +11,17 @@ use crate::AppContext;
 /// bypassing the tauri shell plugin scope restrictions.
 ///
 /// On Linux, tries a fallback chain: gio open → xdg-open → nautilus → dolphin → thunar → pcmanfm
+///
+/// Uses `status()` (not `spawn()`) to actually wait for the opener to complete
+/// and detect whether it really succeeded.
 #[tauri::command]
 pub fn open_in_folder(
     file_path: String,
 ) -> Result<(), String> {
     let path = Path::new(&file_path);
     let dir = path.parent().unwrap_or(path);
+
+    log::info!("open_in_folder called with file_path={}, dir={}", file_path, dir.display());
 
     if !dir.exists() {
         return Err(format!("父目录不存在: {}", dir.display()));
@@ -26,24 +31,41 @@ pub fn open_in_folder(
 
     #[cfg(target_os = "linux")]
     {
-        // Fallback chain: try multiple file-openers in order
         let openers: &[&str] = &[
-            "gio",     // GLib I/O — works on most GTK-based desktops
-            "xdg-open",// XDG standard — works when MIME types are configured
-            "nautilus",// GNOME Files
-            "dolphin", // KDE Dolphin
-            "thunar",  // XFCE Thunar
-            "pcmanfm", // LXDE/LXQt PCManFM
+            "gio", "xdg-open", "nautilus", "dolphin", "thunar", "pcmanfm",
         ];
         for opener in openers {
-            let status = std::process::Command::new(opener)
+            log::info!("open_in_folder: trying {} {}", opener, dir_str);
+            match std::process::Command::new(opener)
                 .arg(&dir_str)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .spawn();
-            match status {
-                Ok(_) => return Ok(()),
-                Err(_) => continue,
+                .spawn()
+            {
+                Ok(mut child) => {
+                    // Wait briefly to see if the process exits with an error
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    match child.try_wait() {
+                        Ok(Some(status)) if !status.success() => {
+                            log::warn!("open_in_folder: {} exited with {}", opener, status);
+                            continue;
+                        }
+                        Ok(None) => {
+                            // Still running — success
+                            log::info!("open_in_folder: {} is running (pid {})", opener, child.id());
+                            return Ok(());
+                        }
+                        _ => {
+                            // Exited successfully or wait error — treat as success
+                            log::info!("open_in_folder: {} exited OK", opener);
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("open_in_folder: {} not found: {}", opener, e);
+                    continue;
+                }
             }
         }
         return Err("无法打开文件夹：未找到可用的文件管理器（已尝试 gio、xdg-open、nautilus、dolphin、thunar、pcmanfm）".to_string());
