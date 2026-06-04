@@ -9,6 +9,8 @@ use crate::AppContext;
 /// Opens the parent directory of a file in the system file manager.
 /// Uses `std::process::Command` to call the platform-native opener,
 /// bypassing the tauri shell plugin scope restrictions.
+///
+/// On Linux, tries a fallback chain: gio open → xdg-open → nautilus → dolphin → thunar → pcmanfm
 #[tauri::command]
 pub fn open_in_folder(
     file_path: String,
@@ -24,10 +26,27 @@ pub fn open_in_folder(
 
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open")
-            .arg(&dir_str)
-            .spawn()
-            .map_err(|e| format!("无法打开文件夹: {}", e))?;
+        // Fallback chain: try multiple file-openers in order
+        let openers: &[&str] = &[
+            "gio",     // GLib I/O — works on most GTK-based desktops
+            "xdg-open",// XDG standard — works when MIME types are configured
+            "nautilus",// GNOME Files
+            "dolphin", // KDE Dolphin
+            "thunar",  // XFCE Thunar
+            "pcmanfm", // LXDE/LXQt PCManFM
+        ];
+        for opener in openers {
+            let status = std::process::Command::new(opener)
+                .arg(&dir_str)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            match status {
+                Ok(_) => return Ok(()),
+                Err(_) => continue,
+            }
+        }
+        return Err("无法打开文件夹：未找到可用的文件管理器（已尝试 gio、xdg-open、nautilus、dolphin、thunar、pcmanfm）".to_string());
     }
     #[cfg(target_os = "macos")]
     {
