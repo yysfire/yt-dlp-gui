@@ -10,10 +10,8 @@ use crate::AppContext;
 /// Uses `std::process::Command` to call the platform-native opener,
 /// bypassing the tauri shell plugin scope restrictions.
 ///
-/// On Linux, tries a fallback chain: gio open → xdg-open → nautilus → dolphin → thunar → pcmanfm
-///
-/// Uses `status()` (not `spawn()`) to actually wait for the opener to complete
-/// and detect whether it really succeeded.
+/// On Linux, tries a fallback chain: pcmanfm-qt → pcmanfm → nautilus → dolphin → thunar → gio → xdg-open
+/// Explicitly passes DISPLAY and DBUS_SESSION_BUS_ADDRESS to child processes.
 #[tauri::command]
 pub fn open_in_folder(
     file_path: String,
@@ -31,20 +29,37 @@ pub fn open_in_folder(
 
     #[cfg(target_os = "linux")]
     {
+        // Capture session environment variables so child processes can
+        // connect to the user's X11 / D-Bus session.
+        let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string());
+        let dbus_addr = std::env::var("DBUS_SESSION_BUS_ADDRESS")
+            .ok();
+
+        // Fallback chain — direct file managers first (they connect via X11),
+        // then D-Bus-based openers (gio, xdg-open) as last resort.
         let openers: &[&str] = &[
-            "gio", "xdg-open", "nautilus", "dolphin", "thunar", "pcmanfm",
+            "pcmanfm-qt", // LXQt native (Qt/X11, no D-Bus needed)
+            "pcmanfm",    // LXDE native
+            "nautilus",   // GNOME Files
+            "dolphin",    // KDE Dolphin
+            "thunar",     // XFCE Thunar
+            "gio",        // GLib I/O (D-Bus based)
+            "xdg-open",   // XDG standard (D-Bus based)
         ];
         for opener in openers {
             log::info!("open_in_folder: trying {} {}", opener, dir_str);
-            match std::process::Command::new(opener)
-                .arg(&dir_str)
+            let mut cmd = std::process::Command::new(opener);
+            cmd.arg(&dir_str)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .spawn()
-            {
+                .env("DISPLAY", &display);
+            if let Some(ref addr) = dbus_addr {
+                cmd.env("DBUS_SESSION_BUS_ADDRESS", addr);
+            }
+            match cmd.spawn() {
                 Ok(mut child) => {
                     // Wait briefly to see if the process exits with an error
-                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    std::thread::sleep(std::time::Duration::from_millis(800));
                     match child.try_wait() {
                         Ok(Some(status)) if !status.success() => {
                             log::warn!("open_in_folder: {} exited with {}", opener, status);
@@ -68,7 +83,7 @@ pub fn open_in_folder(
                 }
             }
         }
-        return Err("无法打开文件夹：未找到可用的文件管理器（已尝试 gio、xdg-open、nautilus、dolphin、thunar、pcmanfm）".to_string());
+        return Err("无法打开文件夹：未找到可用的文件管理器（已尝试 pcmanfm-qt、pcmanfm、nautilus、dolphin、thunar、gio、xdg-open）".to_string());
     }
     #[cfg(target_os = "macos")]
     {
