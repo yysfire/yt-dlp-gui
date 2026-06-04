@@ -171,7 +171,7 @@ export default function AppShell({
                 setActiveView("downloads");
                 onSelectSubscription(null);
               }}
-              className={`flex items-center gap-2 w-full px-3 py-2.5 text-sm font-medium border-t border-gray-200 dark:border-gray-700 transition-colors
+              className={`flex items-center gap-2 w-full px-3 py-1 text-xs font-medium border-t border-gray-200 dark:border-gray-700 transition-colors
                 ${activeView === "downloads"
                   ? "text-primary-600 dark:text-primary-400 bg-primary-50 dark:bg-primary-900/20"
                   : "text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800"}`}
