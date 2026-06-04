@@ -1,4 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
+import {
+  FolderOpen as FolderOpenIcon,
+} from "@mui/icons-material";
 import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask, QueueState } from "@/types";
 import { listen } from "@tauri-apps/api/event";
 import TopBar from "./TopBar";
@@ -62,6 +65,7 @@ export default function AppShell({
   const filteredRecords = selectedId
     ? records.filter((r) => r.subscription_id === selectedId)
     : [];
+  const downloadCount = records.filter((r) => r.status !== "deleted").length;
 
   const refreshQueue = useCallback(async () => {
     try {
@@ -134,48 +138,21 @@ export default function AppShell({
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar */}
         <div
-          className={`flex-shrink-0 border-r border-gray-200 dark:border-gray-700 transition-all duration-200 ${
+          className={`flex-shrink-0 flex flex-col border-r border-gray-200 dark:border-gray-700 transition-all duration-200 ${
             sidebarCollapsed ? "w-0 overflow-hidden border-none" : "w-[280px]"
           }`}
         >
-          {/* Navigation tabs */}
-          {!sidebarCollapsed && (
-            <div className="flex border-b border-gray-200 dark:border-gray-700">
-              <button
-                onClick={() => {
-                  setActiveView("detail");
-                  onSelectSubscription(selectedId);
-                }}
-                className={`flex-1 py-2 text-sm font-medium ${
-                  activeView === "detail"
-                    ? "text-primary-600 dark:text-primary-400 border-b-2 border-primary-600 dark:border-primary-400"
-                    : "text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
-                }`}
-              >
-                订阅
-              </button>
-              <button
-                onClick={() => {
-                  setActiveView("downloads");
-                  onSelectSubscription(null);
-                }}
-                className={`flex-1 py-2 text-sm font-medium ${
-                  activeView === "downloads"
-                    ? "text-primary-600 dark:text-primary-400 border-b-2 border-primary-600 dark:border-primary-400"
-                    : "text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
-                }`}
-              >
-                已下载
-              </button>
-            </div>
-          )}
-          {activeView === "detail" && (
+          {/* Subscription list — always visible */}
+          <div className="flex-1 min-h-0">
             <SubscriptionList
               subscriptions={subscriptions}
               loading={subscriptionsLoading}
               error={subscriptionsError}
               selectedId={selectedId}
-              onSelect={onSelectSubscription}
+              onSelect={(id) => {
+                setActiveView("detail");
+                onSelectSubscription(id);
+              }}
               onDelete={onDeleteSubscription}
               onTogglePause={onTogglePause}
               onCheckSubscription={onCheckSubscription}
@@ -185,6 +162,26 @@ export default function AppShell({
               onOpenImport={() => setImportDialogOpen(true)}
               onUpdateGroup={onUpdateGroup}
             />
+          </div>
+
+          {/* Bottom: "已下载" navigation button */}
+          {!sidebarCollapsed && (
+            <button
+              onClick={() => {
+                setActiveView("downloads");
+                onSelectSubscription(null);
+              }}
+              className={`flex items-center gap-2 w-full px-3 py-2.5 text-sm font-medium border-t border-gray-200 dark:border-gray-700 transition-colors
+                ${activeView === "downloads"
+                  ? "text-primary-600 dark:text-primary-400 bg-primary-50 dark:bg-primary-900/20"
+                  : "text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800"}`}
+            >
+              <FolderOpenIcon fontSize="small" />
+              <span className="flex-1 text-left">已下载</span>
+              <span className="text-xs text-gray-400 dark:text-gray-500 tabular-nums">
+                {downloadCount}
+              </span>
+            </button>
           )}
         </div>
 
