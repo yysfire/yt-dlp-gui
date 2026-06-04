@@ -152,7 +152,35 @@ export async function stopScheduler(): Promise<void> {
   return invoke<void>("stop_scheduler");
 }
 
-// ── Import / Export commands ──────────────────────────────────────
+// ── File management commands ─────────────────────────────────────
+
+/** Result of checking whether a file exists on disk. */
+export interface FileExistenceResult {
+  file_path: string;
+  exists: boolean;
+}
+
+/** Opens the parent directory of a file in the system file manager. */
+export async function openInFolder(filePath: string): Promise<void> {
+  return invoke<void>("open_in_folder", { filePath });
+}
+
+/** Batch-checks whether files exist on disk. */
+export async function checkFileExistence(
+  filePaths: string[],
+): Promise<FileExistenceResult[]> {
+  return invoke<FileExistenceResult[]>("check_file_existence", { filePaths });
+}
+
+/** Deletes a downloaded video file and marks the record as "deleted". */
+export async function deleteFile(id: string): Promise<void> {
+  return invoke<void>("delete_file", { id });
+}
+
+/** Triggers a file state sync for all completed download records. */
+export async function syncFileStates(): Promise<FileExistenceResult[]> {
+  return invoke<FileExistenceResult[]>("sync_file_states");
+}
 
 /** Exports all subscriptions to a JSON file at the given path. */
 export async function exportSubscriptionsJson(path: string): Promise<void> {

@@ -24,9 +24,15 @@ export interface DownloadRecord {
   video_url: string;
   file_path: string;
   file_size: number;
-  status: "downloading" | "completed" | "failed" | "paused" | "cancelled" | "waiting";
+  status: "downloading" | "completed" | "failed" | "paused" | "cancelled" | "waiting" | "deleted";
   error_message: string | null;
   downloaded_at: string; // ISO 8601
+}
+
+/** Result of checking whether a file exists on disk. */
+export interface FileExistenceResult {
+  file_path: string;
+  exists: boolean;
 }
 
 /** Download task status in memory queue */

@@ -17,7 +17,7 @@ pub struct DownloadRecord {
     pub file_path: String,
     /// File size in bytes
     pub file_size: u64,
-    /// Download status: "downloading", "completed", or "failed"
+    /// Download status: "downloading", "completed", "failed", "paused", "cancelled", "waiting", "deleted"
     pub status: String,
     /// ISO 8601 timestamp of download
     pub downloaded_at: String,

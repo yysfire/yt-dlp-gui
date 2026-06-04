@@ -62,6 +62,7 @@ pub fn run() {
             let interval_mins = settings.check_interval_minutes;
             let max_concurrent = settings.max_concurrent_downloads;
             let data_dir_clone = data_dir.clone();
+            let data_dir_fs_sync = data_dir.clone();
             let settings_clone = settings.clone();
 
             let ctx = AppContext {
@@ -194,6 +195,28 @@ pub fn run() {
                 }
             });
 
+            // Start periodic file sync timer (every 5 minutes)
+            {
+                let app_handle = app.handle().clone();
+                let data_dir_fs = data_dir_fs_sync;
+                tauri::async_runtime::spawn(async move {
+                    let interval = tokio::time::Duration::from_secs(5 * 60);
+                    tokio::time::sleep(interval).await; // skip first immediate tick
+                    loop {
+                        let records = StorageService::load_download_records(&data_dir_fs)
+                            .unwrap_or_default();
+                        let file_paths: Vec<String> = records
+                            .iter()
+                            .filter(|r| r.status == "completed" && !r.file_path.is_empty())
+                            .map(|r| r.file_path.clone())
+                            .collect();
+                        let results = services::file_manager::check_files_exist(&file_paths).await;
+                        let _ = app_handle.emit("file-sync-complete", &results);
+                        tokio::time::sleep(interval).await;
+                    }
+                });
+            }
+
             log::info!("Application initialized successfully");
             Ok(())
         })
@@ -224,6 +247,10 @@ pub fn run() {
             commands::import_export::export_subscriptions_json,
             commands::import_export::export_subscriptions_opml,
             commands::import_export::batch_import_subscriptions,
+            commands::file_manager::open_in_folder,
+            commands::file_manager::check_file_existence,
+            commands::file_manager::delete_file,
+            commands::file_manager::sync_file_states,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
