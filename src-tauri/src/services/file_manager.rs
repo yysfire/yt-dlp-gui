@@ -43,6 +43,56 @@ pub async fn check_files_exist(file_paths: &[String]) -> Vec<FileExistenceResult
     results
 }
 
+/// Moves a file to the system trash (recycle bin) instead of permanently deleting it.
+///
+/// On Linux: uses `gio trash` (preferred, supports undo via desktop file manager).
+/// On macOS: uses `osascript` to tell Finder to delete the file.
+/// On Windows: uses `std::fs::remove_file` as fallback (the Windows Shell API for
+/// recycle bin requires the `trash` crate or winapi, both not yet in scope).
+///
+/// Falls back to `std::fs::remove_file` when the trash command is not available.
+fn delete_file_to_trash(path: &Path) {
+    #[cfg(target_os = "linux")]
+    {
+        // gio trash is the most reliable Linux trash implementation
+        if std::process::Command::new("gio")
+            .arg("trash")
+            .arg(path.to_string_lossy().as_ref())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            log::info!("Moved to trash: {}", path.display());
+            return;
+        }
+        log::warn!("gio trash failed for {}, falling back to permanent delete", path.display());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                r#"tell app "Finder" to delete POSIX file "{}""#,
+                path.to_string_lossy()
+            ))
+            .output()
+        {
+            if output.status.success() {
+                log::info!("Moved to Trash: {}", path.display());
+                return;
+            }
+        }
+        log::warn!("macOS trash failed for {}, falling back to permanent delete", path.display());
+    }
+
+    // Fallback: permanent delete
+    let _ = std::fs::remove_file(path);
+    log::info!("Permanently deleted: {}", path.display());
+}
+
 /// Deletes a downloaded file and updates the record status to "deleted".
 pub fn delete_file_and_update_record(
     record_id: &str,
@@ -54,10 +104,10 @@ pub fn delete_file_and_update_record(
         .position(|r| r.id == record_id)
         .ok_or_else(|| AppError::NotFound(format!("下载记录不存在: {}", record_id)))?;
 
-    // Delete the physical file if it exists
+    // Delete the physical file (try trash first, fall back to permanent delete)
     let file_path = Path::new(&records[idx].file_path);
     if file_path.exists() {
-        std::fs::remove_file(file_path)?;
+        delete_file_to_trash(file_path);
     }
 
     // Update status
