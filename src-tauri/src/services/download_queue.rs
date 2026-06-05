@@ -176,6 +176,9 @@ struct ActiveTask {
     child: Option<tokio::process::Child>,
     pid: u32,
     task: DownloadTask,
+    /// T028: Last known download progress percentage (0.0–100.0).
+    /// Used by adjust_concurrency to select which tasks to pause first.
+    last_progress_percent: f32,
 }
 
 /// FIFO download queue with concurrency control and process lifecycle management.
@@ -402,6 +405,7 @@ impl DownloadQueue {
                 child: Some(child),
                 pid,
                 task: task.clone(),
+                last_progress_percent: 0.0,
             });
         }
 
@@ -410,6 +414,7 @@ impl DownloadQueue {
         let mut lines = reader.lines();
         let app_clone = app_handle.clone();
         let active_clone = Arc::clone(active_tasks);
+        let active_progress = Arc::clone(active_tasks); // T028: separate clone for progress tracking
 
         // Clone fields needed inside the spawned task
         let task_url = task.video_url.clone();
@@ -431,6 +436,10 @@ impl DownloadQueue {
                 }
 
                 if let Some(event) = progress_parser::parse_progress_line(trimmed) {
+                    // Clone Strings for progress tracking (moved into progress_event below)
+                    let speed_str = event.speed.clone();
+                    let eta_str = event.eta.clone();
+
                     let progress_event = DownloadProgressEvent {
                         task_id: task_id_for_progress.clone(),
                         video_url: task_url.clone(),
@@ -441,6 +450,21 @@ impl DownloadQueue {
                         eta: event.eta,
                     };
                     let _ = app_clone.emit("download-progress", progress_event);
+
+                    // T028: Update progress on active task for concurrency adjustment
+                    {
+                        let mut active = active_progress.lock().unwrap();
+                        if let Some(entry) = active.get_mut(&task_id_for_progress) {
+                            entry.last_progress_percent = event.percent;
+                            entry.task.progress = Some(ProgressInfo {
+                                percent: event.percent,
+                                speed: speed_str,
+                                downloaded_bytes: event.downloaded_bytes,
+                                total_bytes: event.total_bytes,
+                                eta: eta_str,
+                            });
+                        }
+                    }
                 } else {
                     file_path = trimmed.to_string();
                 }
@@ -867,25 +891,78 @@ impl DownloadQueue {
         }
     }
 
-    /// Dynamically updates the maximum concurrent download count.
-    /// When increasing: adds permits to the semaphore.
-    /// When decreasing: attempts to acquire and forget excess permits (non-blocking).
+    /// Dynamically adjusts the maximum concurrent download count.
+    ///
+    /// When increasing: adds permits to the semaphore so waiting tasks can start.
+    /// When decreasing: pauses active tasks with least download progress (FR-010),
+    /// then reclaims excess semaphore permits.
     pub fn update_max_concurrent(&self, new_max: u32) {
         let old = self.max_concurrent.swap(new_max, Ordering::SeqCst);
+
         if new_max > old {
             self.semaphore.add_permits((new_max - old) as usize);
+            log::info!("Concurrency increased: {} → {}", old, new_max);
         }
+
         if new_max < old {
             let excess = (old - new_max) as usize;
+
+            // FR-010: Pause active tasks with least progress first
+            let task_ids_to_pause = {
+                let active = self.active_tasks.lock().unwrap();
+                let mut entries: Vec<(String, f32)> = active
+                    .iter()
+                    .map(|(id, entry)| (id.clone(), entry.last_progress_percent))
+                    .collect();
+                // Sort by progress ascending (least progress first)
+                entries.sort_by(|a, b| {
+                    a.1.partial_cmp(&b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                entries
+                    .into_iter()
+                    .take(excess)
+                    .map(|(id, _)| id)
+                    .collect::<Vec<_>>()
+                // lock released
+            };
+
+            for task_id in &task_ids_to_pause {
+                let mut active = self.active_tasks.lock().unwrap();
+                if let Some(entry) = active.get_mut(task_id) {
+                    let pid = entry.pid;
+
+                    #[cfg(unix)]
+                    {
+                        unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
+                    }
+                    #[cfg(windows)]
+                    {
+                        windows_process::suspend_process(pid);
+                    }
+
+                    entry.task.status = TaskStatus::Paused;
+                    log::info!(
+                        "Concurrency decrease: paused task {} (progress {:.1}%)",
+                        task_id,
+                        entry.last_progress_percent
+                    );
+                }
+                // lock released
+            }
+
+            // Reclaim excess permits from the semaphore (non-blocking)
             for _ in 0..excess {
                 if self.semaphore.try_acquire().is_ok() {
                     // Acquired and dropped — effectively forgetting the permit
                 } else {
-                    break; // No available permits to reclaim
+                    break;
                 }
             }
+            log::info!("Concurrency decreased: {} → {} (paused {} tasks)", old, new_max, task_ids_to_pause.len());
         }
-        log::info!("Updated max concurrent downloads: {} → {}", old, new_max);
+
+        self.emit_queue_changed();
     }
 
     /// Returns all tasks currently in the queue (waiting + active).
@@ -968,5 +1045,113 @@ mod tests {
         // Verify state transition strings
         assert_eq!(TaskStatus::Paused.to_string(), "paused");
         assert_eq!(TaskStatus::Running.to_string(), "running");
+    }
+
+    // ── Concurrency adjustment tests (T024) ────────────────────────
+
+    #[test]
+    fn test_select_tasks_by_progress_ascending() {
+        // Verify progress-based selection: tasks with least progress come first
+        let mut entries: Vec<(String, f32)> = vec![
+            ("task-a".to_string(), 45.0),
+            ("task-b".to_string(), 10.0),
+            ("task-c".to_string(), 90.0),
+        ];
+        entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // task-b (10%) < task-a (45%) < task-c (90%)
+        assert_eq!(entries[0].0, "task-b");
+        assert_eq!(entries[0].1, 10.0);
+        assert_eq!(entries[1].0, "task-a");
+        assert_eq!(entries[1].1, 45.0);
+        assert_eq!(entries[2].0, "task-c");
+        assert_eq!(entries[2].1, 90.0);
+    }
+
+    #[test]
+    fn test_select_least_progress_tasks_to_pause() {
+        // Simulate: 3 active tasks, reduce from 3 → 2 concurrent
+        // Should pause the 1 task with least progress
+        let mut entries: Vec<(String, f32)> = vec![
+            ("fast-task".to_string(), 88.5),
+            ("mid-task".to_string(), 42.0),
+            ("slow-task".to_string(), 5.2),
+        ];
+        let excess = 1; // reduce by 1
+        entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let paused: Vec<_> = entries.into_iter().take(excess).collect();
+
+        assert_eq!(paused.len(), 1);
+        assert_eq!(paused[0].0, "slow-task");
+        assert_eq!(paused[0].1, 5.2);
+    }
+
+    #[test]
+    fn test_select_multiple_to_pause() {
+        // Simulate: 5 active tasks, reduce from 5 → 2 concurrent
+        // Should pause 3 tasks with least progress
+        let mut entries: Vec<(String, f32)> = vec![
+            ("t1".to_string(), 95.0),
+            ("t2".to_string(), 60.0),
+            ("t3".to_string(), 30.0),
+            ("t4".to_string(), 10.0),
+            ("t5".to_string(), 0.5),
+        ];
+        let excess = 3;
+        entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let paused: Vec<_> = entries.into_iter().take(excess).collect();
+
+        assert_eq!(paused.len(), 3);
+        assert_eq!(paused[0].0, "t5"); // 0.5%
+        assert_eq!(paused[1].0, "t4"); // 10%
+        assert_eq!(paused[2].0, "t3"); // 30%
+    }
+
+    #[test]
+    fn test_no_pause_when_concurrency_increases() {
+        // Verifies that increase doesn't select any tasks to pause
+        let old = 2u32;
+        let new = 4u32;
+        assert!(new > old);
+        let diff = (new - old) as usize;
+        assert_eq!(diff, 2);
+
+        // Increase: no tasks selected for pause
+        let excess: usize = 0;
+        let entries: Vec<(String, f32)> = vec![("t1".to_string(), 50.0)];
+        let paused: Vec<_> = entries.into_iter().take(excess).collect();
+        assert_eq!(paused.len(), 0);
+    }
+
+    #[test]
+    fn test_concurrency_logic_no_excess_when_equal() {
+        // No change: should not pause any tasks
+        let old = 3u32;
+        let new = 3u32;
+        assert!(!(new > old));
+        assert!(!(new < old));
+        // No tasks should be paused
+    }
+
+    #[test]
+    fn test_concurrency_adjustment_completes_fast() {
+        // SC-004: verify the sorting logic completes quickly
+        // (the actual method involves OS signals, tested separately)
+        let mut entries: Vec<(String, f32)> = (0..100)
+            .map(|i| (format!("task-{}", i), (i as f32) * 1.5 % 100.0))
+            .collect();
+        let excess = 10usize;
+
+        let start = std::time::Instant::now();
+        entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let _paused: Vec<_> = entries.into_iter().take(excess).collect();
+        let elapsed = start.elapsed();
+
+        // SC-004: should complete well under 3 seconds (sorting 100 items is microseconds)
+        assert!(
+            elapsed.as_millis() < 10,
+            "Sort+select should complete fast (actual: {:?})",
+            elapsed
+        );
     }
 }

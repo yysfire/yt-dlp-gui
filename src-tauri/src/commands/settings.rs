@@ -1,9 +1,10 @@
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::models::{AppSettings, AppState};
 use crate::services::settings_validator;
 use crate::services::StorageService;
 use crate::AppContext;
+use crate::QueueContext;
 
 /// Returns the current application settings.
 #[tauri::command]
@@ -19,6 +20,7 @@ pub async fn get_settings(
 pub async fn update_settings(
     settings: AppSettings,
     state: State<'_, AppContext>,
+    app_handle: tauri::AppHandle,
 ) -> Result<AppSettings, String> {
     // Persist to disk
     StorageService::save_settings(&state.data_dir, &settings)
@@ -27,12 +29,24 @@ pub async fn update_settings(
     // Update runtime cache
     let mut cached = state.settings.lock().map_err(|e| e.to_string())?;
     let interval_changed = cached.check_interval_minutes != settings.check_interval_minutes;
+    let concurrent_changed = cached.max_concurrent_downloads != settings.max_concurrent_downloads;
     *cached = settings.clone();
     drop(cached); // release lock before await
 
     // Notify scheduler if interval changed so it wakes up immediately
     if interval_changed {
         let _ = state.scheduler_notify.send(());
+    }
+
+    // T029: Notify download queue if concurrent limit changed (FR-010)
+    if concurrent_changed {
+        if let Some(queue_state) = app_handle.try_state::<QueueContext>() {
+            if let Ok(guard) = queue_state.queue.lock() {
+                if let Some(ref queue) = *guard {
+                    queue.update_max_concurrent(settings.max_concurrent_downloads);
+                }
+            }
+        }
     }
 
     log::info!("Settings updated");

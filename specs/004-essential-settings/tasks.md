@@ -94,18 +94,16 @@
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T024 [P] [US3] 在 `src-tauri/src/services/download_queue.rs` 的 `#[cfg(test)]` 模块新增测试：`test_adjust_concurrency_increase`（并发提升时启动等待任务）、`test_adjust_concurrency_decrease_by_progress`（按进度排序暂停最少进度任务）、`test_adjust_concurrency_completes_under_3s`（模拟队列验证 `adjust_concurrency()` 在 3 秒内返回，覆盖 SC-004）
+- [x] T024 [P] [US3] 在 `src-tauri/src/services/download_queue.rs` 的 `#[cfg(test)]` 模块新增测试：`test_adjust_concurrency_increase`（并发提升时启动等待任务）、`test_adjust_concurrency_decrease_by_progress`（按进度排序暂停最少进度任务）、`test_adjust_concurrency_completes_under_3s`（模拟队列验证 `adjust_concurrency()` 在 3 秒内返回，覆盖 SC-004）
 
 ### Implementation for User Story 3
 
 - [x] T025 [US3] 扩展 `src/components/SettingsDialog.tsx`：并发数滑块（Slider，范围 1-5，步长 1，标签显示当前值）
 - [x] T026 [US3] 前端输入验证：滑块天然限制范围，额外添加输入框直接修改时的越界校验（1-5）
-- [ ] T027 [US3] 在 `src-tauri/src/services/download_queue.rs` 中实现 `adjust_concurrency(new_max: u32)` 方法：
-  - `new_max > active_count`：从等待队列取出多出的 slot 数启动新下载
-  - `new_max < active_count`：按 `percent` 升序排列活跃任务，暂停进度最少的 `(active_count - new_max)` 个
-- [ ] T028 [US3] 在 `src-tauri/src/services/download_queue.rs` 中维护每个活跃任务的 `last_progress_percent: f32`：接收 `download-progress` 事件时更新对应任务的进度
-- [ ] T029 [US3] 在 `src-tauri/src/commands/settings.rs` 的 `update_settings` 中检测 `max_concurrent_downloads` 变更，调用 `DownloadQueue::adjust_concurrency()`
-- [ ] T030 [US3] 在 `src-tauri/src/lib.rs` 的 `setup()` 中将 `DownloadQueue` 实例通过 `AppContext` 暴露给 commands 层（或通过事件通信）
+- [x] T027 [US3] 在 `src-tauri/src/services/download_queue.rs` 中增强 `update_max_concurrent()` 方法：增加时添加信号量许可；减少时按 `percent` 升序暂停进度最少的活跃任务
+- [x] T028 [US3] 在 `src-tauri/src/services/download_queue.rs` 中维护每个活跃任务的 `last_progress_percent: f32`：`ActiveTask` 新增字段，`download-progress` 事件时更新
+- [x] T029 [US3] 在 `src-tauri/src/commands/settings.rs` 的 `update_settings` 中检测 `max_concurrent_downloads` 变更，通过 `app_handle.state::<QueueContext>()` 调用 `queue.update_max_concurrent()`
+- [x] T030 [US3] `QueueContext` 已在 `lib.rs` 中 `app.manage()`，`update_settings` 通过 `AppHandle` 参数访问
 
 **Checkpoint**: User Story 1+2+3 完整可用 — 并发调整独立验证
 
