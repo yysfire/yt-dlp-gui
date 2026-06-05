@@ -93,6 +93,17 @@ pub fn validate_proxy_url(input: &str) -> ProxyValidateResult {
         };
     }
 
+    // Require "://" authority delimiter — yt-dlp only accepts proper authority-form URLs.
+    // Without this, the url crate parses "http:127.0.0.1:6478" (missing "//") as a valid URL,
+    // but yt-dlp would not treat it as a proxy.
+    if !input.contains("://") {
+        return ProxyValidateResult {
+            valid: false,
+            scheme: None,
+            error: Some("代理地址格式无效：缺少 ://（例如 http://127.0.0.1:7890）".to_string()),
+        };
+    }
+
     let parsed = match url::Url::parse(input) {
         Ok(url) => url,
         Err(e) => {
@@ -252,5 +263,13 @@ mod tests {
         let result = validate_download_path(dir.to_str().unwrap());
         assert!(result.valid, "Unicode path should be valid");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_validate_proxy_missing_double_slash() {
+        // "http:127.0.0.1:6478" (missing //) should be rejected
+        let result = validate_proxy_url("http:127.0.0.1:6478");
+        assert!(!result.valid, "Missing '//' should be invalid");
+        assert!(result.error.unwrap().contains("://"));
     }
 }

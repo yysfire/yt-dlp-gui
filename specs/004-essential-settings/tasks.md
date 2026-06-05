@@ -137,8 +137,8 @@
 
 - [x] T037 [P] 运行 `cargo test -p yt-dlp-gui` 确认所有 Rust 测试通过
 - [x] T038 [P] 运行 `npx tsc --noEmit` 确认 TypeScript 类型检查通过
-- [ ] T039 按 `specs/004-essential-settings/quickstart.md` 中"运行验收"清单手动验证全部功能
-- [ ] T040 [P] 在 `src/components/SettingsDialog.tsx` 中验证所有输入控件的错误/空状态/加载状态均已覆盖
+- [x] T039 按 `specs/004-essential-settings/quickstart.md` 中"运行验收"清单手动验证全部功能
+- [x] T040 [P] 在 `src/components/SettingsDialog.tsx` 中验证所有输入控件的错误/空状态/加载状态均已覆盖
 - [x] T041 [P] 在 `src-tauri/src/services/settings_validator.rs` 中补充边界测试：路径含空格/Unicode 字符
 - [x] T042 [P] 在 `src-tauri/src/models/settings.rs` 的 `#[cfg(test)]` 模块中新增测试 `test_settings_persist_across_reload`
 
