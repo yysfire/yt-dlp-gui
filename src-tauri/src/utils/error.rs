@@ -24,4 +24,12 @@ pub enum AppError {
     /// Duplicate resource detected (e.g., already-subscribed URL)
     #[error("Duplicate: {0}")]
     Duplicate(String),
+
+    /// Invalid download path (doesn't exist, not writable, etc.)
+    #[error("Invalid path: {0}")]
+    InvalidPath(String),
+
+    /// Invalid proxy URL format
+    #[error("Invalid proxy: {0}")]
+    InvalidProxy(String),
 }

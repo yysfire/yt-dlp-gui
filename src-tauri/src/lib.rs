@@ -98,10 +98,12 @@ pub fn run() {
                 let mut interval_mins = interval_mins;
                 let mut rx = scheduler_rx;
 
-                // Skip first immediate tick
-                tokio::time::sleep(
-                    tokio::time::Duration::from_secs((interval_mins as u64) * 60),
-                ).await;
+                // Skip first immediate tick if interval > 0
+                if interval_mins > 0 {
+                    tokio::time::sleep(
+                        tokio::time::Duration::from_secs((interval_mins as u64) * 60),
+                    ).await;
+                }
 
                 loop {
                     log::info!("Scheduler: checking subscriptions...");
@@ -181,15 +183,23 @@ pub fn run() {
                     let _ = app_handle.emit("scheduler-check-complete", ());
 
                     // Wait for interval OR immediate wake on settings change
-                    tokio::select! {
-                        _ = tokio::time::sleep(
-                            tokio::time::Duration::from_secs((interval_mins as u64) * 60),
-                        ) => {},
-                        _ = rx.changed() => {
-                            // Settings changed — reload interval for immediate effect
-                            let settings = StorageService::load_settings(&data_dir_clone);
-                            interval_mins = settings.check_interval_minutes;
-                            log::info!("Scheduler: interval updated to {} minutes", interval_mins);
+                    if interval_mins == 0 {
+                        // Manual mode: only wait for settings change notification
+                        let _ = rx.changed().await;
+                        let settings = StorageService::load_settings(&data_dir_clone);
+                        interval_mins = settings.check_interval_minutes;
+                        log::info!("Scheduler: interval updated to {} minutes (was manual)", interval_mins);
+                    } else {
+                        tokio::select! {
+                            _ = tokio::time::sleep(
+                                tokio::time::Duration::from_secs((interval_mins as u64) * 60),
+                            ) => {},
+                            _ = rx.changed() => {
+                                // Settings changed — reload interval for immediate effect
+                                let settings = StorageService::load_settings(&data_dir_clone);
+                                interval_mins = settings.check_interval_minutes;
+                                log::info!("Scheduler: interval updated to {} minutes", interval_mins);
+                            }
                         }
                     }
                 }
@@ -244,6 +254,8 @@ pub fn run() {
             commands::settings::get_app_state,
             commands::settings::start_scheduler,
             commands::settings::stop_scheduler,
+            commands::settings::validate_download_path,
+            commands::settings::validate_proxy_url,
             commands::import_export::export_subscriptions_json,
             commands::import_export::export_subscriptions_opml,
             commands::import_export::batch_import_subscriptions,

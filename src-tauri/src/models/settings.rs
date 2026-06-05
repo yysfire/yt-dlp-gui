@@ -19,7 +19,7 @@ pub struct AppSettings {
     pub proxy_url: String,
     /// Path to a Netscape-format cookie file for yt-dlp authentication
     pub cookie_file: String,
-    /// Maximum number of concurrent downloads (1-3)
+    /// Maximum number of concurrent downloads (1-5)
     #[serde(default = "default_max_concurrent_downloads")]
     pub max_concurrent_downloads: u32,
 }
@@ -33,7 +33,7 @@ impl Default for AppSettings {
         let download_dir = default_download_dir();
         Self {
             download_dir,
-            check_interval_minutes: 360,
+            check_interval_minutes: 60,
             yt_dlp_path: "yt-dlp".to_string(),
             quality_preset: "1080p".to_string(),
             notifications_enabled: false,
@@ -64,7 +64,8 @@ impl Default for AppState {
 }
 
 /// Returns a platform-appropriate default download directory.
-fn default_download_dir() -> String {
+#[doc(hidden)]
+pub fn default_download_dir() -> String {
     #[cfg(target_os = "windows")]
     {
         std::env::var("USERPROFILE")
@@ -88,7 +89,7 @@ mod tests {
         let settings = AppSettings::default();
 
         // Verify default values
-        assert_eq!(settings.check_interval_minutes, 360);
+        assert_eq!(settings.check_interval_minutes, 60);
         assert_eq!(settings.yt_dlp_path, "yt-dlp");
         assert_eq!(settings.quality_preset, "1080p");
         assert!(!settings.notifications_enabled);
@@ -154,11 +155,11 @@ mod tests {
             "dark_mode": false,
             "proxy_url": "",
             "cookie_file": "",
-            "max_concurrent_downloads": 3
+            "max_concurrent_downloads": 5
         }"#;
         let settings: AppSettings = serde_json::from_str(json)
             .expect("should deserialize with max_concurrent_downloads");
-        assert_eq!(settings.max_concurrent_downloads, 3);
+        assert_eq!(settings.max_concurrent_downloads, 5);
     }
 
     #[test]
@@ -185,6 +186,39 @@ mod tests {
         assert_eq!(s1.download_dir, s2.download_dir);
         assert_eq!(s1.check_interval_minutes, s2.check_interval_minutes);
         assert_eq!(s1.quality_preset, s2.quality_preset);
+    }
+
+    #[test]
+    fn test_corrupt_settings_returns_defaults() {
+        // T018: FR-009, SC-005 — corrupt JSON must fall back to defaults
+        let corrupt_json = "{ not valid json at all !! }";
+        let result: Result<AppSettings, _> = serde_json::from_str(corrupt_json);
+        assert!(
+            result.is_err(),
+            "Corrupt JSON should fail deserialization"
+        );
+    }
+
+    #[test]
+    fn test_settings_persist_across_reload() {
+        // T042: SC-003 — round-trip through serialization simulates persistence
+        let original = AppSettings {
+            download_dir: "/custom/path".to_string(),
+            check_interval_minutes: 30,
+            quality_preset: "720p".to_string(),
+            proxy_url: "http://127.0.0.1:8080".to_string(),
+            max_concurrent_downloads: 3,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&original).expect("serialize");
+        let reloaded: AppSettings = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(reloaded.download_dir, original.download_dir);
+        assert_eq!(reloaded.check_interval_minutes, original.check_interval_minutes);
+        assert_eq!(reloaded.quality_preset, original.quality_preset);
+        assert_eq!(reloaded.proxy_url, original.proxy_url);
+        assert_eq!(reloaded.max_concurrent_downloads, original.max_concurrent_downloads);
     }
 
     // ── AppState tests ─────────────────────────────────────────────

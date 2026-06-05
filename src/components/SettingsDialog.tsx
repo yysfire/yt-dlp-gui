@@ -16,8 +16,14 @@ import {
   Alert,
   Grid,
   InputAdornment,
+  Slider,
+  Typography,
+  Chip,
 } from "@mui/material";
-import type { AppSettings } from "@/types";
+import FolderOpenIcon from "@mui/icons-material/FolderOpen";
+import CheckCircleIcon from "@mui/icons-material/CheckCircle";
+import ErrorIcon from "@mui/icons-material/Error";
+import type { AppSettings, PathValidateResult, ProxyValidateResult } from "@/types";
 import * as api from "@/lib/tauri";
 
 interface SettingsDialogProps {
@@ -25,9 +31,24 @@ interface SettingsDialogProps {
   onClose: () => void;
 }
 
-const QUALITY_OPTIONS = ["best", "2160p", "1440p", "1080p", "720p", "480p"];
+/** Quality options per spec: 最高画质, 1080p, 720p, 480p, 仅音频 */
+const QUALITY_OPTIONS = [
+  { value: "best", label: "最高画质" },
+  { value: "1080p", label: "1080p" },
+  { value: "720p", label: "720p" },
+  { value: "480p", label: "480p" },
+  { value: "audio", label: "仅音频" },
+];
 
-/** Settings dialog for configuring download directory, quality, proxy, etc. */
+/** Check interval options: 手动, 30分钟, 每小时, 每天 */
+const CHECK_INTERVAL_OPTIONS = [
+  { value: 0, label: "手动" },
+  { value: 30, label: "30 分钟" },
+  { value: 60, label: "每小时" },
+  { value: 1440, label: "每天" },
+];
+
+/** Settings dialog with download path, quality, proxy, concurrency, and scheduler frequency. */
 export default function SettingsDialog({
   open,
   onClose,
@@ -38,12 +59,23 @@ export default function SettingsDialog({
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
+  // Validation states
+  const [pathValidating, setPathValidating] = useState(false);
+  const [pathResult, setPathResult] = useState<PathValidateResult | null>(null);
+  const [proxyValidating, setProxyValidating] = useState(false);
+  const [proxyResult, setProxyResult] = useState<ProxyValidateResult | null>(
+    null,
+  );
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const s = await api.getSettings();
       setSettings(s);
+      // Reset validation on reload
+      setPathResult(null);
+      setProxyResult(null);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -63,6 +95,11 @@ export default function SettingsDialog({
     setSaving(true);
     setError(null);
     try {
+      // Validate before save
+      if (!canSave) {
+        setError("请先修正设置中的错误项");
+        return;
+      }
       const updated = await api.updateSettings(settings);
       setSettings(updated);
       setSuccess(true);
@@ -79,6 +116,86 @@ export default function SettingsDialog({
   ) => {
     setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
   };
+
+  // ── Path validation ───────────────────────────────────────────
+
+  const validatePath = async (path: string) => {
+    if (!path.trim()) {
+      setPathResult({
+        valid: false,
+        writable: false,
+        exists: false,
+        error: "下载路径不能为空",
+      });
+      return;
+    }
+    setPathValidating(true);
+    setPathResult(null);
+    try {
+      const result = await api.validateDownloadPath(path);
+      setPathResult(result);
+    } catch (e) {
+      setPathResult({
+        valid: false,
+        writable: false,
+        exists: false,
+        error: String(e),
+      });
+    } finally {
+      setPathValidating(false);
+    }
+  };
+
+  const handleBrowseFolder = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({ directory: true, multiple: false });
+      if (selected && typeof selected === "string") {
+        updateField("download_dir", selected);
+        validatePath(selected);
+      }
+    } catch {
+      // User cancelled
+    }
+  };
+
+  const handlePathBlur = () => {
+    if (settings) {
+      validatePath(settings.download_dir);
+    }
+  };
+
+  // ── Proxy validation ──────────────────────────────────────────
+
+  const validateProxy = async (url: string) => {
+    if (!url.trim()) {
+      setProxyResult({ valid: true, scheme: null, error: null });
+      return;
+    }
+    setProxyValidating(true);
+    setProxyResult(null);
+    try {
+      const result = await api.validateProxyUrl(url);
+      setProxyResult(result);
+    } catch (e) {
+      setProxyResult({ valid: false, scheme: null, error: String(e) });
+    } finally {
+      setProxyValidating(false);
+    }
+  };
+
+  const handleProxyBlur = () => {
+    if (settings) {
+      validateProxy(settings.proxy_url);
+    }
+  };
+
+  // ── Save readiness ────────────────────────────────────────────
+
+  const canSave =
+    settings &&
+    (pathResult === null || pathResult.valid) &&
+    (proxyResult === null || proxyResult.valid);
 
   return (
     <Dialog
@@ -113,18 +230,55 @@ export default function SettingsDialog({
 
         {settings && (
           <Grid container spacing={2} sx={{ mt: 0.5 }}>
-            {/* Download Directory */}
+            {/* ── Download Directory ─────────────────────────── */}
             <Grid item xs={12}>
               <TextField
                 fullWidth
                 label="下载目录"
                 value={settings.download_dir}
-                onChange={(e) => updateField("download_dir", e.target.value)}
+                onChange={(e) => {
+                  updateField("download_dir", e.target.value);
+                  setPathResult(null); // reset validation on edit
+                }}
+                onBlur={handlePathBlur}
                 size="small"
+                error={pathResult !== null && !pathResult.valid}
+                helperText={
+                  pathResult?.error ?? (pathResult?.valid ? "路径有效" : "")
+                }
+                InputProps={{
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      {pathValidating ? (
+                        <CircularProgress size={20} sx={{ mr: 0.5 }} />
+                      ) : pathResult?.valid ? (
+                        <CheckCircleIcon
+                          color="success"
+                          fontSize="small"
+                          sx={{ mr: 0.5 }}
+                        />
+                      ) : pathResult && !pathResult.valid ? (
+                        <ErrorIcon
+                          color="error"
+                          fontSize="small"
+                          sx={{ mr: 0.5 }}
+                        />
+                      ) : null}
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        startIcon={<FolderOpenIcon />}
+                        onClick={handleBrowseFolder}
+                      >
+                        浏览
+                      </Button>
+                    </InputAdornment>
+                  ),
+                }}
               />
             </Grid>
 
-            {/* yt-dlp Path */}
+            {/* ── yt-dlp Path ─────────────────────────────────── */}
             <Grid item xs={12}>
               <TextField
                 fullWidth
@@ -136,7 +290,7 @@ export default function SettingsDialog({
               />
             </Grid>
 
-            {/* Quality Preset */}
+            {/* ── Quality Preset ──────────────────────────────── */}
             <Grid item xs={6}>
               <FormControl fullWidth size="small">
                 <InputLabel>默认画质</InputLabel>
@@ -148,46 +302,76 @@ export default function SettingsDialog({
                   }
                 >
                   {QUALITY_OPTIONS.map((q) => (
-                    <MenuItem key={q} value={q}>
-                      {q}
+                    <MenuItem key={q.value} value={q.value}>
+                      {q.label}
                     </MenuItem>
                   ))}
                 </Select>
               </FormControl>
             </Grid>
 
-            {/* Check Interval */}
+            {/* ── Check Interval ──────────────────────────────── */}
             <Grid item xs={6}>
-              <TextField
-                fullWidth
-                label="检查间隔（分钟）"
-                type="number"
-                value={settings.check_interval_minutes}
-                onChange={(e) =>
-                  updateField(
-                    "check_interval_minutes",
-                    Math.max(1, parseInt(e.target.value) || 60),
-                  )
-                }
-                size="small"
-                inputProps={{ min: 1 }}
-              />
+              <FormControl fullWidth size="small">
+                <InputLabel>检查频率</InputLabel>
+                <Select
+                  value={settings.check_interval_minutes}
+                  label="检查频率"
+                  onChange={(e) =>
+                    updateField(
+                      "check_interval_minutes",
+                      Number(e.target.value),
+                    )
+                  }
+                >
+                  {CHECK_INTERVAL_OPTIONS.map((opt) => (
+                    <MenuItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
             </Grid>
 
-            {/* Proxy URL */}
+            {/* ── Proxy URL ───────────────────────────────────── */}
             <Grid item xs={12}>
               <TextField
                 fullWidth
                 label="代理地址"
                 value={settings.proxy_url}
-                onChange={(e) => updateField("proxy_url", e.target.value)}
+                onChange={(e) => {
+                  updateField("proxy_url", e.target.value);
+                  setProxyResult(null); // reset on edit
+                }}
+                onBlur={handleProxyBlur}
                 size="small"
                 placeholder="http://127.0.0.1:7890"
-                helperText="留空则不使用代理"
+                helperText={
+                  proxyResult?.error ??
+                  (proxyResult?.valid && proxyResult.scheme
+                    ? `代理: ${proxyResult.scheme}://`
+                    : "留空则不使用代理")
+                }
+                error={proxyResult !== null && !proxyResult.valid}
+                InputProps={{
+                  endAdornment: proxyValidating ? (
+                    <InputAdornment position="end">
+                      <CircularProgress size={20} />
+                    </InputAdornment>
+                  ) : proxyResult?.valid && proxyResult.scheme ? (
+                    <InputAdornment position="end">
+                      <CheckCircleIcon color="success" fontSize="small" />
+                    </InputAdornment>
+                  ) : proxyResult && !proxyResult.valid ? (
+                    <InputAdornment position="end">
+                      <ErrorIcon color="error" fontSize="small" />
+                    </InputAdornment>
+                  ) : null,
+                }}
               />
             </Grid>
 
-            {/* Cookie File */}
+            {/* ── Cookie File ─────────────────────────────────── */}
             <Grid item xs={12}>
               <TextField
                 fullWidth
@@ -230,7 +414,40 @@ export default function SettingsDialog({
               />
             </Grid>
 
-            {/* Toggles */}
+            {/* ── Concurrent Downloads ────────────────────────── */}
+            <Grid item xs={12}>
+              <Typography variant="body2" gutterBottom>
+                并发下载数
+              </Typography>
+              <div className="flex items-center gap-3">
+                <Slider
+                  value={settings.max_concurrent_downloads}
+                  onChange={(_, val) =>
+                    updateField(
+                      "max_concurrent_downloads",
+                      val as number,
+                    )
+                  }
+                  min={1}
+                  max={5}
+                  step={1}
+                  marks
+                  valueLabelDisplay="auto"
+                  sx={{ flex: 1 }}
+                />
+                <Chip
+                  label={settings.max_concurrent_downloads}
+                  color="primary"
+                  size="small"
+                  sx={{ minWidth: 36, fontWeight: 600 }}
+                />
+              </div>
+              <Typography variant="caption" color="text.secondary">
+                同时下载的最大任务数（1-5），调低时会按进度暂停进度最少的任务
+              </Typography>
+            </Grid>
+
+            {/* ── Toggles ─────────────────────────────────────── */}
             <Grid item xs={6}>
               <FormControlLabel
                 control={
@@ -273,7 +490,7 @@ export default function SettingsDialog({
         <Button
           variant="contained"
           onClick={handleSave}
-          disabled={saving || !settings}
+          disabled={saving || !settings || !canSave}
           size="small"
           startIcon={saving ? <CircularProgress size={14} /> : undefined}
         >

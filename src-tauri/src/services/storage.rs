@@ -442,7 +442,7 @@ mod tests {
         let tmp = setup_temp_dir();
         let settings = StorageService::load_settings(tmp.path());
         // Should return defaults when no file exists
-        assert_eq!(settings.check_interval_minutes, 360);
+        assert_eq!(settings.check_interval_minutes, 60);
         assert_eq!(settings.yt_dlp_path, "yt-dlp");
     }
 

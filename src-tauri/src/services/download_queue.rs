@@ -341,6 +341,30 @@ impl DownloadQueue {
     ) {
         let task_id = task.id.clone();
 
+        // FR-012: Verify download path, fall back to default if inaccessible
+        let effective_download_dir = {
+            let dir = std::path::PathBuf::from(&ctx.download_dir);
+            match std::fs::create_dir_all(&dir) {
+                Ok(()) => dir,
+                Err(e) => {
+                    log::warn!(
+                        "Download path '{}' inaccessible ({}), falling back to default",
+                        ctx.download_dir.display(),
+                        e
+                    );
+                    let default_dir = crate::models::settings::default_download_dir();
+                    let default = std::path::PathBuf::from(&default_dir);
+                    let _ = std::fs::create_dir_all(&default);
+                    let _ = app_handle.emit("records-changed", serde_json::json!({
+                        "path_fallback": true,
+                        "original": ctx.download_dir.to_string_lossy(),
+                        "fallback": default_dir,
+                    }));
+                    default
+                }
+            }
+        };
+
         // Spawn the yt-dlp process
         let spawned = match YtDlpService::download_video_spawn(
             &ctx.yt_dlp_path,
@@ -348,7 +372,7 @@ impl DownloadQueue {
             &ctx.cookie_file,
             &task.video_url,
             &task.quality,
-            &ctx.download_dir,
+            &effective_download_dir,
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -507,7 +531,15 @@ impl DownloadQueue {
                     if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
                         if existing.status != "cancelled" {
                             existing.status = "failed".to_string();
-                            existing.error_message = Some("yt-dlp process exited with error".to_string());
+                            // FR-011: distinguish proxy failure from other errors
+                            let has_proxy = ctx.proxy.as_ref()
+                                .map(|p| !p.is_empty())
+                                .unwrap_or(false);
+                            if has_proxy {
+                                existing.error_message = Some("代理连接失败".to_string());
+                            } else {
+                                existing.error_message = Some("yt-dlp process exited with error".to_string());
+                            }
                         }
                     }
                     let _ = StorageService::save_download_records(&ctx.data_dir, &records);

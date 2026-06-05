@@ -84,6 +84,21 @@ export interface AppSettings {
   max_concurrent_downloads: number;
 }
 
+/** Result of download path validation. */
+export interface PathValidateResult {
+  valid: boolean;
+  writable: boolean;
+  exists: boolean;
+  error: string | null;
+}
+
+/** Result of proxy URL validation. */
+export interface ProxyValidateResult {
+  valid: boolean;
+  scheme: string | null;
+  error: string | null;
+}
+
 /** Result of a batch import operation. */
 export interface ImportResult {
   imported: Subscription[];

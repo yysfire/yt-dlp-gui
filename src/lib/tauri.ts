@@ -7,6 +7,8 @@ import type {
   AppSettings,
   AppState,
   ImportResult,
+  PathValidateResult,
+  ProxyValidateResult,
 } from "@/types";
 
 // ── Subscription commands ──────────────────────────────────────────
@@ -150,6 +152,20 @@ export async function startScheduler(): Promise<void> {
 /** Stops the background scheduler. */
 export async function stopScheduler(): Promise<void> {
   return invoke<void>("stop_scheduler");
+}
+
+/** Validates a download directory path for existence and writability. */
+export async function validateDownloadPath(
+  path: string,
+): Promise<PathValidateResult> {
+  return invoke<PathValidateResult>("validate_download_path", { path });
+}
+
+/** Validates a proxy URL format (supports http, https, socks5, socks5h). */
+export async function validateProxyUrl(
+  url: string,
+): Promise<ProxyValidateResult> {
+  return invoke<ProxyValidateResult>("validate_proxy_url", { url });
 }
 
 // ── File management commands ─────────────────────────────────────

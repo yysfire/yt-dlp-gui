@@ -1,6 +1,7 @@
 use tauri::State;
 
 use crate::models::{AppSettings, AppState};
+use crate::services::settings_validator;
 use crate::services::StorageService;
 use crate::AppContext;
 
@@ -75,4 +76,20 @@ pub async fn stop_scheduler(
     // A production implementation would store the handle in AppContext.
     log::info!("Scheduler stop requested (no-op in MVP)");
     Ok(())
+}
+
+/// Validates a download directory path for existence and writability.
+#[tauri::command]
+pub async fn validate_download_path(
+    path: String,
+) -> Result<settings_validator::PathValidateResult, String> {
+    Ok(settings_validator::validate_download_path(&path))
+}
+
+/// Validates a proxy URL format (supports http, https, socks5, socks5h).
+#[tauri::command]
+pub async fn validate_proxy_url(
+    url: String,
+) -> Result<settings_validator::ProxyValidateResult, String> {
+    Ok(settings_validator::validate_proxy_url(&url))
 }

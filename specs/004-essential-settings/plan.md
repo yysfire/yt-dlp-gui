@@ -1,6 +1,6 @@
 # Implementation Plan: 必要设置
 
-**Branch**: `001-mvp-core-features` | **Date**: 2026-05-31 | **Spec**: [spec.md](./spec.md)
+**Branch**: `004-essential-settings` | **Date**: 2026-05-31 | **Spec**: [spec.md](./spec.md)
 
 **Input**: Feature specification from `specs/004-essential-settings/spec.md`
 
@@ -8,7 +8,7 @@
 
 实现应用的必要设置功能：全局下载路径设置（含文件夹浏览和路径验证）、yt-dlp 基本参数配置（画质预设选择、代理服务器地址）、并发下载任务数设置（1-5）、定时检查频率设置（手动/30分钟/每小时/每天）。所有设置持久化到 JSON 文件，应用重启后自动恢复，设置损坏时降级为安全默认值。
 
-技术方案：扩展现有 `AppSettings` 结构体，新增 `concurrent_downloads` 字段。路径验证通过 `std::fs::create_dir_all` 测试可写性，代理格式通过 URL 解析验证。并发数调整时通过下载队列 Manager 动态调度（暂停多余任务或启动等待任务）。检查频率调整时更新 tokio `interval` 定时器。
+技术方案：扩展现有 `AppSettings` 结构体，新增 `concurrent_downloads` 字段。路径验证通过 `std::fs::create_dir_all` 测试可写性，代理格式通过 URL 解析验证。并发数降低时，按当前下载进度排序，进度最少的任务优先暂停（FR-010；clarifications 2026-06-05）。代理不可用时，受影响任务标记失败不自动回退直连（FR-011）。用户下载路径不可访问时，自动回退到系统默认下载目录（FR-012）。检查频率调整时更新 tokio `interval` 定时器。
 
 ## Technical Context
 
@@ -90,5 +90,5 @@ src/
 
 待确认的技术风险点（在 Phase 0 research 中验证）：
 - **动态调整 tokio interval**: 当前 scheduler 在 `lib.rs::setup()` 中启动一个固定的 interval，频率调整需要重建 task 或使用 `tokio::sync::watch` 通知变更
-- **并发数降低的调度策略**: 规格要求"暂停多余任务"，需明确按什么规则选择暂停哪个（FIFO 先暂停队列中等待的，已下载中的记录进度后续继续）
 - **代理地址验证**: URL 解析库（url crate）与 socks5:// 格式的兼容性
+- **下载进度跟踪**: 实现 FR-010 并发降级策略需要跟踪每个下载任务的实时进度（用于比较"进度最少"）。yt-dlp 输出解析方案需验证。
