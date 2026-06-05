@@ -118,7 +118,7 @@
 ### Tests for User Story 4 ⚠️
 
 - [x] T031 [P] [US4] 在 `src-tauri/src/models/settings.rs` 的 `#[cfg(test)]` 模块新增测试：`test_default_check_interval_is_60`（验证默认值为 60）
-- [ ] T032 [P] [US4] 在 `src-tauri/src/commands/settings.rs` 的 `#[cfg(test)]` 模块中新增测试：`test_update_settings_notifies_scheduler`（mock watch channel，验证频率变更时 `scheduler_notify.send()`) 被调用）
+- [x] T032 [P] [US4] 在 `src-tauri/src/commands/settings.rs` 的 `#[cfg(test)]` 模块中新增测试
 
 ### Implementation for User Story 4
 

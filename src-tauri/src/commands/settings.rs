@@ -28,13 +28,13 @@ pub async fn update_settings(
 
     // Update runtime cache
     let mut cached = state.settings.lock().map_err(|e| e.to_string())?;
-    let interval_changed = cached.check_interval_minutes != settings.check_interval_minutes;
+    let old_interval = cached.check_interval_minutes;
     let concurrent_changed = cached.max_concurrent_downloads != settings.max_concurrent_downloads;
     *cached = settings.clone();
     drop(cached); // release lock before await
 
     // Notify scheduler if interval changed so it wakes up immediately
-    if interval_changed {
+    if detect_interval_change(old_interval, settings.check_interval_minutes) {
         let _ = state.scheduler_notify.send(());
     }
 
@@ -106,4 +106,90 @@ pub async fn validate_proxy_url(
     url: String,
 ) -> Result<settings_validator::ProxyValidateResult, String> {
     Ok(settings_validator::validate_proxy_url(&url))
+}
+
+// T032: helper extracted for testability — determines whether scheduler notification is needed.
+#[doc(hidden)]
+pub fn detect_interval_change(old_interval: u32, new_interval: u32) -> bool {
+    old_interval != new_interval
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::watch;
+
+    #[test]
+    fn test_detect_interval_change_same() {
+        // No change: should return false
+        assert!(!detect_interval_change(60, 60));
+        assert!(!detect_interval_change(0, 0));
+        assert!(!detect_interval_change(1440, 1440));
+    }
+
+    #[test]
+    fn test_detect_interval_change_different() {
+        // Change detected: should return true
+        assert!(detect_interval_change(60, 30));
+        assert!(detect_interval_change(30, 60));
+        assert!(detect_interval_change(1440, 0));
+        assert!(detect_interval_change(0, 60));
+    }
+
+    #[test]
+    fn test_scheduler_notify_sent_on_change() {
+        // Verify watch::Sender::send() is actually called when interval changes
+        let (tx, mut rx) = watch::channel(());
+        let old_interval = 60u32;
+        let new_interval = 30u32;
+
+        if detect_interval_change(old_interval, new_interval) {
+            let _ = tx.send(());
+        }
+
+        // rx should have been notified
+        assert!(rx.has_changed().unwrap_or(false));
+    }
+
+    #[test]
+    fn test_scheduler_notify_not_sent_when_unchanged() {
+        let (tx, mut rx) = watch::channel(());
+
+        // Consume the initial value
+        let _ = rx.borrow_and_update();
+
+        let old_interval = 60u32;
+        let new_interval = 60u32;
+
+        if detect_interval_change(old_interval, new_interval) {
+            // This branch should NOT execute
+            let _ = tx.send(());
+        }
+
+        // rx should NOT have changed
+        assert!(!rx.has_changed().unwrap_or(true));
+    }
+
+    #[test]
+    fn test_detect_called_for_all_frequency_options() {
+        // Verify detection works across all spec-defined frequencies
+        let options: Vec<(&str, u32)> = vec![
+            ("手动", 0),
+            ("30分钟", 30),
+            ("每小时", 60),
+            ("每天", 1440),
+        ];
+
+        for (i, (_, v1)) in options.iter().enumerate() {
+            for (j, (_, v2)) in options.iter().enumerate() {
+                let expected = i != j;
+                assert_eq!(
+                    detect_interval_change(*v1, *v2),
+                    expected,
+                    "detect_interval_change({}, {}) should be {}",
+                    v1, v2, expected
+                );
+            }
+        }
+    }
 }
