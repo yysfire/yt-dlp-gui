@@ -86,6 +86,7 @@
 
 - [ ] T016 [US2] Build tray context menu in `src-tauri/src/services/tray.rs::TrayService::init()`: use `MenuBuilder` to create 6 items — "显示主窗口", separator, "检查全部订阅更新", "暂停定时检查", separator, "退出"
 - [ ] T017 [US2] Implement `on_menu_event` handler in `src-tauri/src/services/tray.rs`: match menu item IDs and dispatch actions — "show" toggles window, "check_all" calls existing check_all command, "toggle_scheduler" toggles pause, "quit" triggers exit flow
+- [ ] T017a [US2] Implement quit confirmation logic in src-tauri/src/services/tray.rs: check active download count before exit; if >0, show native confirmation dialog (via tauri::api::dialog); if 0, exit directly; always cleanup tray resource
 - [ ] T018 [US2] Implement scheduler toggle logic in `src-tauri/src/services/tray.rs::TrayService::toggle_scheduler()`: update `AppSettings.scheduler_paused`, persist via `StorageService::save_settings()`, send `scheduler_notify.send(())` via `AppContext`
 - [ ] T019 [US2] Implement `update_menu()` in `src-tauri/src/services/tray.rs`: dynamically switch menu item text for "显示主窗口"/"隐藏主窗口" (based on `window_visible`) and "暂停/恢复定时检查" (based on `scheduler_paused`)
 - [ ] T020 [US2] Wire menu events into `src-tauri/src/lib.rs::setup()`: register `on_menu_event` callback on tray icon, delegate to `TrayService` methods
@@ -145,6 +146,7 @@
 **Purpose**: Platform compatibility, logging, error handling, and final validation.
 
 - [ ] T035 [P] Implement tray environment detection in `src-tauri/src/services/tray.rs::TrayService::init()`: wrap `TrayIconBuilder::build()` in error handling; on failure set `tray_supported = false`, log warning, skip all tray operations
+- [ ] T035a [P] Add explicit tray cleanup on exit in src-tauri/src/lib.rs: call tray_service.cleanup() before app.exit(0); verify no icon residue after quit
 - [ ] T036 [P] Implement tray operation logging (FR-016) in `src-tauri/src/services/tray.rs`: use `log::info!` for icon create/destroy and status switches, `log::info!` for menu item clicks, `log::warn!` for unsupported environment, `log::error!` for icon load failures
 - [ ] T037 Implement platform-specific icon sizes for macOS in `src-tauri/src/services/tray.rs`: use 18x18 @1x / 36x36 @2x icon versions for macOS menu bar; on non-macOS use standard icon
 - [ ] T038 [P] Run `cargo test` and verify all Rust tests pass (target: 69+ existing + new tray tests)
