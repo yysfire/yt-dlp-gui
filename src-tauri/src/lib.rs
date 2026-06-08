@@ -11,6 +11,7 @@ mod commands;
 
 use crate::services::StorageService;
 use crate::services::download_queue::DownloadQueue;
+use crate::services::tray::TrayService;
 
 /// Application-wide context shared across all command handlers.
 pub struct AppContext {
@@ -92,6 +93,55 @@ pub fn run() {
                 queue: Mutex::new(Some(queue)),
             };
             app.manage(queue_ctx);
+
+            // ── System Tray Setup (spec 005-system-tray-icon) ──────────
+            let tray_service = match TrayService::init(&app_handle, data_dir_fs_sync.clone()) {
+                Ok(svc) => {
+                    log::info!("Tray service initialized, supported={}", svc.is_supported());
+                    std::sync::Arc::new(svc)
+                }
+                Err(e) => {
+                    log::error!("Tray service initialization failed: {}", e);
+                    return Err(e);
+                }
+            };
+
+            // Register menu event handler on the tray icon
+            if let Some(ref tray) = tray_service.tray_icon {
+                let tray_svc = tray_service.clone();
+                let app_handle_clone = app_handle.clone();
+                tray.on_menu_event(move |_app, event| {
+                    tray_svc.handle_menu_event(&app_handle_clone, event);
+                });
+            }
+
+            // Start minimized to tray if configured
+            if settings_clone.start_in_tray {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+
+            // Register window event handlers for close-to-tray and minimize-to-tray
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let tray_clone = tray_service.clone();
+                let data_dir_events = data_dir_fs_sync.clone();
+                let app_handle_events = app_handle.clone();
+                window.on_window_event(move |event| {
+                    match event {
+                        tauri::WindowEvent::CloseRequested { api, .. } => {
+                            let settings = StorageService::load_settings(&data_dir_events);
+                            if settings.close_to_tray && tray_clone.is_supported() {
+                                api.prevent_close();
+                                tray_clone.hide_window(&app_handle_events);
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+            }
+
+            app.manage(tray_service);
 
             // Start the background scheduler in a tokio task
             tauri::async_runtime::spawn(async move {

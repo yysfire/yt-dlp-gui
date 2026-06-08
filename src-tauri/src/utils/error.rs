@@ -32,4 +32,16 @@ pub enum AppError {
     /// Invalid proxy URL format
     #[error("Invalid proxy: {0}")]
     InvalidProxy(String),
+
+    /// Tray icon initialization failed
+    #[error("Tray initialization error: {0}")]
+    TrayInitialization(String),
+
+    /// Desktop environment does not support system tray
+    #[error("System tray not supported on this desktop environment")]
+    TrayNotSupported,
+
+    /// Tray icon update failed
+    #[error("Tray update error: {0}")]
+    TrayUpdate(String),
 }

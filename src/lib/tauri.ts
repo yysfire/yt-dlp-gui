@@ -208,6 +208,11 @@ export async function exportSubscriptionsOpml(path: string): Promise<void> {
   return invoke<void>("export_subscriptions_opml", { path });
 }
 
+// ── Tray state ──────────────────────────────────────────────────
+
+/** Re-export TrayState for frontend event listeners. */
+export type { TrayState } from "@/types";
+
 /**
  * Batch imports subscriptions from URLs and/or a file path.
  *

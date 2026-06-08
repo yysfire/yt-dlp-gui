@@ -459,6 +459,7 @@ mod tests {
             proxy_url: "http://127.0.0.1:7890".to_string(),
             cookie_file: String::new(),
             max_concurrent_downloads: 1,
+            ..Default::default()
         };
 
         StorageService::save_settings(tmp.path(), &settings)

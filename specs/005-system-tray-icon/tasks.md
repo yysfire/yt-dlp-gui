@@ -26,8 +26,8 @@
 
 **Purpose**: Prepare tray icon assets and module structure without touching production code.
 
-- [ ] T001 Create tray icon overlay images: download arrow (`src-tauri/icons/tray-downloading.png`) and checking spinner (`src-tauri/icons/tray-checking.png`), based on existing `src-tauri/icons/icon.png`
-- [ ] T002 Create placeholder module file `src-tauri/src/services/tray.rs` with `pub mod tray;` declaration in `src-tauri/src/services/mod.rs`
+- [x] T001 Create tray icon overlay images: download arrow (`src-tauri/icons/tray-downloading.png`) and checking spinner (`src-tauri/icons/tray-checking.png`), based on existing `src-tauri/icons/icon.png`
+- [x] T002 Create placeholder module file `src-tauri/src/services/tray.rs` with `pub mod tray;` declaration in `src-tauri/src/services/mod.rs`
 
 ---
 
@@ -37,11 +37,11 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T003 [P] Extend `AppSettings` in `src-tauri/src/models/settings.rs`: add `minimize_to_tray: bool` (default `true`), `close_to_tray: bool` (default `true`), `start_in_tray: bool` (default `false`), `scheduler_paused: bool` (default `false`). Write unit tests for serde default values and round-trip serialization.
-- [ ] T004 [P] Extend `AppError` enum in `src-tauri/src/utils/error.rs`: add `TrayInitialization(String)`, `TrayNotSupported`, `TrayUpdate(String)` variants with `#[error]` annotations.
-- [ ] T005 [P] Extend TypeScript `AppSettings` interface in `src/types/index.ts`: add `minimize_to_tray: boolean`, `close_to_tray: boolean`, `start_in_tray: boolean`, `scheduler_paused: boolean` fields with correct defaults.
-- [ ] T006 Implement `TrayState` types in `src-tauri/src/services/tray.rs`: define `TrayStatus` enum (`Idle`, `Downloading { active_count: u32 }`, `Checking`), `TrayState` struct with `status`, `window_visible`, `tray_supported`, `active_downloads`. Write unit tests for status transitions.
-- [ ] T007 [P] Add `get_settings` and `update_settings` command support for new tray fields in `src-tauri/src/commands/settings.rs`: ensure serde serializes/deserializes new fields correctly. Write unit test for round-trip.
+- [x] T003 [P] Extend `AppSettings` in `src-tauri/src/models/settings.rs`: add `minimize_to_tray: bool` (default `true`), `close_to_tray: bool` (default `true`), `start_in_tray: bool` (default `false`), `scheduler_paused: bool` (default `false`). Write unit tests for serde default values and round-trip serialization.
+- [x] T004 [P] Extend `AppError` enum in `src-tauri/src/utils/error.rs`: add `TrayInitialization(String)`, `TrayNotSupported`, `TrayUpdate(String)` variants with `#[error]` annotations.
+- [x] T005 [P] Extend TypeScript `AppSettings` interface in `src/types/index.ts`: add `minimize_to_tray: boolean`, `close_to_tray: boolean`, `start_in_tray: boolean`, `scheduler_paused: boolean` fields with correct defaults.
+- [x] T006 Implement `TrayState` types in `src-tauri/src/services/tray.rs`: define `TrayStatus` enum (`Idle`, `Downloading { active_count: u32 }`, `Checking`), `TrayState` struct with `status`, `window_visible`, `tray_supported`, `active_downloads`. Write unit tests for status transitions.
+- [x] T007 [P] Add `get_settings` and `update_settings` command support for new tray fields in `src-tauri/src/commands/settings.rs`: ensure serde serializes/deserializes new fields correctly. Write unit test for round-trip.
 
 **Checkpoint**: Foundation ready - user story implementation can now begin
 
@@ -57,15 +57,15 @@
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T008 [P] [US1] Unit test for `TrayService::init()` in `src-tauri/src/services/tray.rs`: verifies TrayIconBuilder configuration, icon assignment, and initial tooltip "yt-dlp 订阅管理器 - 空闲"
-- [ ] T009 [P] [US1] Unit test for window visibility toggle logic in `src-tauri/src/services/tray.rs`: verifies `window_visible` flag flips correctly on show/hide
+- [x] T008 [P] [US1] Unit test for `TrayService::init()` in `src-tauri/src/services/tray.rs`: verifies TrayIconBuilder configuration, icon assignment, and initial tooltip "yt-dlp 订阅管理器 - 空闲"
+- [x] T009 [P] [US1] Unit test for window visibility toggle logic in `src-tauri/src/services/tray.rs`: verifies `window_visible` flag flips correctly on show/hide
 
 ### Implementation for User Story 1
 
-- [ ] T010 [US1] Implement `TrayService::init()` in `src-tauri/src/services/tray.rs`: creates tray icon via `TrayIconBuilder` with app icon, initial tooltip, and left-click toggle handler via `on_tray_icon_event`
-- [ ] T011 [US1] Implement `TrayService::show_window()` and `TrayService::hide_window()` in `src-tauri/src/services/tray.rs`: uses `app_handle.get_webview_window("main")` to show/hide
-- [ ] T012 [US1] Integrate TrayService into `src-tauri/src/lib.rs::setup()`: initialize tray, register `on_tray_icon_event` callback for left-click show/hide toggle, store tray handle in `AppContext`
-- [ ] T013 [US1] Register window minimize event in `src-tauri/src/lib.rs::setup()`: on `WindowEvent::Minimize`, call `hide_window()` if `minimize_to_tray` setting is enabled
+- [x] T010 [US1] Implement `TrayService::init()` in `src-tauri/src/services/tray.rs`: creates tray icon via `TrayIconBuilder` with app icon, initial tooltip, and left-click toggle handler via `on_tray_icon_event`
+- [x] T011 [US1] Implement `TrayService::show_window()` and `TrayService::hide_window()` in `src-tauri/src/services/tray.rs`: uses `app_handle.get_webview_window("main")` to show/hide
+- [x] T012 [US1] Integrate TrayService into `src-tauri/src/lib.rs::setup()`: initialize tray, register `on_tray_icon_event` callback for left-click show/hide toggle, store tray handle in `AppContext`
+- [x] T013 [US1] Register window minimize event in `src-tauri/src/lib.rs::setup()`: on `WindowEvent::Minimize`, call `hide_window()` if `minimize_to_tray` setting is enabled
 
 **Checkpoint**: User Story 1 complete — 最小化到托盘，左键单击恢复窗口
 
@@ -79,17 +79,17 @@
 
 ### Tests for User Story 2 ⚠️
 
-- [ ] T014 [P] [US2] Unit test for menu item texts in `src-tauri/src/services/tray.rs`: verifies "显示主窗口"/"隐藏主窗口" and "暂停/恢复" text switches correctly based on state
-- [ ] T015 [P] [US2] Unit test for `TrayService::toggle_scheduler()` in `src-tauri/src/services/tray.rs`: verifies `scheduler_paused` flag toggles and watch notification is sent
+- [x] T014 [P] [US2] Unit test for menu item texts in `src-tauri/src/services/tray.rs`: verifies "显示主窗口"/"隐藏主窗口" and "暂停/恢复" text switches correctly based on state
+- [x] T015 [P] [US2] Unit test for `TrayService::toggle_scheduler()` in `src-tauri/src/services/tray.rs`: verifies `scheduler_paused` flag toggles and watch notification is sent
 
 ### Implementation for User Story 2
 
-- [ ] T016 [US2] Build tray context menu in `src-tauri/src/services/tray.rs::TrayService::init()`: use `MenuBuilder` to create 6 items — "显示主窗口", separator, "检查全部订阅更新", "暂停定时检查", separator, "退出"
-- [ ] T017 [US2] Implement `on_menu_event` handler in `src-tauri/src/services/tray.rs`: match menu item IDs and dispatch actions — "show" toggles window, "check_all" calls existing check_all command, "toggle_scheduler" toggles pause, "quit" triggers exit flow
-- [ ] T017a [US2] Implement quit confirmation logic in src-tauri/src/services/tray.rs: check active download count before exit; if >0, show native confirmation dialog (via tauri::api::dialog); if 0, exit directly; always cleanup tray resource
-- [ ] T018 [US2] Implement scheduler toggle logic in `src-tauri/src/services/tray.rs::TrayService::toggle_scheduler()`: update `AppSettings.scheduler_paused`, persist via `StorageService::save_settings()`, send `scheduler_notify.send(())` via `AppContext`
-- [ ] T019 [US2] Implement `update_menu()` in `src-tauri/src/services/tray.rs`: dynamically switch menu item text for "显示主窗口"/"隐藏主窗口" (based on `window_visible`) and "暂停/恢复定时检查" (based on `scheduler_paused`)
-- [ ] T020 [US2] Wire menu events into `src-tauri/src/lib.rs::setup()`: register `on_menu_event` callback on tray icon, delegate to `TrayService` methods
+- [x] T016 [US2] Build tray context menu in `src-tauri/src/services/tray.rs::TrayService::init()`: use `MenuBuilder` to create 6 items — "显示主窗口", separator, "检查全部订阅更新", "暂停定时检查", separator, "退出"
+- [x] T017 [US2] Implement `on_menu_event` handler in `src-tauri/src/services/tray.rs`: match menu item IDs and dispatch actions — "show" toggles window, "check_all" calls existing check_all command, "toggle_scheduler" toggles pause, "quit" triggers exit flow
+- [x] T017a [US2] Implement quit confirmation logic in src-tauri/src/services/tray.rs: check active download count before exit; if >0, show native confirmation dialog (via tauri::api::dialog); if 0, exit directly; always cleanup tray resource
+- [x] T018 [US2] Implement scheduler toggle logic in `src-tauri/src/services/tray.rs::TrayService::toggle_scheduler()`: update `AppSettings.scheduler_paused`, persist via `StorageService::save_settings()`, send `scheduler_notify.send(())` via `AppContext`
+- [x] T019 [US2] Implement `update_menu()` in `src-tauri/src/services/tray.rs`: dynamically switch menu item text for "显示主窗口"/"隐藏主窗口" (based on `window_visible`) and "暂停/恢复定时检查" (based on `scheduler_paused`)
+- [x] T020 [US2] Wire menu events into `src-tauri/src/lib.rs::setup()`: register `on_menu_event` callback on tray icon, delegate to `TrayService` methods
 
 **Checkpoint**: User Stories 1 + 2 complete — 最小化到托盘 + 右键菜单操作
 
@@ -103,15 +103,15 @@
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T021 [P] [US3] Unit test for `close_requested` handler logic in `src-tauri/src/services/tray.rs`: verifies `api.prevent_close()` is called when `close_to_tray` is enabled
-- [ ] T022 [P] [US3] Unit test for `minimize_to_tray` setting toggle in `src-tauri/src/models/settings.rs`: verifies default value and serde persistence
+- [x] T021 [P] [US3] Unit test for `close_requested` handler logic in `src-tauri/src/services/tray.rs`: verifies `api.prevent_close()` is called when `close_to_tray` is enabled
+- [x] T022 [P] [US3] Unit test for `minimize_to_tray` setting toggle in `src-tauri/src/models/settings.rs`: verifies default value and serde persistence
 
 ### Implementation for User Story 3
 
-- [ ] T023 [US3] Register `on_window_event` for `CloseRequested` in `src-tauri/src/lib.rs::setup()`: if `close_to_tray` enabled → call `api.prevent_close()` + `hide_window()`; otherwise allow normal exit
-- [ ] T024 [US3] Add tray behavior settings section in `src/components/SettingsDialog.tsx`: three Switch components — "最小化到托盘" (default on), "关闭到托盘" (default on), "启动时最小化到托盘" (default off). Wire to `update_settings` invoke.
-- [ ] T025 [US3] Extend `src/lib/tauri.ts`: add `getTrayState()` invoke wrapper returning `TrayState` type. Add `TrayState` interface in `src/types/index.ts`.
-- [ ] T026 [US3] Implement `start_in_tray` logic in `src-tauri/src/lib.rs::setup()`: after tray initialization, if `start_in_tray` setting is true, call `window.hide()` (avoid splash flash via `visible: false` or post-init hide)
+- [x] T023 [US3] Register `on_window_event` for `CloseRequested` in `src-tauri/src/lib.rs::setup()`: if `close_to_tray` enabled → call `api.prevent_close()` + `hide_window()`; otherwise allow normal exit
+- [x] T024 [US3] Add tray behavior settings section in `src/components/SettingsDialog.tsx`: three Switch components — "最小化到托盘" (default on), "关闭到托盘" (default on), "启动时最小化到托盘" (default off). Wire to `update_settings` invoke.
+- [x] T025 [US3] Extend `src/lib/tauri.ts`: add `getTrayState()` invoke wrapper returning `TrayState` type. Add `TrayState` interface in `src/types/index.ts`.
+- [x] T026 [US3] Implement `start_in_tray` logic in `src-tauri/src/lib.rs::setup()`: after tray initialization, if `start_in_tray` setting is true, call `window.hide()` (avoid splash flash via `visible: false` or post-init hide)
 
 **Checkpoint**: User Stories 1 + 2 + 3 complete — 完整的托盘行为（最小化/关闭到托盘 + 设置）
 
@@ -125,17 +125,17 @@
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T027 [P] [US4] Unit test for `TrayState::set_status()` in `src-tauri/src/services/tray.rs`: verifies status transition rules (Idle → Downloading, Idle → Checking, Downloading → Idle, Checking → Idle), rejects invalid transitions
-- [ ] T028 [P] [US4] Unit test for tooltip text generation in `src-tauri/src/services/tray.rs`: verifies "yt-dlp 订阅管理器 - 空闲", "正在下载 3 个视频", "正在检查订阅更新..." correct format strings
+- [x] T027 [P] [US4] Unit test for `TrayState::set_status()` in `src-tauri/src/services/tray.rs`: verifies status transition rules (Idle → Downloading, Idle → Checking, Downloading → Idle, Checking → Idle), rejects invalid transitions
+- [x] T028 [P] [US4] Unit test for tooltip text generation in `src-tauri/src/services/tray.rs`: verifies "yt-dlp 订阅管理器 - 空闲", "正在下载 3 个视频", "正在检查订阅更新..." correct format strings
 
 ### Implementation for User Story 4
 
-- [ ] T029 [US4] Implement `TrayService::set_status()` in `src-tauri/src/services/tray.rs`: updates `TrayState.status`, calls `tray.set_icon()` to switch between `tray-idle.png` / `tray-downloading.png` / `tray-checking.png`, calls `tray.set_tooltip()` with generated text
-- [ ] T030 [US4] Implement icon loading in `src-tauri/src/services/tray.rs`: load `tray-idle.png`, `tray-downloading.png`, `tray-checking.png` at init time via `tauri::image::Image::from_bytes()` with `include_bytes!()`
-- [ ] T031 [US4] Integrate status updates with download events in `src-tauri/src/services/tray.rs`: when a download starts, call `set_status(Downloading { active_count })`; when last download completes, call `set_status(Idle)`. Hook into existing download progress/complete event emission points in `src-tauri/src/commands/download.rs`.
-- [ ] T032 [US4] Integrate status updates with scheduler check events in `src-tauri/src/services/tray.rs`: when scheduler begins a check cycle, call `set_status(Checking)`; when check cycle ends, call `set_status(Idle)`. Hook into scheduler state in `src-tauri/src/lib.rs`.
-- [ ] T033 [US4] Emit `tray-state-changed` event to frontend in `src-tauri/src/services/tray.rs::set_status()`: use `app_handle.emit("tray-state-changed", TrayState)` to notify frontend of status changes
-- [ ] T034 [US4] Add frontend listener for `tray-state-changed` event in `src/App.tsx` or `src/components/StatusBar.tsx`: display current tray state (idle/downloading/checking) in status bar
+- [x] T029 [US4] Implement `TrayService::set_status()` in `src-tauri/src/services/tray.rs`: updates `TrayState.status`, calls `tray.set_icon()` to switch between `tray-idle.png` / `tray-downloading.png` / `tray-checking.png`, calls `tray.set_tooltip()` with generated text
+- [x] T030 [US4] Implement icon loading in `src-tauri/src/services/tray.rs`: load `tray-idle.png`, `tray-downloading.png`, `tray-checking.png` at init time via `tauri::image::Image::from_bytes()` with `include_bytes!()`
+- [x] T031 [US4] Integrate status updates with download events in `src-tauri/src/services/tray.rs`: when a download starts, call `set_status(Downloading { active_count })`; when last download completes, call `set_status(Idle)`. Hook into existing download progress/complete event emission points in `src-tauri/src/commands/download.rs`.
+- [x] T032 [US4] Integrate status updates with scheduler check events in `src-tauri/src/services/tray.rs`: when scheduler begins a check cycle, call `set_status(Checking)`; when check cycle ends, call `set_status(Idle)`. Hook into scheduler state in `src-tauri/src/lib.rs`.
+- [x] T033 [US4] Emit `tray-state-changed` event to frontend in `src-tauri/src/services/tray.rs::set_status()`: use `app_handle.emit("tray-state-changed", TrayState)` to notify frontend of status changes
+- [x] T034 [US4] Add frontend listener for `tray-state-changed` event in `src/App.tsx` or `src/components/StatusBar.tsx`: display current tray state (idle/downloading/checking) in status bar
 
 **Checkpoint**: All 4 user stories independently functional — 托盘图标完整功能
 
@@ -145,12 +145,12 @@
 
 **Purpose**: Platform compatibility, logging, error handling, and final validation.
 
-- [ ] T035 [P] Implement tray environment detection in `src-tauri/src/services/tray.rs::TrayService::init()`: wrap `TrayIconBuilder::build()` in error handling; on failure set `tray_supported = false`, log warning, skip all tray operations
-- [ ] T035a [P] Add explicit tray cleanup on exit in src-tauri/src/lib.rs: call tray_service.cleanup() before app.exit(0); verify no icon residue after quit
-- [ ] T036 [P] Implement tray operation logging (FR-016) in `src-tauri/src/services/tray.rs`: use `log::info!` for icon create/destroy and status switches, `log::info!` for menu item clicks, `log::warn!` for unsupported environment, `log::error!` for icon load failures
+- [x] T035 [P] Implement tray environment detection in `src-tauri/src/services/tray.rs::TrayService::init()`: wrap `TrayIconBuilder::build()` in error handling; on failure set `tray_supported = false`, log warning, skip all tray operations
+- [x] T035a [P] Add explicit tray cleanup on exit in src-tauri/src/lib.rs: call tray_service.cleanup() before app.exit(0); verify no icon residue after quit
+- [x] T036 [P] Implement tray operation logging (FR-016) in `src-tauri/src/services/tray.rs`: use `log::info!` for icon create/destroy and status switches, `log::info!` for menu item clicks, `log::warn!` for unsupported environment, `log::error!` for icon load failures
 - [ ] T037 Implement platform-specific icon sizes for macOS in `src-tauri/src/services/tray.rs`: use 18x18 @1x / 36x36 @2x icon versions for macOS menu bar; on non-macOS use standard icon
-- [ ] T038 [P] Run `cargo test` and verify all Rust tests pass (target: 69+ existing + new tray tests)
-- [ ] T039 [P] Run `npx tsc --noEmit` and verify TypeScript compilation passes
+- [x] T038 [P] Run `cargo test` and verify all Rust tests pass (target: 69+ existing + new tray tests)
+- [x] T039 [P] Run `npx tsc --noEmit` and verify TypeScript compilation passes
 - [ ] T040 Run `npm run tauri dev` and manually verify tray icon appears and functions on the current platform per quickstart.md
 
 ---

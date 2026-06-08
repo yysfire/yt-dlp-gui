@@ -22,10 +22,26 @@ pub struct AppSettings {
     /// Maximum number of concurrent downloads (1-5)
     #[serde(default = "default_max_concurrent_downloads")]
     pub max_concurrent_downloads: u32,
+    /// When true, window minimizes to system tray instead of taskbar
+    #[serde(default = "default_true")]
+    pub minimize_to_tray: bool,
+    /// When true, closing the window hides to tray instead of exiting
+    #[serde(default = "default_true")]
+    pub close_to_tray: bool,
+    /// When true, application starts minimized to system tray
+    #[serde(default)]
+    pub start_in_tray: bool,
+    /// When true, the background scheduler is paused (tray menu toggle)
+    #[serde(default)]
+    pub scheduler_paused: bool,
 }
 
 fn default_max_concurrent_downloads() -> u32 {
     1
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -41,6 +57,10 @@ impl Default for AppSettings {
             proxy_url: String::new(),
             cookie_file: String::new(),
             max_concurrent_downloads: 1,
+            minimize_to_tray: true,
+            close_to_tray: true,
+            start_in_tray: false,
+            scheduler_paused: false,
         }
     }
 }
@@ -96,6 +116,10 @@ mod tests {
         assert!(!settings.dark_mode);
         assert_eq!(settings.proxy_url, "");
         assert_eq!(settings.cookie_file, "");
+        assert!(settings.minimize_to_tray);
+        assert!(settings.close_to_tray);
+        assert!(!settings.start_in_tray);
+        assert!(!settings.scheduler_paused);
     }
 
     #[test]
@@ -197,6 +221,65 @@ mod tests {
             result.is_err(),
             "Corrupt JSON should fail deserialization"
         );
+    }
+
+    // ── Tray settings tests (spec 005-system-tray-icon) ──────────────
+
+    #[test]
+    fn test_tray_settings_defaults() {
+        let settings = AppSettings::default();
+        assert!(settings.minimize_to_tray, "minimize_to_tray should default to true");
+        assert!(settings.close_to_tray, "close_to_tray should default to true");
+        assert!(!settings.start_in_tray, "start_in_tray should default to false");
+        assert!(!settings.scheduler_paused, "scheduler_paused should default to false");
+    }
+
+    #[test]
+    fn test_tray_settings_serde_roundtrip() {
+        let settings = AppSettings {
+            minimize_to_tray: false,
+            close_to_tray: false,
+            start_in_tray: true,
+            scheduler_paused: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&settings).expect("serialize");
+        let deserialized: AppSettings = serde_json::from_str(&json).expect("deserialize");
+        assert!(!deserialized.minimize_to_tray);
+        assert!(!deserialized.close_to_tray);
+        assert!(deserialized.start_in_tray);
+        assert!(deserialized.scheduler_paused);
+    }
+
+    #[test]
+    fn test_tray_settings_default_on_missing() {
+        let json = r#"{
+            "download_dir": "/tmp",
+            "check_interval_minutes": 60,
+            "yt_dlp_path": "yt-dlp",
+            "quality_preset": "1080p",
+            "notifications_enabled": false,
+            "dark_mode": false,
+            "proxy_url": "",
+            "cookie_file": ""
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json)
+            .expect("should deserialize with missing tray fields");
+        // Tray fields should get their serde defaults when missing
+        assert!(settings.minimize_to_tray);
+        assert!(settings.close_to_tray);
+        assert!(!settings.start_in_tray);
+        assert!(!settings.scheduler_paused);
+    }
+
+    #[test]
+    fn test_tray_settings_json_keys() {
+        let settings = AppSettings::default();
+        let json_value = serde_json::to_value(&settings).expect("should serialize");
+        assert!(json_value["minimize_to_tray"].is_boolean());
+        assert!(json_value["close_to_tray"].is_boolean());
+        assert!(json_value["start_in_tray"].is_boolean());
+        assert!(json_value["scheduler_paused"].is_boolean());
     }
 
     #[test]

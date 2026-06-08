@@ -82,6 +82,22 @@ export interface AppSettings {
   proxy_url: string;
   cookie_file: string;
   max_concurrent_downloads: number;
+  /** When true, window minimizes to system tray instead of taskbar (default: true) */
+  minimize_to_tray: boolean;
+  /** When true, closing the window hides to tray instead of exiting (default: true) */
+  close_to_tray: boolean;
+  /** When true, application starts minimized to system tray (default: false) */
+  start_in_tray: boolean;
+  /** When true, the background scheduler is paused (default: false) */
+  scheduler_paused: boolean;
+}
+
+/** Runtime system tray state. */
+export interface TrayState {
+  status: "idle" | "downloading" | "checking";
+  window_visible: boolean;
+  tray_supported: boolean;
+  active_downloads: number;
 }
 
 /** Result of download path validation. */

@@ -479,6 +479,60 @@ export default function SettingsDialog({
                 label="通知"
               />
             </Grid>
+
+            {/* ── Tray Behavior ─────────────────────────────────── */}
+            <Grid item xs={12}>
+              <Typography
+                variant="subtitle2"
+                color="text.secondary"
+                gutterBottom
+                sx={{ mt: 1, fontWeight: 600 }}
+              >
+                系统托盘
+              </Typography>
+            </Grid>
+            <Grid item xs={6}>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={settings.minimize_to_tray}
+                    onChange={(e) =>
+                      updateField("minimize_to_tray", e.target.checked)
+                    }
+                    size="small"
+                  />
+                }
+                label="最小化到托盘"
+              />
+            </Grid>
+            <Grid item xs={6}>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={settings.close_to_tray}
+                    onChange={(e) =>
+                      updateField("close_to_tray", e.target.checked)
+                    }
+                    size="small"
+                  />
+                }
+                label="关闭到托盘"
+              />
+            </Grid>
+            <Grid item xs={6}>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={settings.start_in_tray}
+                    onChange={(e) =>
+                      updateField("start_in_tray", e.target.checked)
+                    }
+                    size="small"
+                  />
+                }
+                label="启动时最小化到托盘"
+              />
+            </Grid>
           </Grid>
         )}
       </DialogContent>
