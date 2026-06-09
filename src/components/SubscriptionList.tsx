@@ -1,4 +1,3 @@
-import { useState, useMemo } from "react";
 import {
   List,
   Typography,
@@ -7,21 +6,17 @@ import {
   Alert,
   IconButton,
   Tooltip,
-  FormControl,
-  Select,
-  MenuItem,
 } from "@mui/material";
 import {
   Refresh as RefreshIcon,
   DownloadForOffline as CheckAllIcon,
   FileDownload as ExportIcon,
   FileUpload as ImportIcon,
+  MonitorHeart as HealthCheckIcon,
 } from "@mui/icons-material";
-import type { Subscription } from "@/types";
-import { GROUPS } from "@/types";
+import type { Subscription, FilterState, SortState } from "@/types";
 import SubscriptionItem from "./SubscriptionItem";
-
-const ALL_GROUPS = ["全部", ...GROUPS];
+import FilterBar from "./FilterBar";
 
 interface SubscriptionListProps {
   subscriptions: Subscription[];
@@ -36,10 +31,18 @@ interface SubscriptionListProps {
   onRefresh: () => Promise<void>;
   onOpenExport: () => void;
   onOpenImport: () => void;
+  onOpenHealthCheck: () => void;
   onUpdateGroup: (id: string, groupName: string) => Promise<void>;
+  /** 筛选和排序状态（从 useFilter hook 输出） */
+  filter: FilterState;
+  onFilterChange: (partial: Partial<FilterState>) => void;
+  sort: SortState;
+  onSortChange: (sort: SortState) => void;
+  filteredSubscriptions: Subscription[];
+  filteredCount: number;
 }
 
-/** Sidebar container rendering the subscription list with toolbar. */
+/** Sidebar container rendering the subscription list with toolbar and filter bar. */
 export default function SubscriptionList({
   subscriptions,
   loading,
@@ -53,19 +56,18 @@ export default function SubscriptionList({
   onRefresh,
   onOpenExport,
   onOpenImport,
+  onOpenHealthCheck,
   onUpdateGroup,
+  filter,
+  onFilterChange,
+  sort,
+  onSortChange,
+  filteredSubscriptions,
+  filteredCount,
 }: SubscriptionListProps) {
-  const [groupFilter, setGroupFilter] = useState("全部");
-
-  const filteredSubscriptions = useMemo(() => {
-    if (groupFilter === "全部") return subscriptions;
-    if (groupFilter === "未分组") return subscriptions.filter((s) => s.group_name === "未分组");
-    return subscriptions.filter((s) => s.group_name === groupFilter);
-  }, [subscriptions, groupFilter]);
-
   return (
     <div className="flex flex-col h-full bg-white dark:bg-gray-800">
-      {/* Toolbar */}
+      {/* Title row */}
       <Box
         sx={{
           px: 1.5,
@@ -74,26 +76,11 @@ export default function SubscriptionList({
           borderColor: "divider",
         }}
       >
-        {/* Title row */}
         <Typography variant="body2" fontWeight={600} textAlign="center">
           订阅列表
         </Typography>
         {/* Controls row */}
         <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", mt: 0.5 }}>
-          <FormControl size="small" sx={{ minWidth: 80, mr: 0.5 }}>
-            <Select
-              value={groupFilter}
-              onChange={(e) => setGroupFilter(e.target.value)}
-              displayEmpty
-              sx={{ fontSize: "0.75rem" }}
-            >
-              {ALL_GROUPS.map((g) => (
-                <MenuItem key={g} value={g} dense sx={{ fontSize: "0.75rem" }}>
-                  {g}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
           <Tooltip title="导入">
             <IconButton size="small" onClick={onOpenImport}>
               <ImportIcon fontSize="small" />
@@ -104,18 +91,33 @@ export default function SubscriptionList({
               <ExportIcon fontSize="small" />
             </IconButton>
           </Tooltip>
-        <Tooltip title="检查全部">
-          <IconButton size="small" onClick={onManualCheckAll}>
-            <CheckAllIcon fontSize="small" />
-          </IconButton>
-        </Tooltip>
-        <Tooltip title="刷新">
-          <IconButton size="small" onClick={onRefresh}>
-            <RefreshIcon fontSize="small" />
-          </IconButton>
-        </Tooltip>
+          <Tooltip title="检查全部">
+            <IconButton size="small" onClick={onManualCheckAll}>
+              <CheckAllIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="健康检查">
+            <IconButton size="small" onClick={onOpenHealthCheck}>
+              <HealthCheckIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="刷新">
+            <IconButton size="small" onClick={onRefresh}>
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
         </Box>
       </Box>
+
+      {/* Filter bar */}
+      <FilterBar
+        filter={filter}
+        onFilterChange={onFilterChange}
+        sort={sort}
+        onSortChange={onSortChange}
+        subscriptions={subscriptions}
+        count={filteredCount}
+      />
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
@@ -134,10 +136,10 @@ export default function SubscriptionList({
         {!loading && !error && filteredSubscriptions.length === 0 && (
           <Box sx={{ p: 3, textAlign: "center" }}>
             <Typography variant="body2" color="text.secondary">
-              暂无订阅
+              {subscriptions.length === 0 ? "暂无订阅" : "无匹配结果"}
             </Typography>
             <Typography variant="caption" color="text.disabled">
-              点击右上角 + 添加频道
+              {subscriptions.length === 0 ? "点击右上角 + 添加频道" : "调整筛选条件"}
             </Typography>
           </Box>
         )}
@@ -156,6 +158,7 @@ export default function SubscriptionList({
                 onTogglePause={() => onTogglePause(sub.id)}
                 onCheck={() => onCheckSubscription(sub.id)}
                 onUpdateGroup={onUpdateGroup}
+                keyword={filter.keyword}
               />
             ))}
           </List>

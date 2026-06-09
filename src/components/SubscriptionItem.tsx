@@ -33,6 +33,46 @@ interface SubscriptionItemProps {
   onTogglePause: () => void;
   onCheck: () => void;
   onUpdateGroup: (id: string, groupName: string) => void;
+  keyword?: string;
+}
+
+/**
+ * 字面搜索高亮 - 递归生成 JSX。
+ * 在文本中查找 keyword，将匹配部分用 <mark> 标签包裹。
+ * 使用正则特殊字符转义，仅做字面匹配，不触发正则语义。
+ */
+function highlightText(text: string, keyword: string | undefined): (string | React.JSX.Element)[] {
+  if (!keyword || !text) {
+    return [text];
+  }
+
+  const lowerText = text.toLowerCase();
+  const lowerKw = keyword.toLowerCase();
+
+  if (!lowerText.includes(lowerKw)) {
+    return [text];
+  }
+
+  // 转义正则特殊字符，实现字面匹配
+  const escapedKw = keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`(${escapedKw})`, "gi");
+  const parts = text.split(regex);
+
+  const result: (string | React.JSX.Element)[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i] === "") continue;
+    if (parts[i].toLowerCase() === lowerKw) {
+      result.push(
+        <mark key={i} className="bg-yellow-200 dark:bg-yellow-600">
+          {parts[i]}
+        </mark>,
+      );
+    } else {
+      result.push(parts[i]);
+    }
+  }
+
+  return result.length > 0 ? result : [text];
 }
 
 /** Platform icon mapping. */
@@ -56,6 +96,7 @@ export default function SubscriptionItem({
   onTogglePause,
   onCheck,
   onUpdateGroup,
+  keyword,
 }: SubscriptionItemProps) {
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
   const [editingGroup, setEditingGroup] = useState(false);
@@ -93,7 +134,7 @@ export default function SubscriptionItem({
         <ListItemText
           primary={
             <Typography variant="body2" noWrap>
-              {subscription.channel_name}
+              {highlightText(subscription.channel_name, keyword)}
             </Typography>
           }
           secondary={

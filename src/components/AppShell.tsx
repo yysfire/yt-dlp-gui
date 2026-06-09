@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import {
   FolderOpen as FolderOpenIcon,
 } from "@mui/icons-material";
-import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask, QueueState } from "@/types";
+import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask, QueueState, HealthCheckSummary, FilterState, SortState } from "@/types";
 import { listen } from "@tauri-apps/api/event";
 import TopBar from "./TopBar";
 import StatusBar from "./StatusBar";
@@ -13,6 +13,7 @@ import DownloadedList from "./DownloadedList";
 import SettingsDialog from "./SettingsDialog";
 import ExportDialog from "./ExportDialog";
 import ImportDialog from "./ImportDialog";
+import HealthCheckPanel from "./HealthCheckPanel";
 import * as api from "@/lib/tauri";
 
 interface AppShellProps {
@@ -31,6 +32,19 @@ interface AppShellProps {
   onManualCheckAll: () => Promise<void>;
   onUpdateGroup: (id: string, groupName: string) => Promise<void>;
   progressMap?: Map<string, DownloadProgress>;
+  healthChecking: boolean;
+  healthProgress: { completed: number; total: number } | null;
+  healthSummary: HealthCheckSummary | null;
+  onHealthCheckAll: () => Promise<void>;
+  onHealthCheckSelected: (ids: string[]) => Promise<void>;
+  onHealthClearResults: () => void;
+  /** 筛选和排序状态 */
+  filter: FilterState;
+  onFilterChange: (partial: Partial<FilterState>) => void;
+  sort: SortState;
+  onSortChange: (sort: SortState) => void;
+  filteredSubscriptions: Subscription[];
+  filteredCount: number;
 }
 
 /**
@@ -52,6 +66,18 @@ export default function AppShell({
   onManualCheckAll,
   onUpdateGroup,
   progressMap,
+  healthChecking,
+  healthProgress,
+  healthSummary,
+  onHealthCheckAll,
+  onHealthCheckSelected,
+  onHealthClearResults,
+  filter,
+  onFilterChange,
+  sort,
+  onSortChange,
+  filteredSubscriptions,
+  filteredCount,
 }: AppShellProps) {
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -60,6 +86,7 @@ export default function AppShell({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [queueTasks, setQueueTasks] = useState<DownloadTask[]>([]);
   const [activeView, setActiveView] = useState<"detail" | "downloads">("detail");
+  const [healthCheckOpen, setHealthCheckOpen] = useState(false);
 
   const selectedSub = subscriptions.find((s) => s.id === selectedId) ?? null;
   const filteredRecords = selectedId
@@ -160,7 +187,14 @@ export default function AppShell({
               onRefresh={onRefreshSubscriptions}
               onOpenExport={() => setExportDialogOpen(true)}
               onOpenImport={() => setImportDialogOpen(true)}
+              onOpenHealthCheck={() => setHealthCheckOpen(true)}
               onUpdateGroup={onUpdateGroup}
+              filter={filter}
+              onFilterChange={onFilterChange}
+              sort={sort}
+              onSortChange={onSortChange}
+              filteredSubscriptions={filteredSubscriptions}
+              filteredCount={filteredCount}
             />
           </div>
 
@@ -230,6 +264,18 @@ export default function AppShell({
         open={importDialogOpen}
         onClose={() => setImportDialogOpen(false)}
         onImported={onRefreshSubscriptions}
+      />
+      <HealthCheckPanel
+        open={healthCheckOpen}
+        onClose={() => setHealthCheckOpen(false)}
+        subscriptions={subscriptions}
+        isChecking={healthChecking}
+        progress={healthProgress}
+        summary={healthSummary}
+        onCheckAll={onHealthCheckAll}
+        onCheckSelected={onHealthCheckSelected}
+        onClearResults={onHealthClearResults}
+        onRefreshSubscriptions={onRefreshSubscriptions}
       />
     </div>
   );

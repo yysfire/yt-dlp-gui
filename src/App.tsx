@@ -8,6 +8,8 @@ import { listen } from "@tauri-apps/api/event";
 import { useSubscriptions } from "@/hooks/useSubscriptions";
 import { useDownloadRecords } from "@/hooks/useDownloadRecords";
 import { useDownloadProgress } from "@/hooks/useDownloadProgress";
+import { useHealthCheck } from "@/hooks/useHealthCheck";
+import { useFilter } from "@/hooks/useFilter";
 import AppShell from "@/components/AppShell";
 import * as api from "@/lib/tauri";
 import type { AppSettings } from "@/types";
@@ -93,6 +95,17 @@ export default function App() {
 
   const { progressMap } = useDownloadProgress();
 
+  const {
+    isChecking: healthChecking,
+    progress: healthProgress,
+    summary: healthSummary,
+    startCheckAll: startHealthCheckAll,
+    startCheckSelected: startHealthCheckSelected,
+    clearResults: clearHealthResults,
+  } = useHealthCheck(refreshSubs);
+
+  const { filter, setFilter, sort, setSort, filtered, count: filteredCount } = useFilter(subscriptions);
+
   // Load dark mode preference from settings on mount
   useEffect(() => {
     const loadSettings = async () => {
@@ -157,6 +170,16 @@ export default function App() {
     };
   }, [refreshRecords, refreshSubs]);
 
+  // Listen for subscriptions-updated (batch import / batch delete completed)
+  useEffect(() => {
+    const unlistenPromise = listen("subscriptions-updated", () => {
+      refreshSubs();
+    });
+    return () => {
+      unlistenPromise.then((fn) => fn());
+    };
+  }, [refreshSubs]);
+
   // Handle dark mode toggle (called when settings are updated externally)
   const handleDarkModeChange = useCallback((isDark: boolean) => {
     setDarkMode(isDark);
@@ -207,6 +230,18 @@ export default function App() {
         }}
         onUpdateGroup={updateGroup}
         progressMap={progressMap}
+        healthChecking={healthChecking}
+        healthProgress={healthProgress}
+        healthSummary={healthSummary}
+        onHealthCheckAll={startHealthCheckAll}
+        onHealthCheckSelected={startHealthCheckSelected}
+        onHealthClearResults={clearHealthResults}
+        filter={filter}
+        onFilterChange={setFilter}
+        sort={sort}
+        onSortChange={setSort}
+        filteredSubscriptions={filtered}
+        filteredCount={filteredCount}
       />
     </ThemeProvider>
   );
