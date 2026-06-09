@@ -44,4 +44,12 @@ pub enum AppError {
     /// Tray icon update failed
     #[error("Tray update error: {0}")]
     TrayUpdate(String),
+
+    /// Health check execution failure
+    #[error("Health check error: {0}")]
+    HealthCheckError(String),
+
+    /// Batch import failure
+    #[error("Import error: {0}")]
+    ImportError(String),
 }

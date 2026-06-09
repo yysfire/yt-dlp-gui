@@ -250,4 +250,152 @@ mod tests {
         assert_eq!(deserialized.last_check_status, Some("failed".to_string()));
         assert_eq!(deserialized.last_check_error, Some("Network error".to_string()));
     }
+
+    // ── Phase 2 新字段测试 (tags, health_status, last_health_check) ──
+
+    #[test]
+    fn test_subscription_tags_default_empty() {
+        let sub = Subscription::new(
+            "https://youtube.com/@test".to_string(),
+            "youtube".to_string(),
+            "Test".to_string(),
+            "".to_string(),
+        );
+        assert!(sub.tags.is_empty(), "tags should default to empty vec");
+    }
+
+    #[test]
+    fn test_subscription_health_status_default_none() {
+        let sub = Subscription::new(
+            "https://youtube.com/@test".to_string(),
+            "youtube".to_string(),
+            "Test".to_string(),
+            "".to_string(),
+        );
+        assert_eq!(sub.health_status, None, "health_status should default to None");
+        assert_eq!(sub.last_health_check, None, "last_health_check should default to None");
+    }
+
+    #[test]
+    fn test_subscription_phase2_fields_serde_roundtrip() {
+        use crate::models::health::HealthStatus;
+
+        let mut sub = Subscription::new(
+            "https://youtube.com/@test".to_string(),
+            "youtube".to_string(),
+            "Test Channel".to_string(),
+            "https://example.com/avatar.jpg".to_string(),
+        );
+        sub.tags = vec!["学习".to_string(), "音乐".to_string(), "技术".to_string()];
+        sub.health_status = Some(HealthStatus::Ok);
+        sub.last_health_check = Some("2026-06-10T12:00:00Z".to_string());
+
+        let json = serde_json::to_string(&sub).expect("serialization should succeed");
+        // 验证 JSON 中包含新字段
+        assert!(json.contains("\"tags\""));
+        assert!(json.contains("\"学习\""));
+        assert!(json.contains("\"音乐\""));
+        assert!(json.contains("\"技术\""));
+        assert!(json.contains("\"health_status\""));
+        assert!(json.contains("\"ok\""));
+        assert!(json.contains("\"last_health_check\":\"2026-06-10T12:00:00Z\""));
+
+        let deserialized: Subscription =
+            serde_json::from_str(&json).expect("deserialization should succeed");
+        assert_eq!(deserialized.tags.len(), 3);
+        assert_eq!(deserialized.tags[0], "学习");
+        assert_eq!(deserialized.tags[1], "音乐");
+        assert_eq!(deserialized.tags[2], "技术");
+        assert_eq!(deserialized.health_status, Some(HealthStatus::Ok));
+        assert_eq!(deserialized.last_health_check, Some("2026-06-10T12:00:00Z".to_string()));
+    }
+
+    #[test]
+    fn test_subscription_new_fields_warning_status() {
+        use crate::models::health::HealthStatus;
+
+        let mut sub = Subscription::new(
+            "https://youtube.com/@test".to_string(),
+            "youtube".to_string(),
+            "Test".to_string(),
+            "".to_string(),
+        );
+        sub.health_status = Some(HealthStatus::Warning);
+        sub.last_health_check = Some("2026-06-10T10:00:00Z".to_string());
+
+        let json = serde_json::to_string(&sub).expect("serialize warning");
+        assert!(json.contains("\"warning\""));
+
+        let deserialized: Subscription =
+            serde_json::from_str(&json).expect("deserialize warning");
+        assert_eq!(deserialized.health_status, Some(HealthStatus::Warning));
+    }
+
+    #[test]
+    fn test_subscription_new_fields_dead_status() {
+        use crate::models::health::HealthStatus;
+
+        let mut sub = Subscription::new(
+            "https://youtube.com/@test".to_string(),
+            "youtube".to_string(),
+            "Test".to_string(),
+            "".to_string(),
+        );
+        sub.health_status = Some(HealthStatus::Dead);
+        sub.last_health_check = Some("2026-06-10T10:00:00Z".to_string());
+
+        let json = serde_json::to_string(&sub).expect("serialize dead");
+        assert!(json.contains("\"dead\""));
+
+        let deserialized: Subscription =
+            serde_json::from_str(&json).expect("deserialize dead");
+        assert_eq!(deserialized.health_status, Some(HealthStatus::Dead));
+    }
+
+    #[test]
+    fn test_subscription_backward_compat_no_new_fields() {
+        // 旧 JSON（无 tags、health_status、last_health_check 字段）
+        let old_json = r#"{
+            "id": "abc-123",
+            "url": "https://youtube.com/@old",
+            "platform": "youtube",
+            "channel_name": "Old Channel",
+            "channel_avatar_url": "",
+            "paused": false,
+            "quality_preset": "1080p",
+            "group_name": "未分组",
+            "created_at": "2026-01-01T00:00:00Z",
+            "last_checked_at": null,
+            "download_count": 10,
+            "last_check_status": "success",
+            "last_check_error": null
+        }"#;
+
+        let sub: Subscription =
+            serde_json::from_str(old_json).expect("backward compat deserialization");
+
+        assert_eq!(sub.id, "abc-123");
+        assert_eq!(sub.url, "https://youtube.com/@old");
+        // 新字段应该有默认值
+        assert!(sub.tags.is_empty(), "tags should default to empty vec for old JSON");
+        assert_eq!(sub.health_status, None, "health_status should default to None for old JSON");
+        assert_eq!(sub.last_health_check, None, "last_health_check should default to None for old JSON");
+    }
+
+    #[test]
+    fn test_subscription_empty_tags_serde() {
+        let sub = Subscription::new(
+            "https://youtube.com/@test".to_string(),
+            "youtube".to_string(),
+            "Test".to_string(),
+            "".to_string(),
+        );
+
+        let json = serde_json::to_string(&sub).expect("serialize");
+        assert!(json.contains("\"tags\":[]"), "empty tags should serialize as empty array");
+
+        let deserialized: Subscription =
+            serde_json::from_str(&json).expect("deserialize");
+        assert!(deserialized.tags.is_empty());
+    }
 }

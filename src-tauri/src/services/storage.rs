@@ -26,6 +26,41 @@ impl StorageService {
         Self::write_json(&path, subs)
     }
 
+    /// 从所有订阅中收集标签并去重，按字母排序返回
+    pub fn get_all_tags(data_dir: &Path) -> Result<Vec<String>, AppError> {
+        let subs = Self::load_subscriptions(data_dir)?;
+        let mut tags: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for sub in &subs {
+            for tag in &sub.tags {
+                if seen.insert(tag.clone()) {
+                    tags.push(tag.clone());
+                }
+            }
+        }
+        tags.sort();
+        Ok(tags)
+    }
+
+    /// 更新指定订阅的标签
+    pub fn update_subscription_tags(
+        data_dir: &Path,
+        subscription_id: &str,
+        tags: Vec<String>,
+    ) -> Result<(), AppError> {
+        let mut subs = Self::load_subscriptions(data_dir)?;
+        let sub = subs
+            .iter_mut()
+            .find(|s| s.id == subscription_id)
+            .ok_or_else(|| AppError::NotFound(format!(
+                "未找到订阅: {}",
+                subscription_id
+            )))?;
+        sub.tags = tags;
+        Self::save_subscriptions(data_dir, &subs)?;
+        Ok(())
+    }
+
     // ── Download Records ───────────────────────────────────────────
 
     /// Loads all download records from `download_records.json`.
