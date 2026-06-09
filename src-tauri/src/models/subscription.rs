@@ -71,9 +71,6 @@ impl Subscription {
             tags: Vec::new(),
             health_status: None,
             last_health_check: None,
-            tags: Vec::new(),
-            health_status: None,
-            last_health_check: None,
         }
     }
 }
