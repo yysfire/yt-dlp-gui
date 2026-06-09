@@ -35,7 +35,7 @@
 - 筛选仅会话内持久化（assumption 5），不写入 settings.json
 - 健康检查需分批执行避免触发平台反爬（edge case）
 - yt-dlp 作为外部依赖必须在用户设备上可用
-- 不引入新的 Rust 依赖包（复用 reqwest/http/quick-xml）
+- 新增 reqwest 作为直接依赖（`rustls-tls`，最小特性配置），其余复用现有依赖（quick-xml、serde）
 
 **Scale/Scope**:
 - 典型订阅量 50，最大支持 500+

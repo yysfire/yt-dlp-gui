@@ -11,6 +11,9 @@
 
 - Q: 健康状态是否持久化到 Subscription 实体？ → A: 是，在 Subscription 上持久化 `health_status` 和 `last_health_check` 字段，HealthCheckResult 仅作为运行时中间结果。
 - Q: 详情面板视频列表显示条数？ → A: 分页加载，初始显示 10 条，用户可加载更多
+- Q: 健康检查期间用户并发修改订阅（删除/暂停/修改 URL），如何处理？ → A: 已删除→跳过不报错；已暂停→仍检查（暂停不阻止健康检查）；URL 被修改→按检查启动时的原 URL 完成当轮
+- Q: 健康检查发现失效订阅后，是否需要自动操作（如暂停调度）？ → A: 是，失效订阅自动暂停调度检查（视为 paused），用户可手动重新启用
+- Q: 筛选维度中是否需要加入健康状态？ → A: 是，添加健康状态为第 5 个筛选维度（正常/警告/失效/未检查），与现有筛选 AND 组合
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -152,7 +155,7 @@
 
 ### Key Entities
 
-- **SubscriptionTag**: `{ id: uuid, name: string, color: string }` — 持久化到 subscriptions.json 的 tags 数组中
+- **SubscriptionTag**: `string` — 标签名称，持久化为 Subscription 内 `tags: string[]` 数组。标签颜色等功能在后续版本中实现
 - **HealthCheckResult**: `{ subscription_id: string, status: "ok"|"warning"|"dead", reason: string, checked_at: datetime }` — 运行时中间结果，不单独持久化；其 `status` 和 `checked_at` 会持久化到对应 Subscription 的 `health_status` 和 `last_health_check` 字段
 - **Subscription 健康字段**: `health_status: "ok"|"warning"|"dead"|null`、`last_health_check: datetime|null` — 持久化到 subscriptions.json 中每个订阅对象
 - **ImportResult**: `{ total: number, success: number, failed: number, errors: {url: string, reason: string}[] }` — 不持久化，运行中生成
@@ -174,5 +177,6 @@
 2. OPML 2.0 格式遵循 RSS 2.0 命名空间规范（`xmlUrl`、`htmlUrl`、`title`、`type` 属性）
 3. 频道信息解析复用 MVP 阶段的 `YtDlpService::parse_channel_info()`
 4. 详情面板的视频列表数据通过 yt-dlp `--flat-playlist` 获取，初始显示最近 10 条，支持分页加载更多
-5. 筛选条件仅在当前会话内持久化，不需要跨会话恢复
+5. 筛选条件持久化策略参见 FR-016
 6. 健康检查使用 HTTP HEAD 请求辅以 yt-dlp 验证，优先轻量检查
+7. SC-005 中"网络正常情况下"指：本地网络延迟 < 100ms、无丢包、yt-dlp 所访问的外部目标平台（YouTube/Bilibili）可正常访问

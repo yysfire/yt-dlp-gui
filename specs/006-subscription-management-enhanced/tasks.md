@@ -156,8 +156,9 @@
 
 - [ ] T045 [P] 实现 `batch_delete_subscriptions` 命令（从健康检查结果中批量删除失效率订阅），在 `src-tauri/src/commands/subscription.rs`
 - [ ] T046 [P] 在健康检查结果面板中集成批量删除按钮，触发 `batch_delete_subscriptions` 后刷新订阅列表，在 `src/components/HealthCheckPanel.tsx`
-- [ ] T047 运行 `cargo test` 确认所有 Rust 测试通过，运行 `npx tsc --noEmit` 确认 TypeScript 类型检查通过
-- [ ] T048 [P] 按 `quickstart.md` 中的验证命令执行端到端功能验证
+- [ ] T047 [P] 扩展导出测试，验证 OPML/JSON 导出包含新增字段（tags、health_status、last_health_check），在 `src-tauri/src/services/opml.rs` 和 `src-tauri/src/commands/import_export.rs` 的 `#[cfg(test)]` 模块中
+- [ ] T048 运行 `cargo test` 确认所有 Rust 测试通过，追加 SC-005（导入失败率）和 SC-006（批量删除 < 2s）验证；运行 `npx tsc --noEmit` 确认 TypeScript 类型检查通过
+- [ ] T049 [P] 按 `quickstart.md` 中的验证命令执行端到端功能验证
 
 ---
 
