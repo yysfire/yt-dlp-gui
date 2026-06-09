@@ -34,6 +34,15 @@ pub struct Subscription {
     /// Error message from the last failed check
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_check_error: Option<String>,
+    /// Group tags for organizing subscriptions (e.g., ["学习", "音乐"])
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Health check result: "ok", "warning", "dead", or null if never checked
+    #[serde(default)]
+    pub health_status: Option<crate::models::health::HealthStatus>,
+    /// Timestamp of the last health check (ISO 8601), or null if never checked
+    #[serde(default)]
+    pub last_health_check: Option<String>,
 }
 
 impl Subscription {
@@ -59,6 +68,12 @@ impl Subscription {
             download_count: 0,
             last_check_status: None,
             last_check_error: None,
+            tags: Vec::new(),
+            health_status: None,
+            last_health_check: None,
+            tags: Vec::new(),
+            health_status: None,
+            last_health_check: None,
         }
     }
 }

@@ -2,6 +2,7 @@ pub mod subscription;
 pub mod download;
 pub mod settings;
 pub mod import_export;
+pub mod health;
 
 pub use subscription::Subscription;
 pub use download::DownloadRecord;

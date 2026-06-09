@@ -1,3 +1,26 @@
+/** 订阅健康状态 */
+export type HealthStatus = "ok" | "warning" | "dead";
+
+/** 单个订阅的健康检查结果（运行时用） */
+export interface HealthCheckResult {
+  subscription_id: string;
+  url: string;
+  status: HealthStatus;
+  detail: string;
+  latency_ms: number;
+  checked_at: string;
+}
+
+/** 健康检查摘要 */
+export interface HealthCheckSummary {
+  total: number;
+  ok: number;
+  warning: number;
+  dead: number;
+  duration_ms: number;
+  results: HealthCheckResult[];
+}
+
 /** Represents a channel subscription. */
 export interface Subscription {
   id: string;
@@ -13,6 +36,12 @@ export interface Subscription {
   download_count: number;
   last_check_status: "success" | "failed" | null;
   last_check_error: string | null;
+  /** 分组标签名数组（如 ["学习", "音乐"]） */
+  tags: string[];
+  /** 健康状态，null 表示未检查 */
+  health_status: HealthStatus | null;
+  /** 上次健康检查时间（ISO 8601） */
+  last_health_check: string | null;
 }
 
 /** Represents a single video download record. */
@@ -124,6 +153,53 @@ export interface ImportResult {
   success_count: number;
 }
 
+/** 导入源类型 */
+export type ImportSourceType = "opml" | "txt" | "url_list";
+
+/** 导入预览项 */
+export interface ImportPreviewItem {
+  url: string;
+  title: string | null;
+  is_duplicate: boolean;
+  error: string | null;
+}
+
+/** 导入预览结果 */
+export interface ImportPreview {
+  total: number;
+  items: ImportPreviewItem[];
+  duplicates: number;
+}
+
+/** 频道信息 */
+export interface ChannelInfo {
+  channel_name: string;
+  description: string | null;
+  subscriber_count: string | null;
+  video_count: number | null;
+  thumbnail_url: string | null;
+  last_refreshed: string;
+}
+
+/** 视频信息 */
+export interface VideoInfo {
+  id: string;
+  title: string;
+  url: string;
+  duration: string | null;
+  upload_date: string | null;
+  thumbnail: string | null;
+}
+
+/** 视频列表分页结果 */
+export interface VideoListResult {
+  videos: VideoInfo[];
+  total: number;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+}
+
 /** Runtime application state. */
 export interface AppState {
   last_check_time: string | null;
@@ -133,3 +209,18 @@ export interface AppState {
 /** Predefined subscription groups. */
 export const GROUPS = ["未分组", "学习", "娱乐", "音乐", "科技", "其他"] as const;
 export type GroupName = typeof GROUPS[number];
+
+/** 筛选条件（会话内持久化） */
+export interface FilterState {
+  platform: "all" | "youtube" | "bilibili";
+  status: "all" | "active" | "paused";
+  group: string;
+  health: "all" | "ok" | "warning" | "dead" | "unchecked";
+  keyword: string;
+}
+
+/** 排序配置 */
+export interface SortState {
+  field: "name" | "created_at" | "last_health_check";
+  direction: "asc" | "desc";
+}
