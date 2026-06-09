@@ -51,6 +51,17 @@ pub struct SpawnedDownload {
     pub output_template: String,
 }
 
+/// 将订阅数格式化为人类可读的字符串（如 "12.3K", "1.5M"）
+fn format_subscriber_count(count: u64) -> String {
+    if count >= 1_000_000 {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    } else if count >= 1_000 {
+        format!("{:.1}K", count as f64 / 1_000.0)
+    } else {
+        count.to_string()
+    }
+}
+
 /// Stateless service wrapping yt-dlp CLI invocations.
 pub struct YtDlpService;
 
@@ -385,6 +396,170 @@ impl YtDlpService {
         Ok(DownloadResult {
             file_path,
             file_size,
+        })
+    }
+
+    /// 分页获取频道视频列表。
+    ///
+    /// Executes: `yt-dlp --flat-playlist --dump-json --playlist-start {start} --playlist-end {end} <url>`
+    /// 返回解析后的视频列表。
+    pub fn get_channel_videos_paginated(
+        yt_dlp_path: &str,
+        proxy: &Option<String>,
+        cookie_file: &Option<String>,
+        url: &str,
+        start: u32,
+        end: u32,
+    ) -> Result<Vec<crate::models::VideoInfo>, AppError> {
+        let mut cmd = Command::new(yt_dlp_path);
+        cmd.args([
+            "--flat-playlist",
+            "--dump-json",
+            "--playlist-start",
+            &start.to_string(),
+            "--playlist-end",
+            &end.to_string(),
+        ])
+        .arg(url);
+
+        if let Some(ref proxy_url) = proxy {
+            if !proxy_url.is_empty() {
+                cmd.arg("--proxy").arg(proxy_url);
+            }
+        }
+
+        if let Some(ref cf) = cookie_file {
+            if !cf.is_empty() {
+                cmd.arg("--cookies").arg(cf);
+            }
+        }
+
+        let output = cmd.output().map_err(|e| AppError::YtDlp(format!(
+            "Failed to execute yt-dlp: {}",
+            e
+        )))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(AppError::YtDlp(format!(
+                "yt-dlp exited with error: {}",
+                stderr.trim()
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut videos: Vec<crate::models::VideoInfo> = Vec::new();
+
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<crate::models::VideoInfo>(line) {
+                Ok(video) => videos.push(video),
+                Err(e) => {
+                    log::warn!("Failed to parse video line: {} — {}", line, e);
+                }
+            }
+        }
+
+        log::info!("get_channel_videos_paginated: found {} videos (start={}, end={})",
+            videos.len(), start, end);
+
+        Ok(videos)
+    }
+
+    /// 获取完整频道信息（包含描述、订阅数、视频数等）。
+    ///
+    /// Executes: `yt-dlp --dump-json --playlist-items 1 <url>`
+    /// 返回包含扩展字段的 ChannelInfo。
+    pub fn get_channel_info_full(
+        yt_dlp_path: &str,
+        proxy: &Option<String>,
+        cookie_file: &Option<String>,
+        url: &str,
+    ) -> Result<crate::models::ChannelInfo, AppError> {
+        let mut cmd = Command::new(yt_dlp_path);
+        cmd.args(["--dump-json", "--playlist-items", "1"])
+            .arg(url);
+
+        if let Some(ref proxy_url) = proxy {
+            if !proxy_url.is_empty() {
+                cmd.arg("--proxy").arg(proxy_url);
+            }
+        }
+
+        if let Some(ref cf) = cookie_file {
+            if !cf.is_empty() {
+                cmd.arg("--cookies").arg(cf);
+            }
+        }
+
+        let output = cmd.output().map_err(|e| AppError::YtDlp(format!(
+            "Failed to execute yt-dlp: {}",
+            e
+        )))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(AppError::YtDlp(format!(
+                "yt-dlp exited with error: {}",
+                stderr.trim()
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let trimmed = stdout.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::YtDlp(
+                "yt-dlp returned empty output".to_string(),
+            ));
+        }
+
+        // 解析为通用 Value 以提取多种字段
+        let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
+            AppError::YtDlp(format!("Failed to parse channel info JSON: {}", e))
+        })?;
+
+        let channel_name = value
+            .get("channel")
+            .or_else(|| value.get("uploader"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("未知频道")
+            .to_string();
+
+        let description = value
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let subscriber_count = value
+            .get("channel_follower_count")
+            .or_else(|| value.get("subscriber_count"))
+            .and_then(|v| v.as_u64())
+            .map(|n| format_subscriber_count(n));
+
+        let video_count = value
+            .get("playlist_count")
+            .or_else(|| value.get("n_entries"))
+            .and_then(|v| v.as_u64());
+
+        let thumbnail_url = value
+            .get("thumbnail")
+            .or_else(|| value.get("thumbnails").and_then(|t| t.get(0)))
+            .and_then(|v| v.get("url"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let last_refreshed = chrono::Utc::now().to_rfc3339();
+
+        Ok(crate::models::ChannelInfo {
+            channel_name,
+            description,
+            subscriber_count,
+            video_count,
+            thumbnail_url,
+            last_refreshed,
         })
     }
 

@@ -12,6 +12,7 @@ mod commands;
 use crate::services::StorageService;
 use crate::services::download_queue::DownloadQueue;
 use crate::services::tray::TrayService;
+use crate::commands::import_export::ImportContext;
 
 /// Application-wide context shared across all command handlers.
 pub struct AppContext {
@@ -93,6 +94,12 @@ pub fn run() {
                 queue: Mutex::new(Some(queue)),
             };
             app.manage(queue_ctx);
+
+            // Initialize import cancellation context
+            let import_ctx = ImportContext {
+                cancel_flag: Mutex::new(None),
+            };
+            app.manage(import_ctx);
 
             // ── System Tray Setup (spec 005-system-tray-icon) ──────────
             let tray_service = match TrayService::init(&app_handle, data_dir_fs_sync.clone()) {
@@ -309,10 +316,18 @@ pub fn run() {
             commands::import_export::export_subscriptions_json,
             commands::import_export::export_subscriptions_opml,
             commands::import_export::batch_import_subscriptions,
+            commands::import_export::batch_import_preview,
+            commands::import_export::batch_import_execute,
+            commands::import_export::cancel_import,
             commands::file_manager::open_in_folder,
             commands::file_manager::check_file_existence,
             commands::file_manager::delete_file,
             commands::file_manager::sync_file_states,
+            commands::health::check_all_health,
+            commands::health::check_selected_health,
+            commands::download::get_channel_videos,
+            commands::subscription::get_channel_info,
+            commands::subscription::batch_delete_subscriptions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

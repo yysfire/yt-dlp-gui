@@ -156,6 +156,37 @@ export interface ImportResult {
 /** 导入源类型 */
 export type ImportSourceType = "opml" | "txt" | "url_list";
 
+/** 导入源（区分 OPML 文件、TXT 文件、URL 列表） */
+export type ImportSource =
+  | { type: "opml"; path: string }
+  | { type: "txt"; path: string }
+  | { type: "url_list"; urls: string[] };
+
+/** 导入进度事件负载 */
+export interface ImportProgressEvent {
+  task_id: string;
+  completed: number;
+  total: number;
+  current_url: string;
+  current_title: string;
+}
+
+/** 导入完成事件负载 */
+export interface ImportCompleteEvent {
+  task_id: string;
+  total: number;
+  success: number;
+  failed: number;
+  skipped: number;
+  errors: ImportErrorItem[];
+}
+
+/** 导入错误项 */
+export interface ImportErrorItem {
+  url: string;
+  reason: string;
+}
+
 /** 导入预览项 */
 export interface ImportPreviewItem {
   url: string;

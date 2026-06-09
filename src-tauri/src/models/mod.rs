@@ -3,8 +3,10 @@ pub mod download;
 pub mod settings;
 pub mod import_export;
 pub mod health;
+pub mod video;
 
 pub use subscription::Subscription;
 pub use download::DownloadRecord;
 pub use settings::{AppSettings, AppState};
 pub use import_export::*;
+pub use video::{ChannelInfo, VideoInfo, VideoListResult};

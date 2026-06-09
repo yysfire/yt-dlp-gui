@@ -331,4 +331,74 @@ mod tests {
         assert_eq!(outlines[0].title, "Roundtrip Channel");
         assert_eq!(outlines[0].xml_url, "https://youtube.com/@roundtrip");
     }
+
+    // ── US1 OPML import tests (T009) ──────────────────────────────
+
+    /// 解析标准 OPML 2.0 格式（含 xmlUrl、title 属性）
+    #[test]
+    fn test_opml_parse_normal() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head><title>Podcast Subscriptions</title></head>
+  <body>
+    <outline text="Tech News" title="Tech News Weekly" type="rss" xmlUrl="https://feeds.example.com/tech"/>
+    <outline text="Science" title="Science Today" type="rss" xmlUrl="https://feeds.example.com/science" description="Daily science updates"/>
+  </body>
+</opml>"#;
+        let outlines = OpmlService::parse_opml(xml);
+        assert_eq!(outlines.len(), 2);
+        assert_eq!(outlines[0].title, "Tech News Weekly");
+        assert_eq!(outlines[0].xml_url, "https://feeds.example.com/tech");
+        assert_eq!(outlines[0].description, None);
+        assert_eq!(outlines[1].title, "Science Today");
+        assert_eq!(outlines[1].xml_url, "https://feeds.example.com/science");
+        assert_eq!(outlines[1].description, Some("Daily science updates".to_string()));
+    }
+
+    /// 空 OPML 文档返回空列表
+    #[test]
+    fn test_opml_parse_empty() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head><title>Empty</title></head>
+  <body>
+  </body>
+</opml>"#;
+        let outlines = OpmlService::parse_opml(xml);
+        assert!(outlines.is_empty());
+    }
+
+    /// 损坏 XML 返回空列表（不 panic）
+    #[test]
+    fn test_opml_parse_malformed() {
+        let outlines = OpmlService::parse_opml("<<<not valid xml>>>");
+        assert!(outlines.is_empty());
+
+        let outlines = OpmlService::parse_opml("");
+        assert!(outlines.is_empty());
+
+        let outlines = OpmlService::parse_opml("<opml><body><outline");
+        assert!(outlines.is_empty());
+    }
+
+    /// 带 UTF-8 BOM 头的文件能正常解析
+    #[test]
+    fn test_opml_detect_utf8_bom() {
+        // Construct a byte sequence with UTF-8 BOM (EF BB BF)
+        let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head><title>With BOM</title></head>
+  <body>
+    <outline text="BOM Feed" xmlUrl="https://bom.example.com/rss"/>
+  </body>
+</opml>"#;
+        let mut bom_bytes = vec![0xEF, 0xBB, 0xBF];
+        bom_bytes.extend_from_slice(xml_content.as_bytes());
+        let bom_str = String::from_utf8(bom_bytes).expect("valid UTF-8 with BOM");
+
+        let outlines = OpmlService::parse_opml(&bom_str);
+        assert_eq!(outlines.len(), 1);
+        assert_eq!(outlines[0].title, "BOM Feed");
+        assert_eq!(outlines[0].xml_url, "https://bom.example.com/rss");
+    }
 }

@@ -6,9 +6,13 @@ import type {
   QueueState,
   AppSettings,
   AppState,
+  ImportPreview,
   ImportResult,
+  ImportSource,
   PathValidateResult,
   ProxyValidateResult,
+  ChannelInfo,
+  VideoListResult,
 } from "@/types";
 
 // ── Subscription commands ──────────────────────────────────────────
@@ -226,5 +230,80 @@ export async function batchImportSubscriptions(
   return invoke<ImportResult>("batch_import_subscriptions", {
     urls,
     filePath: filePath ?? null,
+  });
+}
+
+// ── Enhanced import commands ────────────────────────────────────
+
+/** Re-export ImportSource for convenience. */
+export type { ImportSource, ImportProgressEvent, ImportCompleteEvent } from "@/types";
+
+/** Parses an import source and returns a preview without creating subscriptions. */
+export async function batchImportPreview(
+  source: ImportSource,
+): Promise<ImportPreview> {
+  return invoke<ImportPreview>("batch_import_preview", { source });
+}
+
+/** Executes the batch import as a background task. Returns the task_id for tracking. */
+export async function batchImportExecute(
+  source: ImportSource,
+  skipDuplicates: boolean,
+): Promise<string> {
+  return invoke<string>("batch_import_execute", { source, skipDuplicates });
+}
+
+/** Cancels a running batch import task. No-op if the task is not running. */
+export async function cancelImport(taskId: string): Promise<void> {
+  return invoke<void>("cancel_import", { taskId });
+}
+
+// ── Health check commands ─────────────────────────────────────────
+
+/** Runs a health check on all subscriptions. */
+export async function checkAllHealth(): Promise<{
+  started: boolean;
+  total: number;
+}> {
+  return invoke<{ started: boolean; total: number }>("check_all_health");
+}
+
+/** Runs a health check on selected subscriptions. */
+export async function checkSelectedHealth(
+  subscriptionIds: string[],
+): Promise<{ started: boolean; total: number }> {
+  return invoke<{ started: boolean; total: number }>("check_selected_health", {
+    subscriptionIds,
+  });
+}
+
+/** Batch deletes subscriptions by IDs. */
+export async function batchDeleteSubscriptions(
+  ids: string[],
+): Promise<{ deleted_count: number }> {
+  return invoke<{ deleted_count: number }>("batch_delete_subscriptions", {
+    ids,
+  });
+}
+
+// ── Channel info & video list commands ─────────────────────────────
+
+/** 获取订阅频道的详细信息（名称、描述、订阅数、视频数等）。 */
+export async function getChannelInfo(
+  subscriptionId: string,
+): Promise<ChannelInfo> {
+  return invoke<ChannelInfo>("get_channel_info", { subscriptionId });
+}
+
+/** 分页获取订阅频道的最新视频列表。 */
+export async function getChannelVideos(
+  subscriptionId: string,
+  page: number = 1,
+  pageSize: number = 10,
+): Promise<VideoListResult> {
+  return invoke<VideoListResult>("get_channel_videos", {
+    subscriptionId,
+    page,
+    pageSize,
   });
 }

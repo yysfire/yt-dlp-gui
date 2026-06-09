@@ -539,6 +539,78 @@ pub async fn manual_check_all(
     check_all_subscriptions(state, app_handle).await
 }
 
+/// 分页获取订阅频道的视频列表。
+///
+/// 若订阅 health_status 为 Dead，返回错误。
+#[tauri::command]
+pub async fn get_channel_videos(
+    subscription_id: String,
+    page: u32,
+    page_size: u32,
+    state: State<'_, AppContext>,
+) -> Result<crate::models::VideoListResult, String> {
+    let subs = StorageService::load_subscriptions(&state.data_dir)
+        .map_err(|e| e.to_string())?;
+    let sub = subs
+        .iter()
+        .find(|s| s.id == subscription_id)
+        .ok_or_else(|| AppError::NotFound(format!("Subscription not found: {}", subscription_id)))
+        .map_err(|e| e.to_string())?;
+
+    // 健康状态为 Dead 时拒接请求
+    if sub.health_status == Some(crate::models::health::HealthStatus::Dead) {
+        return Err("此频道已失效，无法获取视频列表".to_string());
+    }
+
+    // 克隆配置值并释放锁
+    let (yt_dlp_path, proxy, cookie_file) = {
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        (
+            settings.yt_dlp_path.clone(),
+            Some(settings.proxy_url.clone()),
+            Some(settings.cookie_file.clone()),
+        )
+    };
+
+    let start = (page.saturating_sub(1)) * page_size + 1;
+    // 多取一条用于判断 has_more
+    let end = page * page_size + 1;
+
+    let videos = YtDlpService::get_channel_videos_paginated(
+        &yt_dlp_path,
+        &proxy,
+        &cookie_file,
+        &sub.url,
+        start,
+        end,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let fetched_count = videos.len();
+    let has_more = fetched_count > page_size as usize;
+
+    // 截断多余的那一条（用于判断 has_more 的）
+    let display_videos = if has_more {
+        videos.into_iter().take(page_size as usize).collect()
+    } else {
+        videos
+    };
+
+    Ok(crate::models::VideoListResult {
+        videos: display_videos,
+        // total 从 yt-dlp 的 playlist_count 可能得不到，这里用 fetched_count 近似
+        // 当 has_more 为 true 时至少有 page_size * page + 1 条
+        total: if has_more {
+            (page * page_size) as usize + 1 // 至少还有
+        } else {
+            ((page.saturating_sub(1)) * page_size) as usize + fetched_count
+        },
+        page,
+        page_size,
+        has_more,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -710,5 +782,177 @@ mod tests {
         ];
         // Cancelled records are in seen_ids (not "failed"), so should be skipped
         assert!(should_skip(&existing, "abc", "https://youtube.com/watch?v=abc"));
+    }
+
+    // ── get_channel_videos tests (T038) ─────────────────────────────
+
+    /// 计算 yt-dlp --playlist-start 和 --playlist-end 的辅助函数
+    fn calc_playlist_range(page: u32, page_size: u32) -> (u32, u32) {
+        let start = (page.saturating_sub(1)) * page_size + 1;
+        // 多取一条用于判断 has_more
+        let end = page * page_size + 1;
+        (start, end)
+    }
+
+    /// 根据实际取到的条目数和请求的 endpoint 判断 has_more
+    fn determine_has_more(fetched_count: usize, page_size: u32) -> bool {
+        fetched_count > page_size as usize
+    }
+
+    #[test]
+    fn test_pagination_calc_page1_size10() {
+        let (start, end) = calc_playlist_range(1, 10);
+        assert_eq!(start, 1);
+        assert_eq!(end, 11); // page*size+1 = 10+1
+    }
+
+    #[test]
+    fn test_pagination_calc_page2_size10() {
+        let (start, end) = calc_playlist_range(2, 10);
+        assert_eq!(start, 11);
+        assert_eq!(end, 21);
+    }
+
+    #[test]
+    fn test_pagination_calc_page3_size10() {
+        let (start, end) = calc_playlist_range(3, 10);
+        assert_eq!(start, 21);
+        assert_eq!(end, 31);
+    }
+
+    #[test]
+    fn test_pagination_calc_page1_size5() {
+        let (start, end) = calc_playlist_range(1, 5);
+        assert_eq!(start, 1);
+        assert_eq!(end, 6);
+    }
+
+    #[test]
+    fn test_pagination_calc_page1_size1() {
+        let (start, end) = calc_playlist_range(1, 1);
+        assert_eq!(start, 1);
+        assert_eq!(end, 2);
+    }
+
+    #[test]
+    fn test_has_more_true_when_extra_video_returned() {
+        // 请求了 page_size=10, end=11，实际返回 11 条 → has_more = true
+        assert!(determine_has_more(11, 10));
+    }
+
+    #[test]
+    fn test_has_more_false_when_exact_or_less() {
+        // 返回 10 条或更少 → has_more = false
+        assert!(!determine_has_more(10, 10));
+        assert!(!determine_has_more(5, 10));
+        assert!(!determine_has_more(0, 10));
+    }
+
+    #[test]
+    fn test_video_info_parsing_from_ytdlp_json() {
+        use crate::models::VideoInfo;
+
+        // yt-dlp --flat-playlist --dump-json 的输出行格式
+        let json = r#"{"id":"dQw4w9WgXcQ","title":"Test Video","url":"https://youtube.com/watch?v=dQw4w9WgXcQ","duration":"03:21","upload_date":"20250528","thumbnail":"https://example.com/thumb.jpg"}"#;
+
+        let video: VideoInfo = serde_json::from_str(json)
+            .expect("should parse yt-dlp flat-playlist JSON");
+
+        assert_eq!(video.id, "dQw4w9WgXcQ");
+        assert_eq!(video.title, "Test Video");
+        assert_eq!(video.url, "https://youtube.com/watch?v=dQw4w9WgXcQ");
+        assert_eq!(video.duration, Some("03:21".to_string()));
+        assert_eq!(video.upload_date, Some("20250528".to_string()));
+        assert_eq!(video.thumbnail, Some("https://example.com/thumb.jpg".to_string()));
+    }
+
+    #[test]
+    fn test_video_info_parsing_minimal_fields() {
+        use crate::models::VideoInfo;
+
+        // 最少字段（只有 id, title, url）
+        let json = r#"{"id":"abc123","title":"Minimal Video","url":"https://example.com/watch?v=abc123"}"#;
+
+        let video: VideoInfo = serde_json::from_str(json)
+            .expect("should parse minimal JSON");
+
+        assert_eq!(video.id, "abc123");
+        assert_eq!(video.title, "Minimal Video");
+        assert_eq!(video.url, "https://example.com/watch?v=abc123");
+        assert!(video.duration.is_none());
+        assert!(video.upload_date.is_none());
+        assert!(video.thumbnail.is_none());
+    }
+
+    #[test]
+    fn test_video_list_result_construction_empty_channel() {
+        use crate::models::{VideoInfo, VideoListResult};
+
+        let result = VideoListResult {
+            videos: vec![],
+            total: 0,
+            page: 1,
+            page_size: 10,
+            has_more: false,
+        };
+
+        assert!(result.videos.is_empty());
+        assert_eq!(result.total, 0);
+        assert_eq!(result.page, 1);
+        assert_eq!(result.page_size, 10);
+        assert!(!result.has_more);
+    }
+
+    #[test]
+    fn test_video_list_result_construction_with_videos() {
+        use crate::models::{VideoInfo, VideoListResult};
+
+        let result = VideoListResult {
+            videos: vec![
+                VideoInfo {
+                    id: "v1".to_string(),
+                    title: "Video 1".to_string(),
+                    url: "https://example.com/v1".to_string(),
+                    duration: Some("10:00".to_string()),
+                    upload_date: Some("20250601".to_string()),
+                    thumbnail: None,
+                },
+            ],
+            total: 50,
+            page: 1,
+            page_size: 10,
+            has_more: true,
+        };
+
+        assert_eq!(result.videos.len(), 1);
+        assert_eq!(result.total, 50);
+        assert_eq!(result.page, 1);
+        assert!(result.has_more);
+    }
+
+    #[test]
+    fn test_video_list_result_last_page_no_more() {
+        use crate::models::{VideoInfo, VideoListResult};
+
+        let result = VideoListResult {
+            videos: vec![
+                VideoInfo {
+                    id: "v50".to_string(),
+                    title: "Last Video".to_string(),
+                    url: "https://example.com/last".to_string(),
+                    duration: Some("05:00".to_string()),
+                    upload_date: Some("20250610".to_string()),
+                    thumbnail: None,
+                },
+            ],
+            total: 50,
+            page: 5,
+            page_size: 10,
+            has_more: false,
+        };
+
+        assert_eq!(result.videos.len(), 1);
+        assert!(!result.has_more);
+        assert_eq!(result.page, 5);
     }
 }

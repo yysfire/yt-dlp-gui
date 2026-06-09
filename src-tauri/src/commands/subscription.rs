@@ -1,6 +1,6 @@
 use tauri::State;
 
-use crate::models::Subscription;
+use crate::models::{ChannelInfo, Subscription};
 use crate::services::{StorageService, YtDlpService};
 use crate::utils::AppError;
 use crate::AppContext;
@@ -177,6 +177,80 @@ pub async fn update_subscription_group(
     StorageService::save_subscriptions(&state.data_dir, &subs)
         .map_err(|e| e.to_string())?;
     Ok(updated)
+}
+
+/// Batch deletes subscriptions by IDs and removes associated download records.
+#[tauri::command]
+pub async fn batch_delete_subscriptions(
+    ids: Vec<String>,
+    state: tauri::State<'_, AppContext>,
+) -> Result<serde_json::Value, String> {
+    let mut subs = StorageService::load_subscriptions(&state.data_dir)
+        .map_err(|e| e.to_string())?;
+
+    let initial_len = subs.len();
+    subs.retain(|s| !ids.contains(&s.id));
+    let deleted_count = initial_len - subs.len();
+
+    StorageService::save_subscriptions(&state.data_dir, &subs)
+        .map_err(|e| e.to_string())?;
+
+    // Cascade delete download records for deleted subscriptions
+    let mut records = StorageService::load_download_records(&state.data_dir)
+        .map_err(|e| e.to_string())?;
+    records.retain(|r| !ids.contains(&r.subscription_id));
+    StorageService::save_download_records(&state.data_dir, &records)
+        .map_err(|e| e.to_string())?;
+
+    log::info!("Batch deleted {} subscriptions", deleted_count);
+
+    Ok(serde_json::json!({ "deleted_count": deleted_count }))
+}
+
+/// 获取订阅频道的详细信息（名称、描述、订阅数、视频数、缩略图等）。
+#[tauri::command]
+pub async fn get_channel_info(
+    subscription_id: String,
+    state: State<'_, AppContext>,
+) -> Result<ChannelInfo, String> {
+    let subs = StorageService::load_subscriptions(&state.data_dir)
+        .map_err(|e| e.to_string())?;
+    let sub = subs
+        .iter()
+        .find(|s| s.id == subscription_id)
+        .ok_or_else(|| AppError::NotFound(format!("Subscription not found: {}", subscription_id)))
+        .map_err(|e| e.to_string())?;
+
+    // 克隆配置值并释放锁
+    let (yt_dlp_path, proxy, cookie_file) = {
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        (
+            settings.yt_dlp_path.clone(),
+            Some(settings.proxy_url.clone()),
+            Some(settings.cookie_file.clone()),
+        )
+    };
+
+    // 尝试通过 yt-dlp 获取完整频道信息
+    match YtDlpService::get_channel_info_full(&yt_dlp_path, &proxy, &cookie_file, &sub.url) {
+        Ok(info) => Ok(info),
+        Err(e) => {
+            // 如果 yt-dlp 调用失败，回退到从订阅数据中返回基本信息
+            log::warn!("get_channel_info: yt-dlp failed for {}, falling back to cached data: {}", sub.channel_name, e);
+            Ok(ChannelInfo {
+                channel_name: sub.channel_name.clone(),
+                description: None,
+                subscriber_count: None,
+                video_count: None,
+                thumbnail_url: if sub.channel_avatar_url.is_empty() {
+                    None
+                } else {
+                    Some(sub.channel_avatar_url.clone())
+                },
+                last_refreshed: chrono::Utc::now().to_rfc3339(),
+            })
+        }
+    }
 }
 
 #[cfg(test)]
