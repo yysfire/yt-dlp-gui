@@ -243,6 +243,15 @@ export default function DetailPanel({
   onRetryDownload,
 }: DetailPanelProps) {
   // 异步加载状态
+  // DEBUG: catch render errors
+  useEffect(() => {
+    const handler = (e: ErrorEvent) => {
+      console.error("[DetailPanel:RenderError]", e.message, e.error);
+    };
+    window.addEventListener("error", handler);
+    return () => window.removeEventListener("error", handler);
+  }, []);
+
   const [channelInfo, setChannelInfo] = useState<ChannelInfo | null>(null);
   const [videoList, setVideoList] = useState<VideoInfo[]>([]);
   const [_videoPage, setVideoPage] = useState(1);
