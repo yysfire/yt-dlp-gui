@@ -25,8 +25,8 @@
 
 **Purpose**: 新增类型定义，为所有用户故事提供数据基础
 
-- [ ] T001 [P] 新增 `UnifiedVideoItem` 接口与 `VideoStatus` 类型到 `src/types/index.ts`
-- [ ] T002 [P] 新增 `formatDuration()` 工具函数（若尚未存在）或确认已在 `src/components/DetailPanel.tsx` 中可用
+- [x] T001 [P] 新增 `UnifiedVideoItem` 接口与 `VideoStatus` 类型到 `src/types/index.ts`
+- [x] T002 [P] 新增 `formatDuration()` 工具函数（若尚未存在）或确认已在 `src/components/DetailPanel.tsx` 中可用
 
 **Checkpoint**: 类型定义就绪，所有用户故事可并行开始
 
@@ -38,14 +38,14 @@
 
 **⚠️ CRITICAL**: 无此基础，US1/US2/US3 均无法开始
 
-- [ ] T003 在 `src/components/DetailPanel.tsx` 中实现 `mergeToUnifiedItems()` 合并逻辑：遍历 records → queueTasks → videoList，按 video_id/video_url 去重生成 `UnifiedVideoItem[]`
-- [ ] T004 在 `src/components/DetailPanel.tsx` 中实现 `sortUnifiedItems()` 排序函数：按下载中/等待中 → 已暂停 → 已完成 → 未下载 → 仅记录旧视频 → 失败 排序
-- [ ] T005 在 `src/components/DetailPanel.tsx` 中重构渲染结构：替换「最新视频」和「下载记录」两个独立区域为单一 `<List>`，移除 `<DownloadRecordList>` 引用
-- [ ] T006 实现三行三列网格布局条目组件（内联于 DetailPanel）：
+- [x] T003 在 `src/components/DetailPanel.tsx` 中实现 `mergeToUnifiedItems()` 合并逻辑：遍历 records → queueTasks → videoList，按 video_id/video_url 去重生成 `UnifiedVideoItem[]`
+- [x] T004 在 `src/components/DetailPanel.tsx` 中实现 `sortUnifiedItems()` 排序函数：按下载中/等待中 → 已暂停 → 已完成 → 未下载 → 仅记录旧视频 → 失败 排序
+- [x] T005 在 `src/components/DetailPanel.tsx` 中重构渲染结构：替换「最新视频」和「下载记录」两个独立区域为单一 `<List>`，移除 `<DownloadRecordList>` 引用
+- [x] T006 实现三行三列网格布局条目组件（内联于 DetailPanel）：
   - 第 1 列：状态图标（垂直居中，40px）
   - 第 2 列：第 1 行标题 / 第 2 行左元信息+右统计 / 第 3 行进度条
   - 第 3 列：操作按钮（垂直居中，40px）
-- [ ] T007 运行 `npx tsc --noEmit` 验证 TypeScript 类型正确，运行 `cargo test` 确认 Rust 测试保持通过
+- [x] T007 运行 `npx tsc --noEmit` 验证 TypeScript 类型正确，运行 `cargo test` 确认 Rust 测试保持通过
 
 **Checkpoint**: DetailPanel 渲染单一合并列表，旧双区域结构已移除，类型检查通过
 
@@ -59,16 +59,16 @@
 
 ### Implementation for User Story 1
 
-- [ ] T008 [US1] 在 DetailPanel 的 `useMemo` 中连接 `records + queueTasks + videoList` 到 `mergeToUnifiedItems()`，替换当前 `uniqueVideos` 逻辑（`src/components/DetailPanel.tsx`）
-- [ ] T009 [US1] 实现各状态的条目渲染差异（`src/components/DetailPanel.tsx`）：
+- [x] T008 [US1] 在 DetailPanel 的 `useMemo` 中连接 `records + queueTasks + videoList` 到 `mergeToUnifiedItems()`，替换当前 `uniqueVideos` 逻辑（`src/components/DetailPanel.tsx`）
+- [x] T009 [US1] 实现各状态的条目渲染差异（`src/components/DetailPanel.tsx`）：
   - 未下载：▶ 灰色图标 + 标题 + 上传日期 · 时长
   - 等待中：⏳ + 标题 + "等待中·日期·时长" + 第 3 列取消按钮
   - 已完成：✓ 绿色图标 + 标题 + "已完成·日期·时长" + 右侧文件大小·下载时间
   - 失败：✕ 红色图标 + 标题 + "失败·日期·时长·错误" + 右侧下载时间 + 第 3 列重试按钮
-- [ ] T010 [US1] 订阅详情首次加载时先展示下载记录（已在内存中），再异步加载第 1 页频道视频并合并（`src/components/DetailPanel.tsx`）
-- [ ] T011 [US1] 旧下载记录中不在频道视频列表内的视频保留在统一列表中（`channelInfo` 为 null 时仅展示标题+下载状态，省略日期·时长）
-- [ ] T012 [US1] 频道失效率时不加载频道视频，仅展示已有下载记录（`src/components/DetailPanel.tsx`）
-- [ ] T013 运行 `npx tsc --noEmit` + `npm run build` 验证编译通过
+- [x] T010 [US1] 订阅详情首次加载时先展示下载记录（已在内存中），再异步加载第 1 页频道视频并合并（`src/components/DetailPanel.tsx`）
+- [x] T011 [US1] 旧下载记录中不在频道视频列表内的视频保留在统一列表中（`channelInfo` 为 null 时仅展示标题+下载状态，省略日期·时长）
+- [x] T012 [US1] 频道失效率时不加载频道视频，仅展示已有下载记录（`src/components/DetailPanel.tsx`）
+- [x] T013 运行 `npx tsc --noEmit` + `npm run build` 验证编译通过
 
 **Checkpoint**: US1 可独立验证——统一列表正确合并、无重复、各状态渲染正确
 
@@ -82,11 +82,11 @@
 
 ### Implementation for User Story 2
 
-- [ ] T014 [US2] 实现后台自动分页加载逻辑：在 `useCallback` 中递归调用 `getChannelVideos(page, 10)`，每页加载完成后追加到 `videoList` 并触发下一页面（`src/components/DetailPanel.tsx`）
-- [ ] T015 [US2] 使用 `requestIdRef` 模式：切换订阅时递增 `requestIdRef`，后台加载循环中每页检查，若 ID 不匹配则取消（`src/components/DetailPanel.tsx`）
-- [ ] T016 [US2] 后台加载出错时静默处理：已加载的视频保留，不再继续加载，不显示错误提示（`src/components/DetailPanel.tsx`）
-- [ ] T017 [US2] 移除"加载更多"按钮及相关状态（`hasMore`、`videoPage`、`handleLoadMore`，在 `src/components/DetailPanel.tsx` 中）
-- [ ] T018 运行 `npx tsc --noEmit` + `npm run build` 验证
+- [x] T014 [US2] 实现后台自动分页加载逻辑：在 `useCallback` 中递归调用 `getChannelVideos(page, 10)`，每页加载完成后追加到 `videoList` 并触发下一页面（`src/components/DetailPanel.tsx`）
+- [x] T015 [US2] 使用 `requestIdRef` 模式：切换订阅时递增 `requestIdRef`，后台加载循环中每页检查，若 ID 不匹配则取消（`src/components/DetailPanel.tsx`）
+- [x] T016 [US2] 后台加载出错时静默处理：已加载的视频保留，不再继续加载，不显示错误提示（`src/components/DetailPanel.tsx`）
+- [x] T017 [US2] 移除"加载更多"按钮及相关状态（`hasMore`、`videoPage`、`handleLoadMore`，在 `src/components/DetailPanel.tsx` 中）
+- [x] T018 运行 `npx tsc --noEmit` + `npm run build` 验证
 
 **Checkpoint**: US2 可独立验证——后台自动加载，切换订阅取消，错误静默处理
 
@@ -100,11 +100,11 @@
 
 ### Implementation for User Story 3
 
-- [ ] T019 [US3] 在统一列表的下载中条目中嵌入 `DownloadProgressBar` 组件（复用，位于第 2 列第 3 行），传入来自 `progressMap` 的 `DownloadProgress`（`src/components/DetailPanel.tsx`）
-- [ ] T020 [US3] 监听 `records-changed` 事件：下载完成/失败时自动更新对应条目的状态，从"下载中"切换为"已完成"或"失败"（`src/components/DetailPanel.tsx`）
-- [ ] T021 [US3] 监听 `queue-changed` 事件：新下载加入队列时更新列表顶部，移除已完成/取消的队列任务条目（`src/components/DetailPanel.tsx`）
-- [ ] T022 [US3] 实现下载中条目的第 3 列操作按钮：暂停（⏸）调用 `onPauseDownload`，取消（✕）调用 `onCancelDownload`（`src/components/DetailPanel.tsx`）
-- [ ] T023 运行 `npx tsc --noEmit` + `npm run build` 验证
+- [x] T019 [US3] 在统一列表的下载中条目中嵌入 `DownloadProgressBar` 组件（复用，位于第 2 列第 3 行），传入来自 `progressMap` 的 `DownloadProgress`（`src/components/DetailPanel.tsx`）
+- [x] T020 [US3] 监听 `records-changed` 事件：下载完成/失败时自动更新对应条目的状态，从"下载中"切换为"已完成"或"失败"（`src/components/DetailPanel.tsx`）
+- [x] T021 [US3] 监听 `queue-changed` 事件：新下载加入队列时更新列表顶部，移除已完成/取消的队列任务条目（`src/components/DetailPanel.tsx`）
+- [x] T022 [US3] 实现下载中条目的第 3 列操作按钮：暂停（⏸）调用 `onPauseDownload`，取消（✕）调用 `onCancelDownload`（`src/components/DetailPanel.tsx`）
+- [x] T023 运行 `npx tsc --noEmit` + `npm run build` 验证
 
 **Checkpoint**: US3 可独立验证——进度条实时更新，状态自动切换，操作按钮可用
 
@@ -114,11 +114,11 @@
 
 **Purpose**: 移除废弃组件，最终验证
 
-- [ ] T024 [P] 删除 `src/components/DownloadRecordList.tsx`
-- [ ] T025 [P] 删除 `src/components/DownloadRecordItem.tsx`（确认 DetailPanel 内联了所有渲染逻辑）
-- [ ] T026 [P] 确认 `src/components/DownloadProgressBar.tsx` 保留（被 US3 复用），`src/components/DownloadedList.tsx` 和 `src/components/DownloadedItem.tsx` 无变更
-- [ ] T027 运行 `npx tsc --noEmit` + `cargo test` + `npm run build` 全量验证
-- [ ] T028 执行 `quickstart.md` 中的手动验证清单
+- [x] T024 [P] 删除 `src/components/DownloadRecordList.tsx`
+- [x] T025 [P] 删除 `src/components/DownloadRecordItem.tsx`（确认 DetailPanel 内联了所有渲染逻辑）
+- [x] T026 [P] 确认 `src/components/DownloadProgressBar.tsx` 保留（被 US3 复用），`src/components/DownloadedList.tsx` 和 `src/components/DownloadedItem.tsx` 无变更
+- [x] T027 运行 `npx tsc --noEmit` + `cargo test` + `npm run build` 全量验证
+- [x] T028 执行 `quickstart.md` 中的手动验证清单
 
 ---
 
