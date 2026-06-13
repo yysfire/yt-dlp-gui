@@ -49,6 +49,18 @@ function formatFileSize(bytes: number): string {
   return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
+/** 从 yt-dlp epoch 字段或 upload_date (YYYYMMDD) 转为 YYYY-MM-DD 字符串 */
+function formatUploadDate(uploadDate: string | null | undefined, epoch: number | null | undefined): string {
+  if (uploadDate && /^\d{8}$/.test(uploadDate)) {
+    return `${uploadDate.slice(0, 4)}-${uploadDate.slice(4, 6)}-${uploadDate.slice(6, 8)}`;
+  }
+  if (epoch != null && epoch > 0) {
+    const d = new Date(epoch * 1000);
+    return d.toISOString().slice(0, 10);
+  }
+  return "";
+}
+
 /** 按状态排序优先级 (越小越靠前) */
 function statusPriority(status: VideoStatus): number {
   switch (status) {
@@ -568,34 +580,41 @@ export default function DetailPanel({
                             {/* 第 2 行：左(状态+元信息) · 右(辅助信息) */}
                             <Box sx={{ display: "flex", alignItems: "center" }}>
                               <Typography variant="caption" sx={{ fontSize: "0.65rem", whiteSpace: "nowrap" }}>
-                                {item.status === "new" && (
-                                  <>
-                                    {item.channelInfo?.upload_date}
-                                    {item.channelInfo?.upload_date && item.channelInfo?.duration && " · "}
-                                    {item.channelInfo?.duration != null && formatDuration(item.channelInfo.duration)}
-                                  </>
-                                )}
-                                {item.status === "waiting" && "等待中" + (item.channelInfo?.upload_date ? ` · ${item.channelInfo.upload_date}` : "") + (item.channelInfo?.duration != null ? ` · ${formatDuration(item.channelInfo.duration)}` : "")}
-                                {item.status === "downloading" && "下载中" + (item.channelInfo?.upload_date ? ` · ${item.channelInfo.upload_date}` : "") + (item.channelInfo?.duration != null ? ` · ${formatDuration(item.channelInfo.duration)}` : "")}
-                                {item.status === "paused" && "已暂停" + (item.channelInfo?.upload_date ? ` · ${item.channelInfo.upload_date}` : "") + (item.channelInfo?.duration != null ? ` · ${formatDuration(item.channelInfo.duration)}` : "")}
-                                {item.status === "completed" && (
-                                  <>
-                                    <Box component="span" sx={{ color: "success.main", fontWeight: 500 }}>已完成</Box>
-                                    {item.channelInfo?.upload_date && ` · ${item.channelInfo.upload_date}`}
-                                    {item.channelInfo?.duration != null && ` · ${formatDuration(item.channelInfo.duration)}`}
-                                    {!item.channelInfo && item.downloadInfo && ` · ${new Date(item.downloadInfo.downloaded_at).toLocaleDateString("zh-CN")}`}
-                                  </>
-                                )}
-                                {item.status === "failed" && (
-                                  <>
-                                    <Box component="span" sx={{ color: "error.main", fontWeight: 500 }}>失败</Box>
-                                    {item.channelInfo?.upload_date && ` · ${item.channelInfo.upload_date}`}
-                                    {item.channelInfo?.duration != null && ` · ${formatDuration(item.channelInfo.duration)}`}
-                                    {item.downloadInfo?.error_message && ` · ${item.downloadInfo.error_message}`}
-                                    {!item.channelInfo && item.downloadInfo && ` · ${new Date(item.downloadInfo.downloaded_at).toLocaleDateString("zh-CN")}`}
-                                  </>
-                                )}
-                                {item.status === "cancelled" && "已取消" + (item.channelInfo?.upload_date ? ` · ${item.channelInfo.upload_date}` : "")}
+                                {(() => {
+                                  const date = formatUploadDate(item.channelInfo?.upload_date, item.channelInfo?.epoch);
+                                  return (
+                                    <>
+                                      {item.status === "new" && (
+                                        <>
+                                          {date}
+                                          {date && item.channelInfo?.duration != null && " · "}
+                                          {item.channelInfo?.duration != null && formatDuration(item.channelInfo.duration)}
+                                        </>
+                                      )}
+                                      {item.status === "waiting" && `等待中${date ? ` · ${date}` : ""}${item.channelInfo?.duration != null ? ` · ${formatDuration(item.channelInfo.duration)}` : ""}`}
+                                      {item.status === "downloading" && `下载中${date ? ` · ${date}` : ""}${item.channelInfo?.duration != null ? ` · ${formatDuration(item.channelInfo.duration)}` : ""}`}
+                                      {item.status === "paused" && `已暂停${date ? ` · ${date}` : ""}${item.channelInfo?.duration != null ? ` · ${formatDuration(item.channelInfo.duration)}` : ""}`}
+                                      {item.status === "completed" && (
+                                        <>
+                                          <Box component="span" sx={{ color: "success.main", fontWeight: 500 }}>已完成</Box>
+                                          {date && ` · ${date}`}
+                                          {item.channelInfo?.duration != null && ` · ${formatDuration(item.channelInfo.duration)}`}
+                                          {!item.channelInfo && item.downloadInfo && ` · ${new Date(item.downloadInfo.downloaded_at).toLocaleDateString("zh-CN")}`}
+                                        </>
+                                      )}
+                                      {item.status === "failed" && (
+                                        <>
+                                          <Box component="span" sx={{ color: "error.main", fontWeight: 500 }}>失败</Box>
+                                          {date && ` · ${date}`}
+                                          {item.channelInfo?.duration != null && ` · ${formatDuration(item.channelInfo.duration)}`}
+                                          {item.downloadInfo?.error_message && ` · ${item.downloadInfo.error_message}`}
+                                          {!item.channelInfo && item.downloadInfo && ` · ${new Date(item.downloadInfo.downloaded_at).toLocaleDateString("zh-CN")}`}
+                                        </>
+                                      )}
+                                      {item.status === "cancelled" && `已取消${date ? ` · ${date}` : ""}`}
+                                    </>
+                                  );
+                                })()}
                               </Typography>
                               <Box sx={{ flex: 1 }} />
                               <Typography variant="caption" sx={{ fontSize: "0.65rem", color: "text.disabled", whiteSpace: "nowrap" }}>

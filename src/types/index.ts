@@ -218,7 +218,10 @@ export interface VideoInfo {
   title: string;
   url: string;
   duration: number | null;
+  /** 上传日期（YYYYMMDD 格式；flat-playlist 可能为 null） */
   upload_date: string | null;
+  /** Unix 时间戳（秒）；flat-playlist 回退字段 */
+  epoch: number | null;
   thumbnail: string | null;
 }
 

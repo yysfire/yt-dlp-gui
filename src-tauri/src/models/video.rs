@@ -58,8 +58,12 @@ pub struct VideoInfo {
     /// 时长（秒，浮点数；yt-dlp --flat-playlist 输出为浮点类型）
     #[serde(default, deserialize_with = "deserialize_duration")]
     pub duration: Option<f64>,
-    /// 上传日期（YYYYMMDD 格式）
+    /// 上传日期（YYYYMMDD 格式；yt-dlp --flat-playlist 不输出此字段）
+    #[serde(default)]
     pub upload_date: Option<String>,
+    /// Unix 时间戳（秒）；yt-dlp --flat-playlist 输出 epoch 字段作为回退
+    #[serde(default)]
+    pub epoch: Option<i64>,
     /// 缩略图 URL
     pub thumbnail: Option<String>,
 }
