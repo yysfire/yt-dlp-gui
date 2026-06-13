@@ -314,33 +314,13 @@ export default function DetailPanel({
     loadData();
   }, [subscription?.id]);
 
-  if (!subscription) {
-    return (
-      <Box
-        sx={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          height: "100%",
-          color: "text.disabled",
-        }}
-      >
-        <Typography variant="body2" color="text.secondary">
-          选择左侧订阅查看详情
-        </Typography>
-      </Box>
-    );
-  }
+  const isDead = subscription?.health_status === "dead";
 
-  const isDead = subscription.health_status === "dead";
-
-  // 后台自动加载剩余页面（使用 ref 跟踪页码，避免无限循环）
+  // 后台自动加载剩余页面（使用 loadingRef 锁防止重入）
   const loadingRef = useRef(false);
 
   useEffect(() => {
     if (!subscription || isDead) return;
-
     loadingRef.current = false;
   }, [subscription?.id, isDead]);
 
@@ -375,6 +355,25 @@ export default function DetailPanel({
 
     loadRemaining();
   }, [subscription?.id, hasMore, videoPage, isDead]);
+
+  if (!subscription) {
+    return (
+      <Box
+        sx={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          height: "100%",
+          color: "text.disabled",
+        }}
+      >
+        <Typography variant="body2" color="text.secondary">
+          选择左侧订阅查看详情
+        </Typography>
+      </Box>
+    );
+  }
 
   // 合并频道视频、下载记录、队列任务为统一列表
   const unifiedItems = useMemo(() => {
