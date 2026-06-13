@@ -26,3 +26,6 @@ dist/
 .specify/bridge-events.jsonl
 .specify/superpowers-handoff.json
 .specify/bridge-snapshots/
+
+# Brainstorming visual companion artifacts
+.superpowers/
