@@ -358,7 +358,12 @@ export default function DetailPanel({
 
   // 合并频道视频、下载记录、队列任务为统一列表
   const unifiedItems = useMemo(() => {
-    return mergeToUnifiedItems(videoList, records, queueTasks);
+    try {
+      return mergeToUnifiedItems(videoList, records, queueTasks);
+    } catch (e) {
+      console.error("[DetailPanel] mergeToUnifiedItems failed:", e);
+      return [];
+    }
   }, [videoList, records, queueTasks]);
 
   return (
