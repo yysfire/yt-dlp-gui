@@ -245,8 +245,8 @@ export default function DetailPanel({
   // 异步加载状态
   const [channelInfo, setChannelInfo] = useState<ChannelInfo | null>(null);
   const [videoList, setVideoList] = useState<VideoInfo[]>([]);
-  const [videoPage, setVideoPage] = useState(1);
-  const [hasMore, setHasMore] = useState(false);
+  const [_videoPage, setVideoPage] = useState(1);
+  const [_hasMore, setHasMore] = useState(false);
   const [_totalVideos, setTotalVideos] = useState(0);
   const [loadingChannel, setLoadingChannel] = useState(false);
   const [loadingVideos, setLoadingVideos] = useState(false);
@@ -297,6 +297,7 @@ export default function DetailPanel({
       setLoadingChannel(false);
 
       // 加载视频列表第一页
+      let hasMoreVideos = false;
       try {
         const result = await getChannelVideos(subscription.id, 1, 10);
         if (currentRequestId !== requestIdRef.current) return;
@@ -304,57 +305,37 @@ export default function DetailPanel({
         setVideoPage(1);
         setHasMore(result.has_more);
         setTotalVideos(result.total);
+        hasMoreVideos = result.has_more;
       } catch (e) {
         if (currentRequestId !== requestIdRef.current) return;
         setLoadError(String(e));
       }
       setLoadingVideos(false);
+
+      // 后台自动加载剩余页面（闭包变量跟踪页码，无需额外 useEffect）
+      if (currentRequestId === requestIdRef.current && hasMoreVideos) {
+        let page = 2;
+        while (currentRequestId === requestIdRef.current) {
+          try {
+            const res = await getChannelVideos(subscription.id, page, 10);
+            if (currentRequestId !== requestIdRef.current) return;
+            setVideoList((prev) => [...prev, ...res.videos]);
+            setVideoPage(page);
+            setHasMore(res.has_more);
+            setTotalVideos(res.total);
+            if (!res.has_more) break;
+            page++;
+          } catch {
+            break;
+          }
+        }
+      }
     };
 
     loadData();
   }, [subscription?.id]);
 
   const isDead = subscription?.health_status === "dead";
-
-  // 后台自动加载剩余页面（使用 loadingRef 锁防止重入）
-  const loadingRef = useRef(false);
-
-  useEffect(() => {
-    if (!subscription || isDead) return;
-    loadingRef.current = false;
-  }, [subscription?.id, isDead]);
-
-  useEffect(() => {
-    if (!subscription || isDead || !hasMore || loadingRef.current) return;
-
-    const currentRequestId = requestIdRef.current;
-    loadingRef.current = true;
-
-    const loadRemaining = async () => {
-      let page = videoPage + 1;
-
-      while (true) {
-        if (currentRequestId !== requestIdRef.current) return;
-
-        try {
-          const result = await getChannelVideos(subscription.id, page, 10);
-          if (currentRequestId !== requestIdRef.current) return;
-
-          setVideoList((prev) => [...prev, ...result.videos]);
-          setVideoPage(page);
-          setHasMore(result.has_more);
-          setTotalVideos(result.total);
-
-          if (!result.has_more) return;
-          page++;
-        } catch {
-          return;
-        }
-      }
-    };
-
-    loadRemaining();
-  }, [subscription?.id, hasMore, videoPage, isDead]);
 
   if (!subscription) {
     return (
@@ -671,7 +652,7 @@ export default function DetailPanel({
                               </IconButton>
                             )}
                             {item.status === "failed" && (
-                              <IconButton size="small" onClick={() => onRetryDownload(item.downloadInfo!.subscription_id)} title="重试" sx={{ color: "warning.main" }}>
+                              <IconButton size="small" onClick={() => onRetryDownload(subscription.id)} title="重试" sx={{ color: "warning.main" }}>
                                 <ReplayIcon sx={{ fontSize: 18 }} />
                               </IconButton>
                             )}
