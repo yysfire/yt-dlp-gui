@@ -701,7 +701,7 @@ impl DownloadQueue {
             let mut found = None;
             for (_task_id, entry) in active.iter_mut() {
                 if entry.task.video_url == video_url {
-                    let pid = entry.pid;
+                    let _pid = entry.pid;
                     #[cfg(unix)]
                     {
                         unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
@@ -777,7 +777,7 @@ impl DownloadQueue {
             // queue lock guard dropped here
         };
 
-        if let Some(id) = waiting_id {
+        if let Some(_id) = waiting_id {
             self.update_record_status(&ctx.data_dir, video_url, "", "cancelled", Some("Cancelled by user".to_string()));
             let _ = self.app_handle.emit("records-changed", ());
             self.emit_queue_changed();
