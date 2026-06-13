@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Box, Typography, Avatar, Chip, Alert, Skeleton, Button, List, ListItem, ListItemText, Link, Divider } from "@mui/material";
 import {
   CheckCircle as SuccessIcon,
@@ -172,6 +172,28 @@ export default function DetailPanel({
 
   const isDead = subscription.health_status === "dead";
 
+  // 从下载记录中提取已完成/进行中视频的 ID 和 URL，用于去重
+  const { downloadedIds, downloadedUrls } = useMemo(() => {
+    const ids = new Set<string>();
+    const urls = new Set<string>();
+    for (const r of records) {
+      // failed/cancelled/deleted 的记录不应排除视频列表项（用户可能需要重试）
+      if (r.status === "failed" || r.status === "cancelled" || r.status === "deleted") continue;
+      if (r.video_id) ids.add(r.video_id);
+      if (r.video_url) urls.add(r.video_url);
+    }
+    return { downloadedIds: ids, downloadedUrls: urls };
+  }, [records]);
+
+  // 过滤掉已下载的视频，避免在"最新视频"和"下载记录"中重复显示
+  const uniqueVideos = useMemo(() => {
+    return videoList.filter((v) => {
+      if (downloadedIds.has(v.id)) return false;
+      if (downloadedUrls.has(v.url)) return false;
+      return true;
+    });
+  }, [videoList, downloadedIds, downloadedUrls]);
+
   return (
     <div className="flex flex-col h-full">
       {/* Channel Header */}
@@ -326,17 +348,17 @@ export default function DetailPanel({
             ) : (
               <>
                 {/* 视频列表 */}
-                {videoList.length > 0 && (
+                {uniqueVideos.length > 0 && (
                   <Box sx={{ borderBottom: 1, borderColor: "divider" }}>
                     <Typography
                       variant="subtitle2"
                       color="text.secondary"
                       sx={{ px: 2, pt: 2, pb: 1 }}
                     >
-                      最新视频 ({totalVideos > 0 ? totalVideos : videoList.length})
+                      最新视频 ({totalVideos > 0 ? totalVideos : uniqueVideos.length})
                     </Typography>
                     <List dense disablePadding>
-                      {videoList.map((video) => (
+                      {uniqueVideos.map((video) => (
                         <ListItem key={video.id} sx={{ px: 2 }}>
                           <VideoIcon sx={{ fontSize: 18, color: "text.disabled", mr: 1.5, flexShrink: 0 }} />
                           <ListItemText

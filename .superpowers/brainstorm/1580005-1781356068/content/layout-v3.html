@@ -1,0 +1,275 @@
+<h2>统一视频列表 · 三行三列网格布局</h2>
+<p class="subtitle">每个视频条目内部采用 3列 × 3行 网格，状态图标与操作按钮垂直居中</p>
+
+<h3>网格结构</h3>
+<div style="background: #f8f9fa; border-radius: 8px; padding: 16px; font-size: 0.78rem; margin-bottom: 20px;">
+  <table style="width: 100%; border-collapse: collapse; text-align: center;">
+    <tr>
+      <td style="border: 2px dashed #90caf9; padding: 6px 10px; background: #e3f2fd; font-weight: 600; color: #1976d2; width: 48px; vertical-align: middle;">
+        第1列<br><span style="font-size:0.65rem;font-weight:400;">状态图标<br>垂直居中</span>
+      </td>
+      <td style="border: 2px dashed #a5d6a7; padding: 4px 10px; background: #f1f8e9;">
+        <div style="display: flex; flex-direction: column; gap: 3px;">
+          <div style="padding: 4px 8px; background: #c8e6c9; border-radius: 3px; font-weight: 600; color: #2e7d32;">第1行 · 视频标题</div>
+          <div style="display: flex;">
+            <div style="flex:1; padding: 4px 8px; background: #c8e6c9; border-radius: 3px 0 0 3px; border-right: 1px solid #a5d6a7; text-align: left;">
+              <span style="font-weight: 600; color: #2e7d32;">第2行 · 左</span><br>
+              <span style="font-size:0.65rem;">状态文本 · 发布时间 · 时长</span>
+            </div>
+            <div style="flex:0 0 auto; padding: 4px 8px; background: #c8e6c9; border-radius: 0 3px 3px 0; text-align: right; min-width: 100px;">
+              <span style="font-weight: 600; color: #2e7d32;">第2行 · 右</span><br>
+              <span style="font-size:0.65rem;">进度/文件大小/时间</span>
+            </div>
+          </div>
+          <div style="padding: 3px 8px; background: #c8e6c9; border-radius: 3px; font-weight: 600; color: #2e7d32;">第3行 · 进度条（仅下载中）</div>
+        </div>
+      </td>
+      <td style="border: 2px dashed #ffcc80; padding: 6px 10px; background: #fff3e0; font-weight: 600; color: #e65100; width: 48px; vertical-align: middle;">
+        第3列<br><span style="font-size:0.65rem;font-weight:400;">操作按钮<br>垂直居中</span>
+      </td>
+    </tr>
+  </table>
+</div>
+
+<!-- ============= 各状态示例 ============= -->
+
+<!-- 未下载 -->
+<div class="mockup" style="margin-bottom: 20px;">
+  <div class="mockup-header">未下载 — 无进度条，无操作按钮</div>
+  <div class="mockup-body" style="padding: 0;">
+
+    <div style="display: flex; padding: 10px 14px; border-bottom: 1px solid #f0f0f0; font-size: 0.78rem; min-height: 52px;">
+      <!-- 第1列：状态图标，垂直居中 -->
+      <div style="width: 40px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;">
+        <span style="color: #bbb; font-size: 1.1rem;">▶</span>
+      </div>
+
+      <!-- 第2列：三行内容 -->
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+        <!-- 第1行：视频标题 -->
+        <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.3;">
+          New Music Video 2026 Official MV Release
+        </div>
+        <!-- 第2行：左(元信息) + 右(空) -->
+        <div style="display: flex; align-items: center;">
+          <span style="color: #888; font-size: 0.7rem; white-space: nowrap;">2026-06-13 · 3:45</span>
+          <span style="flex: 1;"></span>
+        </div>
+        <!-- 第3行：无进度条 -->
+      </div>
+
+      <!-- 第3列：无操作，保留占位列宽 -->
+      <div style="width: 40px; flex-shrink: 0;"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- 等待中 -->
+<div class="mockup" style="margin-bottom: 20px;">
+  <div class="mockup-header">等待中 — 有取消按钮</div>
+  <div class="mockup-body" style="padding: 0;">
+
+    <div style="display: flex; padding: 10px 14px; font-size: 0.78rem; min-height: 52px;">
+      <!-- 第1列：状态图标 -->
+      <div style="width: 40px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;">
+        <span style="color: #bbb; font-size: 1rem;">⏳</span>
+      </div>
+
+      <!-- 第2列 -->
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+        <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+          Behind The Scenes EP.5 Making Film
+        </div>
+        <div style="display: flex; align-items: center;">
+          <span style="color: #888; font-size: 0.7rem;">等待中 · 2026-05-28 · 12:30</span>
+        </div>
+      </div>
+
+      <!-- 第3列：取消按钮 -->
+      <div style="width: 40px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;">
+        <span style="cursor: pointer; color: #f44336; font-size: 0.8rem;" title="取消排队">✕</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- 下载中 -->
+<div class="mockup" style="margin-bottom: 20px;">
+  <div class="mockup-header">下载中 — 进度条占据第2行宽度 · 暂停/取消按钮垂直居中</div>
+  <div class="mockup-body" style="padding: 0;">
+
+    <div style="display: flex; padding: 10px 14px; border-bottom: 1px solid #f0f0f0; font-size: 0.78rem; min-height: 64px;">
+      <!-- 第1列：下载图标，垂直居中 -->
+      <div style="width: 40px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;">
+        <span style="color: #1976d2; font-size: 1.1rem;">⬇</span>
+      </div>
+
+      <!-- 第2列：三行 -->
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
+        <!-- 第1行：标题 -->
+        <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+          아프리카tv 노래하는 겜순이 방송국 Full Stream
+        </div>
+        <!-- 第2行：左(状态+元信息) · 右(进度+文件大小) -->
+        <div style="display: flex; align-items: center;">
+          <span style="color: #1976d2; font-size: 0.68rem; font-weight: 500; white-space: nowrap;">下载中 · 2026-06-12 · 1:23:45</span>
+          <span style="flex: 1;"></span>
+          <span style="color: #1976d2; font-size: 0.68rem; white-space: nowrap;">1.2 GB · 67%</span>
+        </div>
+        <!-- 第3行：进度条（占满第2列宽度） -->
+        <div style="height: 4px; background: #e0e0e0; border-radius: 2px;">
+          <div style="width: 67%; height: 100%; background: #1976d2; border-radius: 2px; transition: width 0.3s;"></div>
+        </div>
+      </div>
+
+      <!-- 第3列：暂停 + 取消，垂直排列居中 -->
+      <div style="width: 40px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;">
+        <span style="cursor: pointer; color: #888; font-size: 0.75rem;" title="暂停">⏸</span>
+        <span style="cursor: pointer; color: #f44336; font-size: 0.75rem;" title="取消">✕</span>
+      </div>
+    </div>
+
+    <!-- 下载中 条目 2 -->
+    <div style="display: flex; padding: 10px 14px; font-size: 0.78rem; min-height: 64px;">
+      <!-- 第1列 -->
+      <div style="width: 40px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;">
+        <span style="color: #1976d2; font-size: 1.1rem;">⬇</span>
+      </div>
+      <!-- 第2列 -->
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
+        <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+          Q&amp;A Special 2026 Fan Questions
+        </div>
+        <div style="display: flex; align-items: center;">
+          <span style="color: #1976d2; font-size: 0.68rem; font-weight: 500; white-space: nowrap;">下载中 · 2026-05-25 · 18:22</span>
+          <span style="flex: 1;"></span>
+          <span style="color: #1976d2; font-size: 0.68rem; white-space: nowrap;">45%</span>
+        </div>
+        <div style="height: 4px; background: #e0e0e0; border-radius: 2px;">
+          <div style="width: 45%; height: 100%; background: #1976d2; border-radius: 2px; transition: width 0.3s;"></div>
+        </div>
+      </div>
+      <!-- 第3列 -->
+      <div style="width: 40px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;">
+        <span style="cursor: pointer; color: #888; font-size: 0.75rem;" title="暂停">⏸</span>
+        <span style="cursor: pointer; color: #f44336; font-size: 0.75rem;" title="取消">✕</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- 已完成 -->
+<div class="mockup" style="margin-bottom: 20px;">
+  <div class="mockup-header">已完成 — 第2行尾部显示文件大小和下载时间</div>
+  <div class="mockup-body" style="padding: 0;">
+
+    <div style="display: flex; padding: 10px 14px; border-bottom: 1px solid #f0f0f0; font-size: 0.78rem; min-height: 48px;">
+      <!-- 第1列 -->
+      <div style="width: 40px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;">
+        <span style="color: #4caf50; font-size: 1.1rem;">✓</span>
+      </div>
+      <!-- 第2列 -->
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+        <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+          SOOP 도라미♥ (navi04) 2026-06-01 Stream
+        </div>
+        <div style="display: flex; align-items: center;">
+          <span style="color: #4caf50; font-size: 0.68rem; font-weight: 500; white-space: nowrap;">已完成 · 2026-06-01 · 0:30</span>
+          <span style="flex: 1;"></span>
+          <span style="color: #888; font-size: 0.68rem; white-space: nowrap;">45.2 MB · 6/12 16:35</span>
+        </div>
+      </div>
+      <!-- 第3列：无操作 -->
+      <div style="width: 40px; flex-shrink: 0;"></div>
+    </div>
+
+    <div style="display: flex; padding: 10px 14px; font-size: 0.78rem; min-height: 48px;">
+      <!-- 第1列 -->
+      <div style="width: 40px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;">
+        <span style="color: #4caf50; font-size: 1.1rem;">✓</span>
+      </div>
+      <!-- 第2列 -->
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+        <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+          [LIVE] 지난주 하이라이트 다시보기 Compilation
+        </div>
+        <div style="display: flex; align-items: center;">
+          <span style="color: #4caf50; font-size: 0.68rem; font-weight: 500; white-space: nowrap;">已完成 · 2026-06-10 · 2:05:12</span>
+          <span style="flex: 1;"></span>
+          <span style="color: #888; font-size: 0.68rem; white-space: nowrap;">890 MB · 6/12 22:10</span>
+        </div>
+      </div>
+      <div style="width: 40px; flex-shrink: 0;"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- 失败 -->
+<div class="mockup" style="margin-bottom: 20px;">
+  <div class="mockup-header">失败 — 第2行含错误信息 · 右侧重试按钮</div>
+  <div class="mockup-body" style="padding: 0;">
+
+    <div style="display: flex; padding: 10px 14px; font-size: 0.78rem; min-height: 52px;">
+      <!-- 第1列 -->
+      <div style="width: 40px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;">
+        <span style="color: #f44336; font-size: 1.1rem;">✕</span>
+      </div>
+      <!-- 第2列 -->
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+        <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+          Stream #47 Late Night Recording
+        </div>
+        <div style="display: flex; align-items: center;">
+          <span style="color: #f44336; font-size: 0.68rem; white-space: nowrap;">
+            失败 · 2026-06-08 · 4:22:18
+            <span style="margin-left: 4px;">· 网络超时</span>
+          </span>
+          <span style="flex: 1;"></span>
+          <span style="color: #aaa; font-size: 0.68rem; white-space: nowrap;">6/11 03:15</span>
+        </div>
+      </div>
+      <!-- 第3列：重试按钮 -->
+      <div style="width: 40px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;">
+        <span style="cursor: pointer; color: #ff9800; font-size: 0.75rem; padding: 2px 6px; border: 1px solid #ff9800; border-radius: 3px; white-space: nowrap;" title="重试">↻</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<h3 style="margin-top: 24px;">列规范总结</h3>
+
+<table style="width: 100%; font-size: 0.82rem; border-collapse: collapse;">
+  <tr style="border-bottom: 2px solid #e0e0e0;">
+    <th style="padding: 8px 10px; text-align: left;">列</th>
+    <th style="padding: 8px 10px; text-align: left;">宽度</th>
+    <th style="padding: 8px 10px; text-align: left;">内容</th>
+    <th style="padding: 8px 10px; text-align: left;">对齐</th>
+  </tr>
+  <tr style="border-bottom: 1px solid #eee;">
+    <td style="padding: 8px 10px; font-weight: 600;">第1列</td>
+    <td style="padding: 8px 10px; font-family: monospace;">40px</td>
+    <td style="padding: 8px 10px;">状态图标 (▶/⬇/✓/✕/⏳)</td>
+    <td style="padding: 8px 10px;">垂直居中，水平居中</td>
+  </tr>
+  <tr style="border-bottom: 1px solid #eee;">
+    <td style="padding: 8px 10px; font-weight: 600;">第2列</td>
+    <td style="padding: 8px 10px; font-family: monospace;">flex: 1</td>
+    <td style="padding: 8px 10px;">
+      第1行：视频标题<br>
+      第2行：(左)状态+日期+时长 — (右)进度/大小/时间<br>
+      第3行：进度条 (仅下载中)
+    </td>
+    <td style="padding: 8px 10px;">左对齐（标题、元信息）<br>右对齐（尾部信息）</td>
+  </tr>
+  <tr>
+    <td style="padding: 8px 10px; font-weight: 600;">第3列</td>
+    <td style="padding: 8px 10px; font-family: monospace;">40px</td>
+    <td style="padding: 8px 10px;">操作按钮（暂停/取消/重试）</td>
+    <td style="padding: 8px 10px;">垂直居中，水平居中</td>
+  </tr>
+</table>
