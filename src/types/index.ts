@@ -222,6 +222,34 @@ export interface VideoInfo {
   thumbnail: string | null;
 }
 
+/** 统一视频条目状态 */
+export type VideoStatus =
+  | "new"
+  | "downloading"
+  | "paused"
+  | "waiting"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+/** 统一视频列表条目：合并频道视频与下载记录 */
+export interface UnifiedVideoItem {
+  /** 频道视频信息（仅当该视频来自频道播放列表时有值） */
+  channelInfo?: VideoInfo;
+  /** 持久化的下载记录（仅当该视频已被下载/下载中/失败时有值） */
+  downloadInfo?: DownloadRecord;
+  /** 内存中的下载队列任务（仅当该视频在活跃队列中时有值） */
+  queueTask?: DownloadTask;
+  /** 唯一标识：优先 video_id，回退 video_url */
+  readonly id: string;
+  /** 显示标题：优先频道视频标题，回退下载记录标题 */
+  readonly title: string;
+  /** 视频链接 */
+  readonly url: string;
+  /** 视频当前状态 */
+  readonly status: VideoStatus;
+}
+
 /** 视频列表分页结果 */
 export interface VideoListResult {
   videos: VideoInfo[];
