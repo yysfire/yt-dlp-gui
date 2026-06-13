@@ -1,10 +1,9 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { Box, Typography, Avatar, Chip, Alert, Skeleton, Button, List, ListItem, Link, IconButton } from "@mui/material";
+import { useState, useEffect, useRef, useMemo } from "react";
+import { Box, Typography, Avatar, Chip, Alert, Skeleton, List, ListItem, Link, IconButton } from "@mui/material";
 import {
   CheckCircle as SuccessIcon,
   Error as ErrorIcon,
   HeartBroken as DeadIcon,
-  Refresh as RefreshIcon,
   PlayCircleOutline as VideoIcon,
   Pause as PauseIcon,
   Cancel as CancelIcon,
@@ -236,7 +235,7 @@ export default function DetailPanel({
   const [videoList, setVideoList] = useState<VideoInfo[]>([]);
   const [videoPage, setVideoPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
-  const [totalVideos, setTotalVideos] = useState(0);
+  const [_totalVideos, setTotalVideos] = useState(0);
   const [loadingChannel, setLoadingChannel] = useState(false);
   const [loadingVideos, setLoadingVideos] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -303,28 +302,6 @@ export default function DetailPanel({
     loadData();
   }, [subscription?.id]);
 
-  // 加载更多视频
-  const handleLoadMore = useCallback(async () => {
-    if (!subscription || loadingVideos || !hasMore) return;
-
-    const nextPage = videoPage + 1;
-    const currentRequestId = ++requestIdRef.current;
-    setLoadingVideos(true);
-
-    try {
-      const result = await getChannelVideos(subscription.id, nextPage, 10);
-      if (currentRequestId !== requestIdRef.current) return;
-      setVideoList((prev) => [...prev, ...result.videos]);
-      setVideoPage(nextPage);
-      setHasMore(result.has_more);
-      setTotalVideos(result.total);
-    } catch (e) {
-      if (currentRequestId !== requestIdRef.current) return;
-      console.warn("Failed to load more videos:", e);
-    }
-    setLoadingVideos(false);
-  }, [subscription, videoPage, hasMore, loadingVideos]);
-
   if (!subscription) {
     return (
       <Box
@@ -345,6 +322,42 @@ export default function DetailPanel({
   }
 
   const isDead = subscription.health_status === "dead";
+
+  // 后台自动加载剩余页面
+  useEffect(() => {
+    if (!subscription || isDead || !hasMore) return;
+
+    const currentRequestId = requestIdRef.current;
+    let page = videoPage + 1;
+    let cancelled = false;
+
+    const loadRemaining = async () => {
+      while (!cancelled) {
+        if (currentRequestId !== requestIdRef.current) return;
+
+        try {
+          const result = await getChannelVideos(subscription.id, page, 10);
+          if (currentRequestId !== requestIdRef.current) return;
+
+          setVideoList((prev) => [...prev, ...result.videos]);
+          setVideoPage(page);
+          setHasMore(result.has_more);
+          setTotalVideos(result.total);
+
+          if (!result.has_more) return;
+          page++;
+        } catch {
+          return;
+        }
+      }
+    };
+
+    loadRemaining();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [subscription?.id, hasMore, videoPage, isDead]);
 
   // 合并频道视频、下载记录、队列任务为统一列表
   const unifiedItems = useMemo(() => {
@@ -653,21 +666,6 @@ export default function DetailPanel({
                       暂无视频
                     </Typography>
                   </Box>
-                )}
-
-                {/* 分页 - 加载更多 */}
-                {hasMore && (
-                  <div className="flex justify-center p-3">
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      disabled={loadingVideos}
-                      onClick={handleLoadMore}
-                      startIcon={<RefreshIcon />}
-                    >
-                      {loadingVideos ? "加载中..." : `加载更多 (${totalVideos - videoList.length} 剩余)`}
-                    </Button>
-                  </div>
                 )}
               </>
             )}
