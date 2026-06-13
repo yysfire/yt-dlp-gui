@@ -346,6 +346,16 @@ export default function DetailPanel({
 
   const isDead = subscription?.health_status === "dead";
 
+  // 合并频道视频、下载记录、队列任务为统一列表
+  const unifiedItems = useMemo(() => {
+    try {
+      return mergeToUnifiedItems(videoList, records, queueTasks);
+    } catch (e) {
+      console.error("[DetailPanel] mergeToUnifiedItems failed:", e);
+      return [];
+    }
+  }, [videoList, records, queueTasks]);
+
   if (!subscription) {
     return (
       <Box
@@ -364,16 +374,6 @@ export default function DetailPanel({
       </Box>
     );
   }
-
-  // 合并频道视频、下载记录、队列任务为统一列表
-  const unifiedItems = useMemo(() => {
-    try {
-      return mergeToUnifiedItems(videoList, records, queueTasks);
-    } catch (e) {
-      console.error("[DetailPanel] mergeToUnifiedItems failed:", e);
-      return [];
-    }
-  }, [videoList, records, queueTasks]);
 
   return (
     <div className="flex flex-col h-full">
