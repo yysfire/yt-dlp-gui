@@ -20,6 +20,19 @@ function formatTime(iso: string): string {
   }
 }
 
+/** 将秒数格式化为人类可读的时长字符串（如 "12:34", "0:30"） */
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  const totalSeconds = Math.round(seconds);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 interface DetailPanelProps {
   subscription: Subscription | null;
   records: DownloadRecord[];
@@ -343,7 +356,7 @@ export default function DetailPanel({
                               <span className="text-xs">
                                 {video.upload_date && `${video.upload_date}`}
                                 {video.upload_date && video.duration && " · "}
-                                {video.duration && `${video.duration}`}
+                                {video.duration && `${formatDuration(video.duration)}`}
                               </span>
                             }
                           />

@@ -217,7 +217,7 @@ export interface VideoInfo {
   id: string;
   title: string;
   url: string;
-  duration: string | null;
+  duration: number | null;
   upload_date: string | null;
   thumbnail: string | null;
 }

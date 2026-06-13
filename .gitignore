@@ -22,3 +22,7 @@ Thumbs.db
 .env
 .env.local
 dist/
+
+.specify/bridge-events.jsonl
+.specify/superpowers-handoff.json
+.specify/bridge-snapshots/

@@ -1,3 +1,0 @@
-{"timestamp":"2026-06-09T16:20:04Z","action":"guard","status":"allow","feature_directory":"","decision":"allow","reason":"","actor":"claude","checked_action":"speckit.clarify"}
-{"timestamp":"2026-06-09T16:36:13Z","action":"guard","status":"allow","feature_directory":"","decision":"allow","reason":"","actor":"claude","checked_action":"speckit.plan"}
-{"timestamp":"2026-06-09T16:49:41Z","action":"guard","status":"allow","feature_directory":"","decision":"allow","reason":"","actor":"claude","checked_action":"speckit.tasks"}

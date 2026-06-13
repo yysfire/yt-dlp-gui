@@ -861,7 +861,7 @@ mod tests {
         assert_eq!(video.id, "dQw4w9WgXcQ");
         assert_eq!(video.title, "Test Video");
         assert_eq!(video.url, "https://youtube.com/watch?v=dQw4w9WgXcQ");
-        assert_eq!(video.duration, Some("03:21".to_string()));
+        assert_eq!(video.duration, Some(201.0));
         assert_eq!(video.upload_date, Some("20250528".to_string()));
         assert_eq!(video.thumbnail, Some("https://example.com/thumb.jpg".to_string()));
     }
@@ -913,7 +913,7 @@ mod tests {
                     id: "v1".to_string(),
                     title: "Video 1".to_string(),
                     url: "https://example.com/v1".to_string(),
-                    duration: Some("10:00".to_string()),
+                    duration: Some(600.0),
                     upload_date: Some("20250601".to_string()),
                     thumbnail: None,
                 },
@@ -940,7 +940,7 @@ mod tests {
                     id: "v50".to_string(),
                     title: "Last Video".to_string(),
                     url: "https://example.com/last".to_string(),
-                    duration: Some("05:00".to_string()),
+                    duration: Some(300.0),
                     upload_date: Some("20250610".to_string()),
                     thumbnail: None,
                 },
