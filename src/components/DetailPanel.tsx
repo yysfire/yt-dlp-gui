@@ -335,16 +335,25 @@ export default function DetailPanel({
 
   const isDead = subscription.health_status === "dead";
 
-  // 后台自动加载剩余页面
+  // 后台自动加载剩余页面（使用 ref 跟踪页码，避免无限循环）
+  const loadingRef = useRef(false);
+
   useEffect(() => {
-    if (!subscription || isDead || !hasMore) return;
+    if (!subscription || isDead) return;
+
+    loadingRef.current = false;
+  }, [subscription?.id, isDead]);
+
+  useEffect(() => {
+    if (!subscription || isDead || !hasMore || loadingRef.current) return;
 
     const currentRequestId = requestIdRef.current;
-    let page = videoPage + 1;
-    let cancelled = false;
+    loadingRef.current = true;
 
     const loadRemaining = async () => {
-      while (!cancelled) {
+      let page = videoPage + 1;
+
+      while (true) {
         if (currentRequestId !== requestIdRef.current) return;
 
         try {
@@ -365,10 +374,6 @@ export default function DetailPanel({
     };
 
     loadRemaining();
-
-    return () => {
-      cancelled = true;
-    };
   }, [subscription?.id, hasMore, videoPage, isDead]);
 
   // 合并频道视频、下载记录、队列任务为统一列表
