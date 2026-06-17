@@ -1,7 +1,6 @@
 {
   "ai": "codebuddy",
   "branch_numbering": "sequential",
-  "context_file": "CODEBUDDY.md",
   "here": true,
   "integration": "codebuddy",
   "script": "sh",
