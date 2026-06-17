@@ -15,6 +15,6 @@
       "invoke_separator": "."
     }
   },
-  "integration": "codebuddy",
-  "default_integration": "codebuddy"
+  "integration": "opencode",
+  "default_integration": "opencode"
 }
