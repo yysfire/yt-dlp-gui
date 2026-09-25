@@ -55,10 +55,7 @@ pub fn run() {
             let settings = StorageService::load_settings(&data_dir);
 
             // Initialize default state if missing
-            let _ = StorageService::save_state(
-                &data_dir,
-                &StorageService::load_state(&data_dir).unwrap_or_default(),
-            );
+            let _ = StorageService::update_state(&data_dir, |_| Ok(()));
 
             let (scheduler_tx, scheduler_rx) = watch::channel(());
             let interval_mins = settings.check_interval_minutes;
@@ -165,12 +162,14 @@ pub fn run() {
                 loop {
                     log::info!("Scheduler: checking subscriptions...");
 
-                    let mut subs = StorageService::load_subscriptions(&data_dir_clone)
+                    // 只读快照（长耗时阶段不再持有）
+                    let subs = StorageService::load_subscriptions(&data_dir_clone)
                         .unwrap_or_default();
                     let records = StorageService::load_download_records(&data_dir_clone)
                         .unwrap_or_default();
-                    let app_state = StorageService::load_state(&data_dir_clone)
-                        .unwrap_or_default();
+                    let last_check_time = StorageService::load_state(&data_dir_clone)
+                        .unwrap_or_default()
+                        .last_check_time;
 
                     let yt_dlp_path = settings_clone.yt_dlp_path.clone();
                     let proxy = Some(settings_clone.proxy_url.clone());
@@ -178,13 +177,10 @@ pub fn run() {
                     let download_dir =
                         std::path::PathBuf::from(&settings_clone.download_dir);
 
-                    let mut subs_changed = false;
-                    for idx in 0..subs.len() {
-                        if subs[idx].paused {
-                            continue;
-                        }
-
-                        let sub = &subs[idx];
+                    // 长耗时阶段：逐个检查，结果先攒起来，不持任何 storage 锁
+                    let mut outcomes: Vec<commands::download::SubCheckOutcome> = Vec::new();
+                    for sub in subs.iter().filter(|s| !s.paused) {
+                        let checked_at = chrono::Utc::now().to_rfc3339();
                         match commands::download::check_and_download(
                             sub,
                             &yt_dlp_path,
@@ -192,49 +188,48 @@ pub fn run() {
                             &cookie_file,
                             &download_dir,
                             &data_dir_clone,
-                            &app_state.last_check_time,
+                            &last_check_time,
                             &records,
                             &app_handle,
                         )
                         .await
                         {
-                            Ok(new_records) => {
-                                // download_count is managed by the download queue callback
-                                let sub = &mut subs[idx];
-                                sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
-                                sub.last_check_status = Some("success".to_string());
-                                sub.last_check_error = None;
-                                subs_changed = true;
-                                let _ = new_records; // avoid unused warning
-                            }
+                            Ok(_) => outcomes.push(commands::download::SubCheckOutcome {
+                                sub_id: sub.id.clone(),
+                                checked_at,
+                                status: "success",
+                                error: None,
+                            }),
                             Err(e) => {
-                                let sub = &mut subs[idx];
-                                sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
-                                sub.last_check_status = Some("failed".to_string());
-                                sub.last_check_error = Some(e.to_string());
-                                subs_changed = true;
                                 log::error!(
                                     "Scheduler: error checking {}: {}",
                                     sub.channel_name,
                                     e
                                 );
+                                outcomes.push(commands::download::SubCheckOutcome {
+                                    sub_id: sub.id.clone(),
+                                    checked_at,
+                                    status: "failed",
+                                    error: Some(e.to_string()),
+                                });
                             }
                         }
                     }
 
-                    if subs_changed {
-                        let _ = StorageService::save_subscriptions(&data_dir_clone, &subs);
+                    // 收尾：按 id 增量写回，不再整表覆盖（否则会 clobber
+                    // 并发下载回调写入的 download_count）
+                    if !outcomes.is_empty() {
+                        let _ = commands::download::apply_check_outcomes(
+                            &data_dir_clone,
+                            &outcomes,
+                        );
                     }
 
-                    // Update application state — only last_check_time.
-                    // total_downloads is managed by the download queue completion callback.
-                    let mut updated_state = app_state;
-                    updated_state.last_check_time =
-                        Some(chrono::Utc::now().to_rfc3339());
-                    let _ = StorageService::save_state(
-                        &data_dir_clone,
-                        &updated_state,
-                    );
+                    // 只更新 last_check_time，保留并发写入的 total_downloads
+                    let _ = StorageService::update_state(&data_dir_clone, |state| {
+                        state.last_check_time = Some(chrono::Utc::now().to_rfc3339());
+                        Ok(())
+                    });
 
                     // Emit an event to notify the frontend to refresh
                     let _ = app_handle.emit("scheduler-check-complete", ());

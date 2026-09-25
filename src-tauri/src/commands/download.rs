@@ -1,14 +1,46 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use tauri::{Emitter, Manager, State};
 
 use crate::models::{DownloadRecord, Subscription};
 use crate::services::{StorageService, YtDlpService};
-use crate::services::download_queue::{DownloadQueue, QueueState};
+use crate::services::download_queue::QueueState;
 use crate::utils::AppError;
 use crate::AppContext;
 use crate::QueueContext;
+
+/// 单个订阅一轮检查完成后需要落库的结果。
+///
+/// 只携带订阅 id 与要更新的字段，不携带订阅快照 —— 收尾时按 id 在事务内增量应用，
+/// 因此不会覆盖并发下载回调写入的 `download_count` 等字段。
+pub(crate) struct SubCheckOutcome {
+    pub sub_id: String,
+    pub checked_at: String,
+    /// `"success"` 或 `"failed"`
+    pub status: &'static str,
+    pub error: Option<String>,
+}
+
+/// 按 id 增量应用检查结果到 `subscriptions.json`。
+///
+/// 「边跑边收集、收尾一次写入」模式的关键一步：长耗时阶段不持任何 storage 锁，
+/// 收尾时也只按 id 改字段，而不是用陈旧快照整表覆盖。
+pub(crate) fn apply_check_outcomes(
+    data_dir: &Path,
+    outcomes: &[SubCheckOutcome],
+) -> Result<(), AppError> {
+    StorageService::update_subscriptions(data_dir, |subs| {
+        for outcome in outcomes {
+            if let Some(sub) = subs.iter_mut().find(|s| s.id == outcome.sub_id) {
+                sub.last_checked_at = Some(outcome.checked_at.clone());
+                sub.last_check_status = Some(outcome.status.to_string());
+                sub.last_check_error = outcome.error.clone();
+            }
+        }
+        Ok(())
+    })
+}
 
 /// Core logic for checking a single subscription for new videos and downloading them.
 /// Used by both the command layer and the scheduler.
@@ -107,9 +139,10 @@ pub(crate) async fn check_and_download(
             DownloadRecord::new(sub.id.clone(), video.title.clone(), video.url.clone(), vid.clone());
 
         // Save the record immediately so the frontend sees "downloading"
-        let mut all_records = StorageService::load_download_records(data_dir)?;
-        all_records.push(record.clone());
-        StorageService::save_download_records(data_dir, &all_records)?;
+        StorageService::update_download_records(data_dir, |all_records| {
+            all_records.push(record.clone());
+            Ok(())
+        })?;
         let _ = app_handle.emit("records-changed", ());
 
         new_records.push(record);
@@ -125,19 +158,21 @@ pub async fn check_subscription(
     state: State<'_, AppContext>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<DownloadRecord>, String> {
-    let mut subs = StorageService::load_subscriptions(&state.data_dir)
-        .map_err(|e| e.to_string())?;
-    let sub_idx = subs
-        .iter()
-        .position(|s| s.id == id)
-        .ok_or_else(|| AppError::NotFound(format!("Subscription not found: {}", id)))
-        .map_err(|e| e.to_string())?;
-
-    if subs[sub_idx].paused {
-        return Ok(Vec::new());
-    }
-
-    let sub = &subs[sub_idx];
+    // 只读快照：定位并克隆订阅，之后不再持有整表快照
+    let sub = {
+        let subs = StorageService::load_subscriptions(&state.data_dir)
+            .map_err(|e| e.to_string())?;
+        let sub = subs
+            .iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| AppError::NotFound(format!("Subscription not found: {}", id)))
+            .map_err(|e| e.to_string())?
+            .clone();
+        if sub.paused {
+            return Ok(Vec::new());
+        }
+        sub
+    };
 
     // Clone settings values and drop the MutexGuard before awaiting
     let (yt_dlp_path, proxy, cookie_file, download_dir) = {
@@ -150,36 +185,46 @@ pub async fn check_subscription(
         )
     };
 
-    let app_state = StorageService::load_state(&state.data_dir).map_err(|e| e.to_string())?;
+    let last_check_time = StorageService::load_state(&state.data_dir)
+        .map_err(|e| e.to_string())?
+        .last_check_time;
     let records =
         StorageService::load_download_records(&state.data_dir).map_err(|e| e.to_string())?;
 
+    // 长耗时阶段：不持任何 storage 锁
     let new_records = check_and_download(
-        sub,
+        &sub,
         &yt_dlp_path,
         &proxy,
         &cookie_file,
         &download_dir,
         &state.data_dir,
-        &app_state.last_check_time,
+        &last_check_time,
         &records,
         &app_handle,
     )
     .await
     .map_err(|e| e.to_string())?;
 
-    // Update per-subscription data — download_count is managed by queue callback
-    let sub = &mut subs[sub_idx];
-    sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
-    sub.last_check_status = Some("success".to_string());
-    sub.last_check_error = None;
-    StorageService::save_subscriptions(&state.data_dir, &subs).map_err(|e| e.to_string())?;
+    // 收尾：按 id 增量写回。保持原语义 —— 上面失败时 `?` 已提前返回，
+    // 既不写 last_check_status 也不写 last_check_time。
+    apply_check_outcomes(
+        &state.data_dir,
+        &[SubCheckOutcome {
+            sub_id: sub.id.clone(),
+            checked_at: chrono::Utc::now().to_rfc3339(),
+            status: "success",
+            error: None,
+        }],
+    )
+    .map_err(|e| e.to_string())?;
 
-    // Also update global last_check_time
-    if let Ok(mut app_state) = StorageService::load_state(&state.data_dir) {
+    // 只更新 last_check_time，保留并发下载回调写入的 total_downloads
+    StorageService::update_state(&state.data_dir, |app_state| {
         app_state.last_check_time = Some(chrono::Utc::now().to_rfc3339());
-        let _ = StorageService::save_state(&state.data_dir, &app_state);
-    }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     Ok(new_records)
 }
@@ -190,7 +235,8 @@ pub async fn check_all_subscriptions(
     state: State<'_, AppContext>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<DownloadRecord>, String> {
-    let mut subs = StorageService::load_subscriptions(&state.data_dir)
+    // 只读快照（长耗时阶段不再持有它）
+    let subs = StorageService::load_subscriptions(&state.data_dir)
         .map_err(|e| e.to_string())?;
 
     // Clone settings values and drop the MutexGuard before awaiting
@@ -204,12 +250,14 @@ pub async fn check_all_subscriptions(
         )
     };
 
-    let app_state = StorageService::load_state(&state.data_dir).map_err(|e| e.to_string())?;
+    let last_check_time = StorageService::load_state(&state.data_dir)
+        .map_err(|e| e.to_string())?
+        .last_check_time;
     let records =
         StorageService::load_download_records(&state.data_dir).map_err(|e| e.to_string())?;
 
     let mut all_new: Vec<DownloadRecord> = Vec::new();
-    let mut subs_changed = false;
+    let mut outcomes: Vec<SubCheckOutcome> = Vec::new();
 
     log::info!(
         "check_all: {} subscriptions, cookie={}, proxy={}, ytdlp={}",
@@ -219,12 +267,9 @@ pub async fn check_all_subscriptions(
         yt_dlp_path,
     );
 
-    for idx in 0..subs.len() {
-        if subs[idx].paused {
-            continue;
-        }
-
-        let sub = &subs[idx];
+    // 长耗时阶段：逐个检查，结果先攒在 outcomes 里，不持任何 storage 锁
+    for sub in subs.iter().filter(|s| !s.paused) {
+        let checked_at = chrono::Utc::now().to_rfc3339();
         match check_and_download(
             sub,
             &yt_dlp_path,
@@ -232,46 +277,50 @@ pub async fn check_all_subscriptions(
             &cookie_file,
             &download_dir,
             &state.data_dir,
-            &app_state.last_check_time,
+            &last_check_time,
             &records,
             &app_handle,
         )
         .await
         {
             Ok(new_records) => {
-                // download_count is managed by the download queue callback
-                let sub = &mut subs[idx];
-                sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
-                sub.last_check_status = Some("success".to_string());
-                sub.last_check_error = None;
-                subs_changed = true;
                 all_new.extend(new_records);
+                outcomes.push(SubCheckOutcome {
+                    sub_id: sub.id.clone(),
+                    checked_at,
+                    status: "success",
+                    error: None,
+                });
             }
             Err(e) => {
-                let sub = &mut subs[idx];
-                sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
-                sub.last_check_status = Some("failed".to_string());
-                sub.last_check_error = Some(e.to_string());
-                subs_changed = true;
+                let message = e.to_string();
                 log::error!(
                     "check_all: error checking {}: {}",
                     sub.channel_name,
-                    sub.last_check_error.as_deref().unwrap_or("")
+                    message
                 );
+                outcomes.push(SubCheckOutcome {
+                    sub_id: sub.id.clone(),
+                    checked_at,
+                    status: "failed",
+                    error: Some(message),
+                });
             }
         }
     }
 
-    if subs_changed {
-        StorageService::save_subscriptions(&state.data_dir, &subs).map_err(|e| e.to_string())?;
+    // 收尾：一次事务按 id 增量写回 —— 不再用陈旧快照整表覆盖，
+    // 因此不会 clobber 并发下载回调写入的 download_count。
+    if !outcomes.is_empty() {
+        apply_check_outcomes(&state.data_dir, &outcomes).map_err(|e| e.to_string())?;
     }
 
-    // Update application state — only last_check_time.
-    // total_downloads is managed by the download queue completion callback.
-    let mut updated_state = app_state.clone();
-    updated_state.last_check_time = Some(Utc::now().to_rfc3339());
-    StorageService::save_state(&state.data_dir, &updated_state)
-        .map_err(|e| e.to_string())?;
+    // 只更新 last_check_time，保留并发写入的 total_downloads
+    StorageService::update_state(&state.data_dir, |app_state| {
+        app_state.last_check_time = Some(Utc::now().to_rfc3339());
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     Ok(all_new)
 }
@@ -304,93 +353,6 @@ pub async fn get_all_download_records(
     Ok(StorageService::deduplicate_vec(records))
 }
 
-/// Returns the current in-memory download queue tasks.
-
-/// Check for new videos and enqueue downloads instead of downloading directly.
-/// Used by the queue-driven flow.
-pub(crate) async fn check_and_enqueue(
-    sub: &Subscription,
-    yt_dlp_path: &str,
-    proxy: &Option<String>,
-    cookie_file: &Option<String>,
-    _download_dir: &PathBuf,
-    data_dir: &PathBuf,
-    last_check_time: &Option<String>,
-    existing_records: &[DownloadRecord],
-    queue: &DownloadQueue,
-) -> Result<usize, AppError> {
-    // Determine the date cutoff for checking
-    let since = match last_check_time {
-        Some(t) => {
-            let parsed = chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.fZ")
-                .or_else(|_| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%SZ"))
-                .or_else(|_| {
-                    chrono::NaiveDate::parse_from_str(&t[..10], "%Y-%m-%d")
-                        .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
-                });
-            match parsed {
-                Ok(dt) => Some(dt.format("%Y%m%d").to_string()),
-                Err(_) => None,
-            }
-        }
-        None => None,
-    };
-
-    let videos = YtDlpService::check_new_videos(yt_dlp_path, proxy, cookie_file, &sub.url, since.as_deref())?;
-
-    // Dedup: prefer video_id, fall back to video_url. Failed records can retry.
-    let mut seen_ids: std::collections::HashSet<String> = existing_records
-        .iter()
-        .filter(|r| r.status != "failed")
-        .filter(|r| !r.video_id.is_empty())
-        .map(|r| r.video_id.clone())
-        .collect();
-    let mut seen_urls: std::collections::HashSet<String> = existing_records
-        .iter()
-        .filter(|r| r.status != "failed")
-        .map(|r| r.video_url.clone())
-        .collect();
-
-    let quality = sub.quality_preset.clone();
-    let mut count = 0;
-
-    for video in videos {
-        let vid = video.id.clone().unwrap_or_default();
-        if !vid.is_empty() {
-            if !seen_ids.insert(vid.clone()) {
-                continue;
-            }
-        } else if !seen_urls.insert(video.url.clone()) {
-            continue;
-        }
-
-        // Create and save a "downloading" record
-        let record = DownloadRecord::new(
-            sub.id.clone(),
-            video.title.clone(),
-            video.url.clone(),
-            vid.clone(),
-        );
-
-        let mut all_records = StorageService::load_download_records(data_dir)?;
-        all_records.push(record);
-        StorageService::save_download_records(data_dir, &all_records)?;
-
-        // Enqueue to download queue
-        queue.enqueue_from_video(
-            sub,
-            video.title.clone(),
-            video.url.clone(),
-            vid.clone(),
-            quality.clone(),
-            data_dir,
-        )?;
-
-        count += 1;
-    }
-
-    Ok(count)
-}
 #[tauri::command]
 pub async fn get_download_queue(
     queue_ctx: State<'_, QueueContext>,
@@ -402,28 +364,31 @@ pub async fn get_download_queue(
     }
 }
 
-/// Returns the runtime queue state (active/waiting counts).
-
 /// Recovers download state on application restart.
 /// Marks "downloading" and "paused" records as "failed" since the download process
 /// was terminated when the application exited.
 pub fn recover_state(data_dir: &PathBuf) -> Result<(), AppError> {
-    let mut records = StorageService::load_download_records(data_dir)?;
-    let mut changed = false;
-    for record in records.iter_mut() {
-        if record.status == "downloading" || record.status == "paused" {
-            record.status = "failed".to_string();
-            record.error_message = Some("Application restarted".to_string());
-            changed = true;
+    let recovered = StorageService::update_download_records(data_dir, |records| {
+        let mut recovered = 0usize;
+        for record in records.iter_mut() {
+            if record.status == "downloading" || record.status == "paused" {
+                record.status = "failed".to_string();
+                record.error_message = Some("Application restarted".to_string());
+                recovered += 1;
+            }
         }
-    }
-    if changed {
-        StorageService::save_download_records(data_dir, &records)?;
-        log::info!("Recovered {} download records to failed state after restart", 
-            records.iter().filter(|r| r.error_message.as_deref() == Some("Application restarted")).count());
+        Ok(recovered)
+    })?;
+
+    if recovered > 0 {
+        log::info!(
+            "Recovered {} download records to failed state after restart",
+            recovered
+        );
     }
     Ok(())
 }
+
 #[tauri::command]
 pub async fn get_queue_state(
     queue_ctx: State<'_, QueueContext>,
@@ -642,7 +607,7 @@ mod tests {
             make_record("sub-1", "Video A", "https://youtube.com/watch?v=a", "vid-a", "downloading"),
             make_record("sub-1", "Video B", "https://youtube.com/watch?v=b", "vid-b", "completed"),
         ];
-        StorageService::save_download_records(tmp.path(), &records)
+        StorageService::seed_download_records(tmp.path(), &records)
             .expect("save should succeed");
 
         recover_state(&tmp.path().to_path_buf()).expect("recover should succeed");
@@ -664,7 +629,7 @@ mod tests {
         let records = vec![
             make_record("sub-1", "Video", "https://youtube.com/watch?v=c", "vid-c", "paused"),
         ];
-        StorageService::save_download_records(tmp.path(), &records)
+        StorageService::seed_download_records(tmp.path(), &records)
             .expect("save should succeed");
 
         recover_state(&tmp.path().to_path_buf()).expect("recover should succeed");
@@ -683,7 +648,7 @@ mod tests {
             make_record("sub-1", "Video B", "https://youtube.com/watch?v=b", "vid-b", "failed"),
             make_record("sub-1", "Video C", "https://youtube.com/watch?v=c", "vid-c", "cancelled"),
         ];
-        StorageService::save_download_records(tmp.path(), &records)
+        StorageService::seed_download_records(tmp.path(), &records)
             .expect("save should succeed");
 
         recover_state(&tmp.path().to_path_buf()).expect("recover should succeed");
@@ -702,7 +667,7 @@ mod tests {
         let records = vec![
             make_record("sub-1", "Video", "https://youtube.com/watch?v=a", "vid-a", "completed"),
         ];
-        StorageService::save_download_records(tmp.path(), &records)
+        StorageService::seed_download_records(tmp.path(), &records)
             .expect("save should succeed");
 
         recover_state(&tmp.path().to_path_buf()).expect("recover should succeed");

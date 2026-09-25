@@ -98,24 +98,32 @@ pub fn delete_file_and_update_record(
     record_id: &str,
     data_dir: &Path,
 ) -> Result<DownloadRecord, AppError> {
-    let mut records = StorageService::load_download_records(data_dir)?;
-    let idx = records
-        .iter()
-        .position(|r| r.id == record_id)
-        .ok_or_else(|| AppError::NotFound(format!("下载记录不存在: {}", record_id)))?;
+    // 阶段 1：只读定位（不加锁），先确认记录存在
+    let file_path = {
+        let records = StorageService::load_download_records(data_dir)?;
+        let record = records
+            .iter()
+            .find(|r| r.id == record_id)
+            .ok_or_else(|| AppError::NotFound(format!("下载记录不存在: {}", record_id)))?;
+        record.file_path.clone()
+    };
 
-    // Delete the physical file (try trash first, fall back to permanent delete)
-    let file_path = Path::new(&records[idx].file_path);
+    // 阶段 2：物理删除放在写事务之外 —— 可能走回收站或跨设备，耗时不可控
+    let file_path = Path::new(&file_path);
     if file_path.exists() {
         delete_file_to_trash(file_path);
     }
 
-    // Update status
-    records[idx].status = "deleted".to_string();
-    let updated = records[idx].clone();
-    StorageService::save_download_records(data_dir, &records)?;
-
-    Ok(updated)
+    // 阶段 3：事务内按 id 置为 deleted
+    StorageService::update_download_records(data_dir, |records| {
+        match records.iter_mut().find(|r| r.id == record_id) {
+            Some(record) => {
+                record.status = "deleted".to_string();
+                Ok(record.clone())
+            }
+            None => Err(AppError::NotFound(format!("下载记录不存在: {}", record_id))),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -165,7 +173,7 @@ mod tests {
         record.status = "completed".to_string();
         record.file_path = file_path.to_string_lossy().to_string();
 
-        StorageService::save_download_records(&data_dir, &[record.clone()]).unwrap();
+        StorageService::seed_download_records(&data_dir, &[record.clone()]).unwrap();
 
         let result = delete_file_and_update_record(&record.id, &data_dir).unwrap();
         assert_eq!(result.status, "deleted");
@@ -189,7 +197,7 @@ mod tests {
         record.status = "completed".to_string();
         record.file_path = "/nonexistent/video.mp4".to_string();
 
-        StorageService::save_download_records(&data_dir, &[record.clone()]).unwrap();
+        StorageService::seed_download_records(&data_dir, &[record.clone()]).unwrap();
 
         let result = delete_file_and_update_record(&record.id, &data_dir).unwrap();
         assert_eq!(result.status, "deleted");
@@ -198,7 +206,7 @@ mod tests {
     #[test]
     fn test_delete_file_record_not_found() {
         let tmp = TempDir::new().unwrap();
-        StorageService::save_download_records(tmp.path(), &[]).unwrap();
+        StorageService::seed_download_records(tmp.path(), &[]).unwrap();
 
         let result = delete_file_and_update_record("nonexistent-id", tmp.path());
         assert!(result.is_err());

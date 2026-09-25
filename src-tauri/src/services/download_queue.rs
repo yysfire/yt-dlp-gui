@@ -249,9 +249,10 @@ impl DownloadQueue {
             video_id.clone(),
         );
 
-        let mut all_records = StorageService::load_download_records(data_dir)?;
-        all_records.push(record);
-        StorageService::save_download_records(data_dir, &all_records)?;
+        StorageService::update_download_records(data_dir, |all_records| {
+            all_records.push(record);
+            Ok(())
+        })?;
         let _ = self.app_handle.emit("records-changed", ());
 
         let mut queue = self.queue.lock().unwrap();
@@ -504,69 +505,77 @@ impl DownloadQueue {
 
                 // Update file info in DownloadRecord
                 if !file_path.is_empty() {
-                    let all_records = StorageService::load_download_records(&ctx.data_dir)
-                        .unwrap_or_default();
-                    let matching: Vec<_> = all_records.iter()
+                    // 只读定位目标记录（不加锁），文件大小在锁外算好
+                    let record_id = StorageService::load_download_records(&ctx.data_dir)
+                        .unwrap_or_default()
+                        .iter()
                         .filter(|r| r.video_url == task.video_url
                             && r.subscription_id == task.subscription_id)
-                        .collect();
-                    if let Some(record_id) = matching.last().map(|r| r.id.clone()) {
-                        let mut records = StorageService::load_download_records(&ctx.data_dir)
-                            .unwrap_or_default();
-                        if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
-                            existing.file_path = file_path.clone();
-                            existing.file_size = std::fs::metadata(&file_path)
-                                .map(|m| m.len())
-                                .unwrap_or(0);
-                            existing.status = "completed".to_string();
-                        }
-                        let _ = StorageService::save_download_records(&ctx.data_dir, &records);
+                        .last()
+                        .map(|r| r.id.clone());
+
+                    if let Some(record_id) = record_id {
+                        let file_size = std::fs::metadata(&file_path)
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        let _ = StorageService::update_download_records(&ctx.data_dir, |records| {
+                            if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
+                                existing.file_path = file_path;
+                                existing.file_size = file_size;
+                                existing.status = "completed".to_string();
+                            }
+                            Ok(())
+                        });
                     }
                 }
 
                 // Increment total downloads counter
-                if let Ok(mut app_state) = StorageService::load_state(&ctx.data_dir) {
+                let _ = StorageService::update_state(&ctx.data_dir, |app_state| {
                     app_state.total_downloads += 1;
-                    let _ = StorageService::save_state(&ctx.data_dir, &app_state);
-                }
+                    Ok(())
+                });
 
                 // Increment per-subscription download count
-                if let Ok(mut subs) = StorageService::load_subscriptions(&ctx.data_dir) {
+                let _ = StorageService::update_subscriptions(&ctx.data_dir, |subs| {
                     if let Some(sub) = subs.iter_mut().find(|s| s.id == task.subscription_id) {
                         sub.download_count += 1;
-                        let _ = StorageService::save_subscriptions(&ctx.data_dir, &subs);
                     }
-                }
+                    Ok(())
+                });
 
                 let _ = app_handle.emit("records-changed", ());
             }
             _ => {
                 log::error!("yt-dlp process failed for {}", task.video_title);
-                // Update record with error
-                let all_records = StorageService::load_download_records(&ctx.data_dir)
-                    .unwrap_or_default();
-                let matching: Vec<_> = all_records.iter()
+                // Update record with error — 同样先只读定位，再单次事务写入
+                let record_id = StorageService::load_download_records(&ctx.data_dir)
+                    .unwrap_or_default()
+                    .iter()
                     .filter(|r| r.video_url == task.video_url
                         && r.subscription_id == task.subscription_id)
-                    .collect();
-                if let Some(record_id) = matching.last().map(|r| r.id.clone()) {
-                    let mut records = StorageService::load_download_records(&ctx.data_dir)
-                        .unwrap_or_default();
-                    if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
-                        if existing.status != "cancelled" {
-                            existing.status = "failed".to_string();
-                            // FR-011: distinguish proxy failure from other errors
-                            let has_proxy = ctx.proxy.as_ref()
-                                .map(|p| !p.is_empty())
-                                .unwrap_or(false);
-                            if has_proxy {
-                                existing.error_message = Some("代理连接失败".to_string());
-                            } else {
-                                existing.error_message = Some("yt-dlp process exited with error".to_string());
+                    .last()
+                    .map(|r| r.id.clone());
+
+                if let Some(record_id) = record_id {
+                    // FR-011: distinguish proxy failure from other errors
+                    let has_proxy = ctx.proxy.as_ref()
+                        .map(|p| !p.is_empty())
+                        .unwrap_or(false);
+                    let error_message = if has_proxy {
+                        "代理连接失败".to_string()
+                    } else {
+                        "yt-dlp process exited with error".to_string()
+                    };
+
+                    let _ = StorageService::update_download_records(&ctx.data_dir, |records| {
+                        if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
+                            if existing.status != "cancelled" {
+                                existing.status = "failed".to_string();
+                                existing.error_message = Some(error_message);
                             }
                         }
-                    }
-                    let _ = StorageService::save_download_records(&ctx.data_dir, &records);
+                        Ok(())
+                    });
                 }
 
                 let _ = app_handle.emit("records-changed", ());
@@ -809,7 +818,7 @@ impl DownloadQueue {
             self.cleanup_partial_files(&entry.task.video_title, &ctx.download_dir);
 
             // Mark matching records as cancelled
-            if let Ok(mut records) = StorageService::load_download_records(&ctx.data_dir) {
+            let _ = StorageService::update_download_records(&ctx.data_dir, |records| {
                 for r in records.iter_mut() {
                     if r.video_url == entry.task.video_url
                         && r.subscription_id == entry.task.subscription_id
@@ -819,8 +828,8 @@ impl DownloadQueue {
                         r.downloaded_at = Utc::now().to_rfc3339();
                     }
                 }
-                let _ = StorageService::save_download_records(&ctx.data_dir, &records);
-            }
+                Ok(())
+            });
 
             let _ = self.app_handle.emit("records-changed", ());
             self.emit_queue_changed();
@@ -868,7 +877,7 @@ impl DownloadQueue {
 
     /// Updates a DownloadRecord's status and error message.
     fn update_record_status(&self, data_dir: &PathBuf, video_url: &str, subscription_id: &str, status: &str, error_message: Option<String>) {
-        if let Ok(mut records) = StorageService::load_download_records(data_dir) {
+        let _ = StorageService::update_download_records(data_dir, |records| {
             for r in records.iter_mut() {
                 if r.video_url == video_url && r.subscription_id == subscription_id {
                     r.status = status.to_string();
@@ -876,8 +885,8 @@ impl DownloadQueue {
                     r.downloaded_at = Utc::now().to_rfc3339();
                 }
             }
-            let _ = StorageService::save_download_records(data_dir, &records);
-        }
+            Ok(())
+        });
     }
 
     /// Returns runtime queue state.

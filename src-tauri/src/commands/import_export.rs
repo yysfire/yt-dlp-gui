@@ -97,7 +97,7 @@ pub async fn batch_import_subscriptions(
     };
 
     // ── Load existing subscriptions ─────────────────────────────────
-    let mut subs =
+    let subs =
         StorageService::load_subscriptions(&state.data_dir).map_err(|e| e.to_string())?;
     let existing_urls: HashSet<&str> = subs.iter().map(|s| s.url.as_str()).collect();
 
@@ -160,9 +160,17 @@ pub async fn batch_import_subscriptions(
     let success_count = imported.len();
 
     // ── Merge and save ──────────────────────────────────────────────
-    subs.extend(imported.clone());
-    StorageService::save_subscriptions(&state.data_dir, &subs)
-        .map_err(|e| e.to_string())?;
+    // 事务内按 URL 再次查重后追加：上面 :100 只读快照与这次写入之间可能有并发添加
+    let imported_for_insert = imported.clone();
+    StorageService::update_subscriptions(&state.data_dir, |subs| {
+        for sub in imported_for_insert {
+            if !subs.iter().any(|s| s.url == sub.url) {
+                subs.push(sub);
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     // Emit event to refresh the frontend
     let _ = app_handle.emit("subscriptions-updated", ());
@@ -438,11 +446,16 @@ pub async fn batch_import_execute(
         let failed_count = errors.len();
 
         // ── Merge and save ──────────────────────────────────────────
+        // 事务内按 URL 再次查重后追加，避免与并发添加冲突
         if !imported.is_empty() {
-            if let Ok(mut subs) = StorageService::load_subscriptions(&data_dir) {
-                subs.extend(imported);
-                let _ = StorageService::save_subscriptions(&data_dir, &subs);
-            }
+            let _ = StorageService::update_subscriptions(&data_dir, |subs| {
+                for sub in imported {
+                    if !subs.iter().any(|s| s.url == sub.url) {
+                        subs.push(sub);
+                    }
+                }
+                Ok(())
+            });
         }
 
         // ── Emit completion event ────────────────────────────────────
@@ -515,7 +528,7 @@ mod tests {
             format!("Channel for {}", url),
             "https://example.com/avatar.jpg".to_string(),
         );
-        StorageService::save_subscriptions(data_dir, &[sub.clone()])
+        StorageService::seed_subscriptions(data_dir, &[sub.clone()])
             .expect("save should succeed");
         sub
     }
@@ -601,7 +614,7 @@ mod tests {
     fn test_batch_import_partial_failure() {
         let tmp = setup_temp_dir();
         // Pre-populate with no existing subscriptions
-        StorageService::save_subscriptions(tmp.path(), &[])
+        StorageService::seed_subscriptions(tmp.path(), &[])
             .expect("save empty subs");
 
         // Simulate parsing: some valid, some invalid
