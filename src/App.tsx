@@ -9,7 +9,6 @@ import { useSubscriptions } from "@/hooks/useSubscriptions";
 import { useDownloadRecords } from "@/hooks/useDownloadRecords";
 import { useDownloadProgress } from "@/hooks/useDownloadProgress";
 import { useHealthCheck } from "@/hooks/useHealthCheck";
-import { useFilter } from "@/hooks/useFilter";
 import AppShell from "@/components/AppShell";
 import * as api from "@/lib/tauri";
 import type { AppSettings } from "@/types";
@@ -72,7 +71,6 @@ const darkTheme = createTheme({
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const {
     subscriptions,
@@ -103,8 +101,6 @@ export default function App() {
     startCheckSelected: startHealthCheckSelected,
     clearResults: clearHealthResults,
   } = useHealthCheck(refreshSubs);
-
-  const { filter, setFilter, sort, setSort, filtered, count: filteredCount } = useFilter(subscriptions);
 
   // Load dark mode preference from settings on mount
   useEffect(() => {
@@ -210,8 +206,6 @@ export default function App() {
         subscriptions={subscriptions}
         subscriptionsLoading={subsLoading}
         subscriptionsError={subsError}
-        selectedId={selectedId}
-        onSelectSubscription={setSelectedId}
         onAddSubscription={addSubscription}
         onDeleteSubscription={deleteSubscription}
         onTogglePause={togglePause}
@@ -236,12 +230,6 @@ export default function App() {
         onHealthCheckAll={startHealthCheckAll}
         onHealthCheckSelected={startHealthCheckSelected}
         onHealthClearResults={clearHealthResults}
-        filter={filter}
-        onFilterChange={setFilter}
-        sort={sort}
-        onSortChange={setSort}
-        filteredSubscriptions={filtered}
-        filteredCount={filteredCount}
       />
     </ThemeProvider>
   );

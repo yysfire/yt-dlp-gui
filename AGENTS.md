@@ -60,9 +60,11 @@ App.tsx                      # 根组件：主题提供者、暗色模式、事�
 - `useDownloadRecords()` — 下载记录的获取/检查，持有 `DownloadRecord[]` 状态
 - `useDownloadProgress()` — 订阅 `download-progress`，按 video_url 索引的进度表
 - `useHealthCheck()` — 健康检查的进度与摘要，订阅两个 health 事件
-- `useFilter()` — 订阅列表的筛选与排序（纯前端派生，无后端调用）
+- `useFilter()` — 订阅列表的筛选与排序（纯前端派生，无后端调用）。**在 `SubscriptionList` 内调用**，筛选/排序状态不提升到 `App`；纯逻辑另导出 `applyFilter` / `applySort` 供直接测试。
 
-不使用 Redux 或 Context。`App.tsx` 是唯一的状态中心，从 Hook 中提升状态并通过 props 向下传递。注意 `AppShell` 因此接收 30 个 props，其中大部分原样转给子组件。
+不使用 Redux 或 Context。**域数据**（订阅、下载记录、下载进度、健康检查）在 `App.tsx` 汇聚后通过 props 下发；**纯 UI 局部状态**各自持有：主面板视图与选中订阅由 `AppShell` 的 `AppView` 可辨识联合管理（`{ kind: "detail"; subscriptionId } | { kind: "downloads" }`，因此「已下载视图同时有选中项」这种非法组合无法表示），订阅筛选/排序由 `SubscriptionList` 内的 `useFilter` 管理。`AppShell` 接收 19 个 props。
+
+> 注意：把状态下移到局部组件时，要确认该组件不会因折叠/切换而卸载（`SubscriptionList` 就依赖「始终挂载、仅 CSS 隐藏」这一点来保住筛选状态）。
 
 **后端通信**: `src/lib/tauri.ts` 封装了全部 40 个 Tauri `invoke()` 调用，返回类型与 `src/types/index.ts` 一致（类型是手写断言，与 Rust 侧 serde 结构各自维护，没有校验机制，改字段时两边都要动）。前端通过 `listen()` 订阅后端推送事件，事件名分散在多个文件中定义，**没有单一契约清单**：
 
@@ -182,7 +184,7 @@ utils/
 
 所有 Rust 测试均为源代码文件内的 `#[cfg(test)]` 模块 —— 共 234 个测试函数，分布在 models、services 和 commands 中。测试重点包括序列化往返、默认值、OPML 解析/构建、存储事务语义（提交/回滚/并发无丢失更新）、健康状态更新和画质格式字符串。没有需要实际执行 yt-dlp CLI 的集成测试。
 
-前端测试用 vitest + @testing-library/react（`npm test`），源码在 `src/**/__tests__/`。注意 `src/components/__tests__/DetailPanel.test.tsx` 中有一条断言仍引用已被替换的文案（`暂无下载记录`，实际已是 `暂无视频`），该用例当前是失败的。
+前端测试用 vitest + @testing-library/react（`npm test`），源码在 `src/**/__tests__/`。注意 `src/hooks/__tests__/useFilter.test.ts` 的 38 个筛选/排序用例测的是 `useFilter.ts` 里真实导出的 `applyFilter`/`applySort`，另有一组 `renderHook` 用例覆盖 Hook 的状态联动。
 
 ### 平台支持
 
