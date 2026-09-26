@@ -18,10 +18,21 @@ pub async fn get_settings(
 /// Updates application settings and persists them.
 #[tauri::command]
 pub async fn update_settings(
-    settings: AppSettings,
+    mut settings: AppSettings,
     state: State<'_, AppContext>,
     app_handle: tauri::AppHandle,
 ) -> Result<AppSettings, String> {
+    // scheduler_paused 由托盘菜单拥有，前端设置对话框并不编辑它，但保存时会把整个
+    // settings 回传（带着打开对话框那一刻的陈旧值）。用缓存里的权威值覆盖入参，
+    // 否则「托盘暂停 → 打开设置 → 保存」会把暂停悄悄反转。
+    // 先读缓存并释放锁、再落盘：save_settings 内部会拿全局写锁，两步不重叠以避免锁序环。
+    let authoritative_paused = state
+        .settings
+        .lock()
+        .map(|cached| cached.scheduler_paused)
+        .unwrap_or(settings.scheduler_paused);
+    settings.scheduler_paused = authoritative_paused;
+
     // Persist to disk
     StorageService::save_settings(&state.data_dir, &settings)
         .map_err(|e| e.to_string())?;
@@ -64,28 +75,6 @@ pub async fn get_app_state(
     StorageService::load_state(&state.data_dir).map_err(|e| e.to_string())
 }
 
-/// The background scheduler is managed by lib.rs setup. This command exists
-/// for API compatibility and logs that the scheduler is already running.
-#[tauri::command]
-pub async fn start_scheduler(
-    _app_handle: tauri::AppHandle,
-    _state: State<'_, AppContext>,
-) -> Result<(), String> {
-    log::info!("start_scheduler called — scheduler is managed by lib.rs setup");
-    Ok(())
-}
-
-/// Stops the background scheduler.
-#[tauri::command]
-pub async fn stop_scheduler(
-    _state: State<'_, AppContext>,
-) -> Result<(), String> {
-    // In the MVP, the scheduler handle is managed via a leaked Box.
-    // A production implementation would store the handle in AppContext.
-    log::info!("Scheduler stop requested (no-op in MVP)");
-    Ok(())
-}
-
 /// Validates a download directory path for existence and writability.
 #[tauri::command]
 pub async fn validate_download_path(
@@ -111,7 +100,6 @@ pub fn detect_interval_change(old_interval: u32, new_interval: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::watch;
 
     #[test]
     fn test_detect_interval_change_same() {
@@ -128,40 +116,6 @@ mod tests {
         assert!(detect_interval_change(30, 60));
         assert!(detect_interval_change(1440, 0));
         assert!(detect_interval_change(0, 60));
-    }
-
-    #[test]
-    fn test_scheduler_notify_sent_on_change() {
-        // Verify watch::Sender::send() is actually called when interval changes
-        let (tx, mut rx) = watch::channel(());
-        let old_interval = 60u32;
-        let new_interval = 30u32;
-
-        if detect_interval_change(old_interval, new_interval) {
-            let _ = tx.send(());
-        }
-
-        // rx should have been notified
-        assert!(rx.has_changed().unwrap_or(false));
-    }
-
-    #[test]
-    fn test_scheduler_notify_not_sent_when_unchanged() {
-        let (tx, mut rx) = watch::channel(());
-
-        // Consume the initial value
-        let _ = rx.borrow_and_update();
-
-        let old_interval = 60u32;
-        let new_interval = 60u32;
-
-        if detect_interval_change(old_interval, new_interval) {
-            // This branch should NOT execute
-            let _ = tx.send(());
-        }
-
-        // rx should NOT have changed
-        assert!(!rx.has_changed().unwrap_or(true));
     }
 
     #[test]

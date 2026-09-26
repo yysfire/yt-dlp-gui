@@ -42,6 +42,93 @@ pub(crate) fn apply_check_outcomes(
     })
 }
 
+/// 对所有非暂停订阅执行一轮检查并落库，返回本轮新产生的下载记录。
+///
+/// - 每轮自行从磁盘重读 `AppSettings`：yt-dlp 路径 / 代理 / Cookie / 下载目录的改动
+///   下一轮即生效，调用方不需要（也不应该）传设置快照。
+/// - 错误只记日志、不向上传播：这是周期性任务，单轮失败不应终止循环。
+/// - 不判断 `scheduler_paused`：暂停是「自动调度」的策略，托盘手动触发的检查不应被它拦下。
+///
+/// 由 `services::scheduler` 的自动检查与 `services::tray` 的「检查全部」共同调用。
+pub(crate) async fn run_check_round(
+    data_dir: &Path,
+    app_handle: &tauri::AppHandle,
+) -> Vec<DownloadRecord> {
+    let settings = StorageService::load_settings(data_dir);
+    let yt_dlp_path = settings.yt_dlp_path.clone();
+    let proxy = Some(settings.proxy_url.clone());
+    let cookie_file = Some(settings.cookie_file.clone());
+    let download_dir = PathBuf::from(&settings.download_dir);
+
+    // 只读快照（长耗时阶段不持任何 storage 锁）
+    let subs = StorageService::load_subscriptions(data_dir).unwrap_or_default();
+    let records = StorageService::load_download_records(data_dir).unwrap_or_default();
+    let last_check_time = StorageService::load_state(data_dir)
+        .unwrap_or_default()
+        .last_check_time;
+    let data_dir_buf = data_dir.to_path_buf();
+
+    let mut all_new: Vec<DownloadRecord> = Vec::new();
+    let mut outcomes: Vec<SubCheckOutcome> = Vec::new();
+
+    for sub in subs.iter().filter(|s| !s.paused) {
+        let checked_at = Utc::now().to_rfc3339();
+        match check_and_download(
+            sub,
+            &yt_dlp_path,
+            &proxy,
+            &cookie_file,
+            &download_dir,
+            &data_dir_buf,
+            &last_check_time,
+            &records,
+            app_handle,
+        )
+        .await
+        {
+            Ok(new_records) => {
+                all_new.extend(new_records);
+                outcomes.push(SubCheckOutcome {
+                    sub_id: sub.id.clone(),
+                    checked_at,
+                    status: "success",
+                    error: None,
+                });
+            }
+            Err(e) => {
+                log::error!("check_round: error checking {}: {}", sub.channel_name, e);
+                outcomes.push(SubCheckOutcome {
+                    sub_id: sub.id.clone(),
+                    checked_at,
+                    status: "failed",
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    // 收尾：按 id 增量写回，不再整表覆盖（否则会 clobber
+    // 并发写者对同一订阅其它字段的修改）
+    if !outcomes.is_empty() {
+        if let Err(e) = apply_check_outcomes(data_dir, &outcomes) {
+            log::error!("check_round: apply outcomes failed: {}", e);
+        }
+    }
+
+    // 只更新 last_check_time
+    if let Err(e) = StorageService::update_state(data_dir, |state| {
+        state.last_check_time = Some(Utc::now().to_rfc3339());
+        Ok(())
+    }) {
+        log::error!("check_round: update last_check_time failed: {}", e);
+    }
+
+    // 通知前端刷新
+    let _ = app_handle.emit("scheduler-check-complete", ());
+
+    all_new
+}
+
 /// Core logic for checking a single subscription for new videos and downloading them.
 /// Used by both the command layer and the scheduler.
 pub(crate) async fn check_and_download(
@@ -230,6 +317,10 @@ pub async fn check_subscription(
 }
 
 /// Checks all non-paused subscriptions for new videos and downloads them.
+///
+/// 注意：本函数与 [`run_check_round`] 是同一件事的两份实现（残留重复）。差异在于
+/// 本命令从 `AppContext.settings` 内存缓存取设置、错误向上传播、返回 `Result` 且不 emit
+/// 事件。将来若收敛为一份，需决定设置来源与错误/事件语义的归属。
 #[tauri::command]
 pub async fn check_all_subscriptions(
     state: State<'_, AppContext>,

@@ -148,16 +148,6 @@ export async function getAppState(): Promise<AppState> {
   return invoke<AppState>("get_app_state");
 }
 
-/** Starts the background scheduler. */
-export async function startScheduler(): Promise<void> {
-  return invoke<void>("start_scheduler");
-}
-
-/** Stops the background scheduler. */
-export async function stopScheduler(): Promise<void> {
-  return invoke<void>("stop_scheduler");
-}
-
 /** Validates a download directory path for existence and writability. */
 export async function validateDownloadPath(
   path: string,

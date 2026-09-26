@@ -120,18 +120,6 @@ export default function App() {
     loadSettings();
   }, []);
 
-  // Start the scheduler on mount
-  useEffect(() => {
-    const initScheduler = async () => {
-      try {
-        await api.startScheduler();
-      } catch {
-        // Scheduler start is best-effort
-      }
-    };
-    initScheduler();
-  }, []);
-
   // Listen for download-complete events from the Rust backend
   useEffect(() => {
     const unlistenPromise = listen<{ title: string; channel: string }>(

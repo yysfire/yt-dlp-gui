@@ -15,6 +15,7 @@ use std::sync::Mutex;
 
 use crate::services::StorageService;
 use crate::utils::error::AppError;
+use crate::AppContext;
 use std::path::PathBuf;
 
 macro_rules! include_icon {
@@ -219,7 +220,7 @@ impl TrayService {
         match id {
             "tray_show" => self.toggle_window(app),
             "tray_check_all" => self.handle_check_all(app),
-            "tray_toggle_scheduler" => self.handle_toggle_scheduler(),
+            "tray_toggle_scheduler" => self.handle_toggle_scheduler(app),
             "tray_quit" => self.handle_quit(app),
             _ => log::warn!("Unknown tray menu event: {}", id),
         }
@@ -246,45 +247,35 @@ impl TrayService {
         let app_handle = app.clone();
         let data_dir = self.data_dir.clone();
         tauri::async_runtime::spawn(async move {
-            let subs =
-                StorageService::load_subscriptions(&data_dir).unwrap_or_default();
-            let subs: Vec<_> = subs.into_iter().filter(|s| !s.paused).collect();
-            if subs.is_empty() {
-                return;
-            }
-            let records =
-                StorageService::load_download_records(&data_dir).unwrap_or_default();
-            let settings = StorageService::load_settings(&data_dir);
-            let yt_dlp_path = settings.yt_dlp_path.clone();
-            let proxy = Some(settings.proxy_url.clone());
-            let cookie_file = Some(settings.cookie_file.clone());
-            let download_dir = std::path::PathBuf::from(&settings.download_dir);
-
-            for sub in &subs {
-                let _ = crate::commands::download::check_and_download(
-                    sub,
-                    &yt_dlp_path,
-                    &proxy,
-                    &cookie_file,
-                    &download_dir,
-                    &data_dir,
-                    &None,
-                    &records,
-                    &app_handle,
-                )
-                .await;
-            }
-            let _ = app_handle.emit("scheduler-check-complete", ());
+            // 与自动调度共用同一轮检查逻辑：会写回 last_checked_at 等字段并 emit 事件
+            let _ = crate::commands::download::run_check_round(&data_dir, &app_handle).await;
         });
     }
 
-    fn handle_toggle_scheduler(&self) {
-        let settings = StorageService::load_settings(&self.data_dir);
-        let new_paused = !settings.scheduler_paused;
-        let mut updated = settings;
-        updated.scheduler_paused = new_paused;
-        let _ = StorageService::save_settings(&self.data_dir, &updated);
+    fn handle_toggle_scheduler(&self, app: &AppHandle) {
+        let ctx = app.state::<AppContext>();
 
+        // 1) 读盘取反（不持任何应用级锁）
+        let mut updated = StorageService::load_settings(&self.data_dir);
+        let new_paused = !updated.scheduler_paused;
+        updated.scheduler_paused = new_paused;
+
+        // 2) 先落盘：save_settings 内部只拿全局写锁，并在返回前释放
+        if let Err(e) = StorageService::save_settings(&self.data_dir, &updated) {
+            log::error!("Tray: persist scheduler_paused failed: {}", e);
+            // 写盘失败就不动缓存与菜单，避免内存与磁盘分叉
+            return;
+        }
+
+        // 3) 再同步运行时缓存（独立 Mutex，用完即释放）
+        if let Ok(mut cached) = ctx.settings.lock() {
+            cached.scheduler_paused = new_paused;
+        }
+
+        // 4) 唤醒调度循环，使「恢复定时检查」立即生效而不是等下一个间隔
+        let _ = ctx.scheduler_notify.send(());
+
+        // 5) 更新菜单文案
         let text = TrayState::scheduler_menu_text(new_paused);
         let _ = self.menu_scheduler_item.set_text(text);
 

@@ -19,7 +19,7 @@ npm run tauri dev        # 启动 Tauri 开发模式（前端 + Rust 后端）
 npm run tauri build      # 构建 Tauri 生产二进制文件
 
 # Rust
-cargo test               # 运行所有 Rust 测试（共 234 个单元测试）
+cargo test               # 运行所有 Rust 测试（共 237 个单元测试）
 cargo test -p yt-dlp-gui # 仅运行此包的测试
 cargo build              # 仅构建 Rust 后端
 cargo check              # 快速编译检查，不生成二进制文件
@@ -66,13 +66,13 @@ App.tsx                      # 根组件：主题提供者、暗色模式、事�
 
 > 注意：把状态下移到局部组件时，要确认该组件不会因折叠/切换而卸载（`SubscriptionList` 就依赖「始终挂载、仅 CSS 隐藏」这一点来保住筛选状态）。
 
-**后端通信**: `src/lib/tauri.ts` 封装了全部 40 个 Tauri `invoke()` 调用，返回类型与 `src/types/index.ts` 一致（类型是手写断言，与 Rust 侧 serde 结构各自维护，没有校验机制，改字段时两边都要动）。前端通过 `listen()` 订阅后端推送事件，事件名分散在多个文件中定义，**没有单一契约清单**：
+**后端通信**: `src/lib/tauri.ts` 封装了全部 38 个 Tauri `invoke()` 调用，返回类型与 `src/types/index.ts` 一致（类型是手写断言，与 Rust 侧 serde 结构各自维护，没有校验机制，改字段时两边都要动）。前端通过 `listen()` 订阅后端推送事件，事件名分散在多个文件中定义，**没有单一契约清单**：
 
 - `records-changed` — 记录发生任何变化（无载荷，订阅者各自全量重取；下载队列里 emit 十几处）
 - `download-progress` — 单条下载的进度（带载荷，`useDownloadProgress` 消费）
 - `download-complete` — 单个视频下载完成
 - `queue-changed` — 下载队列状态变化（带载荷）
-- `scheduler-check-complete` — 后台调度器完成一轮检查
+- `scheduler-check-complete` — 任一轮检查完成（自动调度 或 托盘「检查全部」），由 `commands/download.rs::run_check_round` 统一 emit
 - `subscriptions-updated` — 批量导入/删除后
 - `file-sync-complete` — 文件存在性同步结果
 - `health-check-progress` / `health-check-complete` — 健康检查
@@ -83,13 +83,14 @@ App.tsx                      # 根组件：主题提供者、暗色模式、事�
 
 ### Rust 后端（`src-tauri/src/`）
 
-`lib.rs` 定义模块划分、注册命令（40 个，见末尾 `generate_handler!`）、装配全局状态并启动后台任务。
+`lib.rs` 定义模块划分、注册命令（38 个，见末尾 `generate_handler!`）、装配全局状态；后台周期任务委托给 `services::scheduler`。
 
 ```
-commands/               # Tauri IPC 命令处理函数（40 个注册命令）
+commands/               # Tauri IPC 命令处理函数（38 个注册命令）
   subscription.rs       # 订阅增删改查、分组、batch_delete、get_channel_info
   download.rs           # check_subscription / check_all、记录查询、队列控制、get_channel_videos
-  settings.rs           # get/update 设置、get_app_state、路径与代理校验、start/stop_scheduler
+                        #   以及共享的 check_and_download / run_check_round（被 scheduler 与 tray 调用）
+  settings.rs           # get/update 设置、get_app_state、路径与代理校验
   health.rs             # check_all_health / check_selected_health（快照后 spawn 后台任务）
   import_export.rs      # JSON/OPML 导出、三种导入源（OPML 文件 / TXT 文件 / URL 列表）
   file_manager.rs       # 打开所在文件夹、文件存在性检查、删除文件、同步文件状态
@@ -103,8 +104,8 @@ services/               # 业务逻辑（多数无状态，通过参数接收路
   file_manager.rs       # 文件存在性/删除，并与记录状态联动
   settings_validator.rs # 下载路径与代理 URL 校验（纯函数）
   tray.rs               # 系统托盘：菜单、状态、图标
-  scheduler.rs          # 定时器封装 —— 注意：真实调度循环内联在 `lib.rs` 的 setup 里，
-                        #   本文件的 SchedulerService 当前无调用者
+  scheduler.rs          # 后台周期任务：spawn_scheduler（自动检查订阅）+ spawn_file_sync
+                        #   （文件状态同步）。每轮从磁盘重读设置、遵循 scheduler_paused
 
 models/                 # 数据结构（serde 序列化/反序列化）
   subscription.rs, download.rs, settings.rs, import_export.rs, health.rs, video.rs
@@ -115,13 +116,15 @@ utils/
 ```
 
 **关键设计规则**：
-- Commands 层**不包含业务逻辑** —— 仅做参数传递、服务调用和序列化返回。
+- Commands 层**不在命令里写业务逻辑** —— 命令只做参数传递、服务调用和序列化返回。注意 `commands/download.rs` 里有一组 `pub(crate)` 的**非命令**函数（`check_and_download`、`SubCheckOutcome`、`apply_check_outcomes`、`run_check_round`），它们是业务逻辑，被命令层与 `services/`（scheduler、tray）共同调用；`services` → `commands` 的引用在 `tray.rs` 已有先例。
+- 已知残留重复：`check_all_subscriptions` 与 `run_check_round` 是同一件事的两份实现（设置来源、错误传播、返回值、是否 emit 事件不同）。`check_all_subscriptions` 自带循环，收敛需先决定这些语义的归属。
 - Services 层**以无状态为主** —— 通过参数接收路径/配置，不持有全局状态。例外：`download_queue.rs` 与 `tray.rs` 是有状态的（队列、托盘句柄），通过 `AppContext` / `QueueContext` 注入。
-- 全局状态通过 `AppContext`（data_dir + `Mutex<AppSettings>` + scheduler watch channel）与 `QueueContext`（下载队列）管理，通过 `tauri::State` 注入。
+- 全局状态通过 `AppContext`（data_dir + `Mutex<AppSettings>` + scheduler watch channel）与 `QueueContext`（下载队列）管理，通过 `tauri::State` 注入。`scheduler_notify`（watch channel）由设置更新与托盘的暂停切换共同 `send`，调度循环消费；**发送端必须保持存活**，否则 `changed()` 立即返回 `Err` 造成忙循环。
+- **设置不要用快照冻结**：调度循环每轮从磁盘 `load_settings` 重读，因此改 yt-dlp 路径 / 代理 / Cookie / 下载目录无需重启即生效。新增长期运行的任务时同样按轮读取，不要持有 setup 时的设置快照。
 - 持有 `MutexGuard` 时，**先克隆值并释放锁，再进行 `await`**，避免跨异步边界持有互斥锁。**特别注意不要持锁跨越阻塞式子进程调用**（如 yt-dlp）。
 - **持久化写入只有一个入口**：`StorageService::update_download_records` / `update_subscriptions` / `update_state`（闭包式事务，内部持有全局写锁）。`save_subscriptions` / `save_download_records` / `save_state` 是私有原语，外部不可调用（编译器强制）；`load_*` 不加锁。
   事务闭包内**禁止**：调用 `update_*` / `save_settings`（`std::sync::Mutex` 不可重入，会死锁；debug 构建下会 panic 提示）、获取任何其他应用级锁、做文件 I/O。锁序固定为 `QueueContext.queue → 写锁`，不要引入反向路径。
-- **不要用陈旧快照整体覆盖**：跨 `await` 的长流程（`lib.rs` 的 scheduler 循环、`check_all_subscriptions`）一律「边跑边收集结果（`SubCheckOutcome`），收尾按 id 做一次增量事务」。用循环开始时的快照整表 `save` 会 clobber 并发写者（健康检查、单订阅命令）对其它订阅字段的修改。
+- **不要用陈旧快照整体覆盖**：跨 `await` 的长流程（`scheduler.rs` 的调度循环、`check_all_subscriptions`、`run_check_round`）一律「边跑边收集结果（`SubCheckOutcome`），收尾按 id 做一次增量事务」。用循环开始时的快照整表 `save` 会 clobber 并发写者（健康检查、单订阅命令）对其它订阅字段的修改。
 - **不要新增派生计数字段**：`Subscription` 与 `AppState` 都**不**再持有「已下载数」。唯一真相源是 `download_records.json`，数量由前端从 `records` 派生（口径 = `status === "completed"` 的记录条数，见 `AppShell.tsx` 与 `DetailPanel.tsx`）。历史上该字段有「完成回调增量」与「启动重算」两个语义不同的写者，导致显示不一致——不要重新引入。
 
 **`check_and_download()`**（`commands/download.rs`）是检查入口：按 `last_check_time` 换算日期下界 → `yt-dlp --flat-playlist` 取新视频 → 对已有记录去重（`failed` 可重试）→ 逐个交给 `DownloadQueue::enqueue_from_video()` 入队。**真正的下载、进度解析与记录状态落库都在 `download_queue.rs` 的 `execute_download_with_control()` 里**（该函数按 `video_url + subscription_id` 定位记录并做事务写入）。
