@@ -4,11 +4,21 @@ import { listen } from "@tauri-apps/api/event";
 import * as api from "@/lib/tauri";
 import type { AppState } from "@/types";
 
-/** Bottom status bar showing last check time, download count, and scheduler status. */
-export default function StatusBar({ refreshTrigger }: { refreshTrigger?: string | null }) {
+/**
+ * Bottom status bar showing last check time, completed download count, and scheduler status.
+ *
+ * 已完成数由父组件从下载记录派生后传入（单一真相源是下载记录，后端不再维护计数字段）；
+ * 本组件只负责从后端取 `last_check_time`。
+ */
+export default function StatusBar({
+  refreshTrigger,
+  completedCount = 0,
+}: {
+  refreshTrigger?: string | null;
+  completedCount?: number;
+}) {
   const [state, setState] = useState<AppState>({
     last_check_time: null,
-    total_downloads: 0,
   });
 
   const refresh = useCallback(async () => {
@@ -64,7 +74,7 @@ export default function StatusBar({ refreshTrigger }: { refreshTrigger?: string 
         上次检查: {formatTime(state.last_check_time)}
       </Typography>
       <Typography variant="caption" color="text.secondary">
-        已下载: {state.total_downloads} 个视频
+        已下载: {completedCount} 个视频
       </Typography>
     </Box>
   );

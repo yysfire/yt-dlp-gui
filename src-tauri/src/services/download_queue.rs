@@ -529,20 +529,8 @@ impl DownloadQueue {
                     }
                 }
 
-                // Increment total downloads counter
-                let _ = StorageService::update_state(&ctx.data_dir, |app_state| {
-                    app_state.total_downloads += 1;
-                    Ok(())
-                });
-
-                // Increment per-subscription download count
-                let _ = StorageService::update_subscriptions(&ctx.data_dir, |subs| {
-                    if let Some(sub) = subs.iter_mut().find(|s| s.id == task.subscription_id) {
-                        sub.download_count += 1;
-                    }
-                    Ok(())
-                });
-
+                // 计数不再在写端维护：前端的「已下载」由下载记录派生
+                // （口径 = status == "completed" 的条数），故此处只需落状态并通知刷新。
                 let _ = app_handle.emit("records-changed", ());
             }
             _ => {

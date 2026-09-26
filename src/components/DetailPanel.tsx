@@ -347,6 +347,13 @@ export default function DetailPanel({
     }
   }, [videoList, records, queueTasks]);
 
+  // 已下载数从 records 派生（唯一真相源是下载记录，不再由后端维护计数字段）。
+  // 口径：当前仍处于 completed 的记录条数。必须放在下方提前返回之前。
+  const completedCount = useMemo(
+    () => records.filter((r) => r.status === "completed").length,
+    [records],
+  );
+
   if (!subscription) {
     return (
       <Box
@@ -432,7 +439,7 @@ export default function DetailPanel({
           {/* Per-subscription stats */}
           <div className="flex items-center gap-2 mt-1">
             <Typography variant="caption" color="text.secondary">
-              已下载: {subscription.download_count} 个
+              已下载: {completedCount} 个
             </Typography>
             {channelInfo?.subscriber_count && (
               <Typography variant="caption" color="text.secondary">

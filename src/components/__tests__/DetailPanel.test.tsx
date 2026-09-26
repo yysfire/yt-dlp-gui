@@ -28,7 +28,6 @@ function makeSub(overrides: Partial<Subscription> = {}): Subscription {
     group_name: "未分组",
     created_at: "2026-01-01T00:00:00Z",
     last_checked_at: null,
-    download_count: 0,
     last_check_status: null,
     last_check_error: null,
     tags: [],
@@ -102,14 +101,30 @@ describe("DetailPanel", () => {
 
     it("显示下载统计", async () => {
       const sub = makeSub({
-        download_count: 5,
         last_checked_at: "2026-06-10T12:00:00Z",
       });
+      // 已下载数现在由 records 派生（口径：处于 completed 的记录条数）
+      const completedRecords: DownloadRecord[] = Array.from(
+        { length: 5 },
+        (_, i) => ({
+          id: `rec-${i}`,
+          subscription_id: "sub-1",
+          video_id: `vid-${i}`,
+          video_title: `Video ${i}`,
+          video_url: `https://youtu.be/${i}`,
+          file_path: `/tmp/${i}.mp4`,
+          file_size: 1000,
+          status: "completed",
+          error_message: null,
+          downloaded_at: "2026-06-10T12:00:00Z",
+        }),
+      );
 
       render(
         <DetailPanel
           subscription={sub}
           {...defaultProps}
+          records={completedRecords}
         />,
       );
 
@@ -155,7 +170,7 @@ describe("DetailPanel", () => {
       expect(screen.getByText(/此频道已失效/)).toBeInTheDocument();
     });
 
-    it("health_status 为 dead 时不显示下载记录", () => {
+    it("health_status 为 dead 时不渲染视频列表空态", () => {
       const sub = makeSub({ health_status: "dead" });
 
       render(
@@ -165,13 +180,13 @@ describe("DetailPanel", () => {
         />,
       );
 
-      // 失效率频道不应显示下载记录区域
-      expect(screen.queryByText("暂无下载记录")).toBeNull();
+      // 失效率频道不应渲染视频列表区域（空态文案为「暂无视频」）
+      expect(screen.queryByText("暂无视频")).toBeNull();
     });
   });
 
   describe("视频列表分页", () => {
-    it("加载完成后显示下载记录区域", async () => {
+    it("无视频时显示空列表提示", async () => {
       const sub = makeSub();
 
       render(
@@ -183,7 +198,7 @@ describe("DetailPanel", () => {
 
       // 等待异步视频数据加载完成
       await waitFor(() => {
-        expect(screen.getByText("暂无下载记录")).toBeInTheDocument();
+        expect(screen.getByText("暂无视频")).toBeInTheDocument();
       });
     });
   });

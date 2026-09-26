@@ -93,6 +93,8 @@ export default function AppShell({
     ? records.filter((r) => r.subscription_id === selectedId)
     : [];
   const downloadCount = records.filter((r) => r.status !== "deleted").length;
+  // 状态栏的「已下载」只数当前处于 completed 的记录（与上方侧边栏徽标口径不同）。
+  const completedCount = records.filter((r) => r.status === "completed").length;
 
   const refreshQueue = useCallback(async () => {
     try {
@@ -241,7 +243,10 @@ export default function AppShell({
               />
             )}
           </div>
-          <StatusBar refreshTrigger={activeView === "detail" ? selectedId : undefined} />
+          <StatusBar
+            refreshTrigger={activeView === "detail" ? selectedId : undefined}
+            completedCount={completedCount}
+          />
         </div>
       </div>
 

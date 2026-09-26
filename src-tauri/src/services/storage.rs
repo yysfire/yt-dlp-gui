@@ -266,54 +266,6 @@ impl StorageService {
         })
     }
 
-    /// Recomputes total_downloads from actual download records and syncs state.json.
-    /// Fixes any discrepancy caused by race conditions or interrupted writes.
-    pub fn recompute_total_downloads(data_dir: &Path) -> Result<u32, AppError> {
-        // 先只读取记录快照，再在事务内只更新 total_downloads —— 避免覆盖并发写者
-        // （如下载完成回调）对 state 其它字段的修改。
-        let records = Self::load_download_records(data_dir)?;
-        let actual = records.iter().filter(|r| r.status == "completed").count() as u32;
-
-        Self::update_state(data_dir, |state| {
-            if state.total_downloads != actual {
-                log::info!(
-                    "Recomputing total_downloads: {} → {} (from {} records, {} completed)",
-                    state.total_downloads,
-                    actual,
-                    records.len(),
-                    actual
-                );
-                state.total_downloads = actual;
-            }
-            Ok(actual)
-        })
-    }
-
-    /// Recomputes per-subscription download_count from actual completed records.
-    pub fn recompute_subscription_download_counts(data_dir: &Path) -> Result<(), AppError> {
-        // 同样先读记录快照，再在事务内只更新 download_count 字段。
-        let records = Self::load_download_records(data_dir)?;
-
-        Self::update_subscriptions(data_dir, |subs| {
-            for sub in subs.iter_mut() {
-                let count = records
-                    .iter()
-                    .filter(|r| r.subscription_id == sub.id && r.status == "completed")
-                    .count() as u32;
-                if sub.download_count != count {
-                    log::info!(
-                        "Recomputing download_count for {}: {} → {}",
-                        sub.channel_name,
-                        sub.download_count,
-                        count
-                    );
-                    sub.download_count = count;
-                }
-            }
-            Ok(())
-        })
-    }
-
     // ── Settings ────────────────────────────────────────────────────
 
     /// Loads settings from `settings.json`. Returns defaults if the file
@@ -693,7 +645,6 @@ mod tests {
         let state = StorageService::load_state(tmp.path())
             .expect("should not error on missing file");
         assert_eq!(state.last_check_time, None);
-        assert_eq!(state.total_downloads, 0);
     }
 
     #[test]
@@ -701,7 +652,6 @@ mod tests {
         let tmp = setup_temp_dir();
         let state = AppState {
             last_check_time: Some("2025-05-28T15:00:00Z".to_string()),
-            total_downloads: 123,
         };
 
         StorageService::save_state(tmp.path(), &state)
@@ -710,7 +660,6 @@ mod tests {
         let loaded = StorageService::load_state(tmp.path())
             .expect("load should succeed");
         assert_eq!(loaded.last_check_time, state.last_check_time);
-        assert_eq!(loaded.total_downloads, state.total_downloads);
     }
 
     #[test]
@@ -800,28 +749,34 @@ mod tests {
         assert_eq!(records.len(), N, "并发追加不应丢失任何一条记录");
     }
 
+    /// 旧格式 state.json（含已删除的 total_downloads 键）应能被事务更新正常处理，
+    /// 且更新后不再写出该键。覆盖「向后兼容」与「事务语义」两点。
     #[test]
-    fn test_update_state_preserves_untouched_fields() {
+    fn test_update_state_handles_legacy_state_file() {
         let tmp = setup_temp_dir();
         let dir = tmp.path();
-        StorageService::update_state(dir, |state| {
-            state.total_downloads = 5;
-            Ok(())
-        })
-        .expect("seed state failed");
+        let path = dir.join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"last_check_time":"2025-01-01T00:00:00Z","total_downloads":47}"#,
+        )
+        .expect("seed legacy state file");
 
         StorageService::update_state(dir, |state| {
             state.last_check_time = Some("2026-01-01T00:00:00Z".to_string());
             Ok(())
         })
-        .expect("update should succeed");
+        .expect("update should succeed on legacy file");
 
         let state = StorageService::load_state(dir).expect("load should succeed");
-        assert_eq!(
-            state.total_downloads, 5,
-            "只改 last_check_time 不应影响 total_downloads"
-        );
         assert_eq!(state.last_check_time.as_deref(), Some("2026-01-01T00:00:00Z"));
+
+        let raw = std::fs::read_to_string(&path).expect("read state.json");
+        assert!(
+            !raw.contains("total_downloads"),
+            "已删除的字段不应再被写出，实际内容: {}",
+            raw
+        );
     }
 
     #[test]

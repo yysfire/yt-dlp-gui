@@ -78,12 +78,6 @@ pub fn run() {
             // Deduplicate download records from previous sessions
             let _ = StorageService::deduplicate_records(&data_dir_clone);
 
-            // Recompute total_downloads from actual completed records
-            let _ = StorageService::recompute_total_downloads(&data_dir_clone);
-
-            // Recompute per-subscription download counts from records
-            let _ = StorageService::recompute_subscription_download_counts(&data_dir_clone);
-
             // Initialize the global download queue
             let app_handle = app.handle().clone();
             let queue = DownloadQueue::new(app_handle.clone(), max_concurrent);
@@ -217,7 +211,7 @@ pub fn run() {
                     }
 
                     // 收尾：按 id 增量写回，不再整表覆盖（否则会 clobber
-                    // 并发下载回调写入的 download_count）
+                    // 并发写者对同一订阅其它字段的修改）
                     if !outcomes.is_empty() {
                         let _ = commands::download::apply_check_outcomes(
                             &data_dir_clone,
@@ -225,7 +219,7 @@ pub fn run() {
                         );
                     }
 
-                    // 只更新 last_check_time，保留并发写入的 total_downloads
+                    // 只更新 last_check_time
                     let _ = StorageService::update_state(&data_dir_clone, |state| {
                         state.last_check_time = Some(chrono::Utc::now().to_rfc3339());
                         Ok(())

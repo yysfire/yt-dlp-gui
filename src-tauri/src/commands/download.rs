@@ -13,7 +13,7 @@ use crate::QueueContext;
 /// 单个订阅一轮检查完成后需要落库的结果。
 ///
 /// 只携带订阅 id 与要更新的字段，不携带订阅快照 —— 收尾时按 id 在事务内增量应用，
-/// 因此不会覆盖并发下载回调写入的 `download_count` 等字段。
+/// 因此不会覆盖并发写者（健康检查、批量导入、单个订阅命令）对同一订阅其它字段的修改。
 pub(crate) struct SubCheckOutcome {
     pub sub_id: String,
     pub checked_at: String,
@@ -219,7 +219,7 @@ pub async fn check_subscription(
     )
     .map_err(|e| e.to_string())?;
 
-    // 只更新 last_check_time，保留并发下载回调写入的 total_downloads
+    // 只更新 last_check_time
     StorageService::update_state(&state.data_dir, |app_state| {
         app_state.last_check_time = Some(chrono::Utc::now().to_rfc3339());
         Ok(())
@@ -310,12 +310,12 @@ pub async fn check_all_subscriptions(
     }
 
     // 收尾：一次事务按 id 增量写回 —— 不再用陈旧快照整表覆盖，
-    // 因此不会 clobber 并发下载回调写入的 download_count。
+    // 因此不会 clobber 并发写者（健康检查、单订阅命令）对其它订阅字段的修改。
     if !outcomes.is_empty() {
         apply_check_outcomes(&state.data_dir, &outcomes).map_err(|e| e.to_string())?;
     }
 
-    // 只更新 last_check_time，保留并发写入的 total_downloads
+    // 只更新 last_check_time
     StorageService::update_state(&state.data_dir, |app_state| {
         app_state.last_check_time = Some(Utc::now().to_rfc3339());
         Ok(())

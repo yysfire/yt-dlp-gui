@@ -53,27 +53,15 @@ pub async fn update_settings(
     Ok(settings)
 }
 
-/// Returns the current application state (last check time, total downloads).
+/// Returns the current application state (last check time).
+///
+/// 已下载数不再由本命令返回：它由前端从下载记录派生（口径 = `status == "completed"`
+/// 的记录条数），因此这里是纯读，不再有「读时修正并写回」的行为。
 #[tauri::command]
 pub async fn get_app_state(
     state: State<'_, AppContext>,
 ) -> Result<AppState, String> {
-    // 只读取记录快照（不加锁）算出真实完成数；读失败则跳过重算
-    let actual = StorageService::load_download_records(&state.data_dir)
-        .map(|records| records.iter().filter(|r| r.status == "completed").count() as u32)
-        .ok();
-
-    // 事务内只修正 total_downloads —— 不再用陈旧快照整体覆盖，避免 clobber
-    // 并发下载回调对 total_downloads 的增量。
-    StorageService::update_state(&state.data_dir, |app_state| {
-        if let Some(actual) = actual {
-            if app_state.total_downloads != actual {
-                app_state.total_downloads = actual;
-            }
-        }
-        Ok(app_state.clone())
-    })
-    .map_err(|e| e.to_string())
+    StorageService::load_state(&state.data_dir).map_err(|e| e.to_string())
 }
 
 /// The background scheduler is managed by lib.rs setup. This command exists

@@ -70,15 +70,12 @@ impl Default for AppSettings {
 pub struct AppState {
     /// ISO 8601 timestamp of the last time all subscriptions were checked
     pub last_check_time: Option<String>,
-    /// Running total of completed downloads
-    pub total_downloads: u32,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             last_check_time: None,
-            total_downloads: 0,
         }
     }
 }
@@ -311,14 +308,12 @@ mod tests {
         let state = AppState::default();
 
         assert_eq!(state.last_check_time, None);
-        assert_eq!(state.total_downloads, 0);
     }
 
     #[test]
     fn test_app_state_serde_roundtrip() {
         let state = AppState {
             last_check_time: Some("2025-05-28T12:00:00+00:00".to_string()),
-            total_downloads: 42,
         };
 
         let json = serde_json::to_string(&state).expect("serialization should succeed");
@@ -326,7 +321,6 @@ mod tests {
             serde_json::from_str(&json).expect("deserialization should succeed");
 
         assert_eq!(deserialized.last_check_time, state.last_check_time);
-        assert_eq!(deserialized.total_downloads, state.total_downloads);
     }
 
     #[test]
@@ -346,11 +340,30 @@ mod tests {
     fn test_app_state_json_keys() {
         let state = AppState {
             last_check_time: Some("2025-01-01T00:00:00Z".to_string()),
-            total_downloads: 100,
         };
         let json_value = serde_json::to_value(&state).expect("should serialize");
 
-        assert!(json_value["total_downloads"].is_number());
-        assert_eq!(json_value["total_downloads"].as_u64().unwrap(), 100);
+        assert!(json_value.get("last_check_time").is_some());
+        assert!(
+            json_value.get("total_downloads").is_none(),
+            "total_downloads 已改为前端从下载记录派生，不应再序列化"
+        );
+    }
+
+    #[test]
+    fn test_app_state_backward_compat_ignores_total_downloads() {
+        // 旧 state.json 含已删除的 total_downloads 键，应能正常加载且保留 last_check_time
+        let old_json = r#"{
+            "last_check_time": "2025-01-01T00:00:00Z",
+            "total_downloads": 47
+        }"#;
+
+        let state: AppState =
+            serde_json::from_str(old_json).expect("backward compat deserialization");
+
+        assert_eq!(
+            state.last_check_time,
+            Some("2025-01-01T00:00:00Z".to_string())
+        );
     }
 }

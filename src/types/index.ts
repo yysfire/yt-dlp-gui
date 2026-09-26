@@ -33,7 +33,6 @@ export interface Subscription {
   group_name: string;
   created_at: string; // ISO 8601
   last_checked_at: string | null;
-  download_count: number;
   last_check_status: "success" | "failed" | null;
   last_check_error: string | null;
   /** 分组标签名数组（如 ["学习", "音乐"]） */
@@ -265,7 +264,6 @@ export interface VideoListResult {
 /** Runtime application state. */
 export interface AppState {
   last_check_time: string | null;
-  total_downloads: number;
 }
 
 /** Predefined subscription groups. */
