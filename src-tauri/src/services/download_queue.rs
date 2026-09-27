@@ -253,7 +253,7 @@ impl DownloadQueue {
             all_records.push(record);
             Ok(())
         })?;
-        let _ = self.app_handle.emit("records-changed", ());
+        self.notify_records_changed();
 
         let mut queue = self.queue.lock().unwrap();
         queue.push_back(DownloadTask {
@@ -359,11 +359,6 @@ impl DownloadQueue {
                     let default_dir = crate::models::settings::default_download_dir();
                     let default = std::path::PathBuf::from(&default_dir);
                     let _ = std::fs::create_dir_all(&default);
-                    let _ = app_handle.emit("records-changed", serde_json::json!({
-                        "path_fallback": true,
-                        "original": ctx.download_dir.to_string_lossy(),
-                        "fallback": default_dir,
-                    }));
                     default
                 }
             }
@@ -531,7 +526,7 @@ impl DownloadQueue {
 
                 // 计数不再在写端维护：前端的「已下载」由下载记录派生
                 // （口径 = status == "completed" 的条数），故此处只需落状态并通知刷新。
-                let _ = app_handle.emit("records-changed", ());
+                notify_records_changed(app_handle);
             }
             _ => {
                 log::error!("yt-dlp process failed for {}", task.video_title);
@@ -566,7 +561,7 @@ impl DownloadQueue {
                     });
                 }
 
-                let _ = app_handle.emit("records-changed", ());
+                notify_records_changed(app_handle);
             }
         }
     }
@@ -600,7 +595,7 @@ impl DownloadQueue {
 
         if let Some((video_url, subscription_id)) = paused_info {
             self.update_record_status(data_dir, &video_url, &subscription_id, "paused", None);
-            let _ = self.app_handle.emit("records-changed", ());
+            self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
@@ -623,7 +618,7 @@ impl DownloadQueue {
 
         if let Some((video_url, subscription_id)) = waiting_paused {
             self.update_record_status(data_dir, &video_url, &subscription_id, "paused", None);
-            let _ = self.app_handle.emit("records-changed", ());
+            self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
@@ -660,7 +655,7 @@ impl DownloadQueue {
 
         if let Some((video_url, subscription_id)) = resumed_info {
             self.update_record_status(data_dir, &video_url, &subscription_id, "downloading", None);
-            let _ = self.app_handle.emit("records-changed", ());
+            self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
@@ -683,7 +678,7 @@ impl DownloadQueue {
 
         if let Some((video_url, subscription_id)) = waiting_resumed {
             self.update_record_status(data_dir, &video_url, &subscription_id, "downloading", None);
-            let _ = self.app_handle.emit("records-changed", ());
+            self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
@@ -716,7 +711,7 @@ impl DownloadQueue {
             Some((url, sub_id)) => {
                 log::info!("Paused download by url {}", video_url);
                 self.update_record_status(data_dir, &url, &sub_id, "paused", None);
-                let _ = self.app_handle.emit("records-changed", ());
+                self.notify_records_changed();
                 self.emit_queue_changed();
                 Ok(())
             }
@@ -739,7 +734,7 @@ impl DownloadQueue {
                     Some((url, sub_id)) => {
                         log::info!("Paused waiting download by url {}", video_url);
                         self.update_record_status(data_dir, &url, &sub_id, "paused", None);
-                        let _ = self.app_handle.emit("records-changed", ());
+                        self.notify_records_changed();
                         self.emit_queue_changed();
                         Ok(())
                     }
@@ -776,7 +771,7 @@ impl DownloadQueue {
 
         if let Some(id) = waiting_id {
             self.update_record_status(&ctx.data_dir, video_url, "", "cancelled", Some("Cancelled by user".to_string()));
-            let _ = self.app_handle.emit("records-changed", ());
+            self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
@@ -819,7 +814,7 @@ impl DownloadQueue {
                 Ok(())
             });
 
-            let _ = self.app_handle.emit("records-changed", ());
+            self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
@@ -837,7 +832,7 @@ impl DownloadQueue {
 
         if let Some(task) = cancelled_task {
             self.update_record_status(&ctx.data_dir, &task.video_url, &task.subscription_id, "cancelled", Some("Cancelled by user".to_string()));
-            let _ = self.app_handle.emit("records-changed", ());
+            self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
@@ -981,6 +976,19 @@ impl DownloadQueue {
         let state = self.get_state();
         let _ = self.app_handle.emit("queue-changed", state);
     }
+
+    /// 见模块级 [`notify_records_changed`] —— 仅为对齐 `self.emit_queue_changed()` 的调用样式。
+    fn notify_records_changed(&self) {
+        notify_records_changed(&self.app_handle);
+    }
+}
+
+/// 通知前端「下载记录已变化」（无载荷）。
+///
+/// 纯 emit：零 I/O、零加锁、不阻塞，因此可在任意临界区内安全调用。
+/// 契约：凡写 `download_records.json` 的路径都必须调用本函数。
+pub(crate) fn notify_records_changed(app_handle: &tauri::AppHandle) {
+    let _ = app_handle.emit("records-changed", ());
 }
 
 #[cfg(test)]

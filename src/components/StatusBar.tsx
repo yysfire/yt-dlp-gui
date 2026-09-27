@@ -35,15 +35,14 @@ export default function StatusBar({
   }, [refresh, refreshTrigger]);
 
   useEffect(() => {
-    // Periodic refresh as safety net
+    // 周期性兜底刷新
     const interval = setInterval(refresh, 60_000);
-    // Instant refresh on record changes and scheduler completion
-    const unlistenRecordsPromise = listen("records-changed", () => { refresh(); });
-    const unlistenSchedulerPromise = listen("scheduler-check-complete", () => { refresh(); });
+    // 任一次检查完成时立即刷新 —— last_check_time 只在那里被写入
+    // （records-changed 与本组件无关：它的 emit 点无一写 last_check_time）
+    const unlistenPromise = listen("scheduler-check-complete", () => { refresh(); });
     return () => {
       clearInterval(interval);
-      unlistenRecordsPromise.then((fn) => fn());
-      unlistenSchedulerPromise.then((fn) => fn());
+      unlistenPromise.then((fn) => fn());
     };
   }, [refresh]);
 

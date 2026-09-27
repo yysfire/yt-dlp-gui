@@ -66,13 +66,13 @@ App.tsx                      # 根组件：主题提供者、暗色模式、事�
 
 > 注意：把状态下移到局部组件时，要确认该组件不会因折叠/切换而卸载（`SubscriptionList` 就依赖「始终挂载、仅 CSS 隐藏」这一点来保住筛选状态）。
 
-**后端通信**: `src/lib/tauri.ts` 封装了全部 38 个 Tauri `invoke()` 调用，返回类型与 `src/types/index.ts` 一致（类型是手写断言，与 Rust 侧 serde 结构各自维护，没有校验机制，改字段时两边都要动）。前端通过 `listen()` 订阅后端推送事件，事件名分散在多个文件中定义，**没有单一契约清单**：
+**后端通信**: `src/lib/tauri.ts` 封装了全部 38 个 Tauri `invoke()` 调用，返回类型与 `src/types/index.ts` 一致（类型是手写断言，与 Rust 侧 serde 结构各自维护，没有校验机制，改字段时两边都要动）。前端通过 `listen()` 订阅后端推送事件，事件名分散在多个文件中定义，**没有单一契约清单**（下面这份即事实上的契约，改事件名或载荷时请同步此处）：
 
-- `records-changed` — 记录发生任何变化（无载荷，订阅者各自全量重取；下载队列里 emit 十几处）
+- `records-changed` — 下载记录发生变化（**无载荷**）。**唯一订阅者是 `App.tsx`**（`AppShell` 只订 `queue-changed`，`StatusBar` 只订 `scheduler-check-complete`）。所有 emit 统一走 `services/download_queue.rs::notify_records_changed`（纯 emit，零 I/O 零加锁，可在临界区安全调用）；契约：**凡写 `download_records.json` 的路径都必须调用它**
 - `download-progress` — 单条下载的进度（带载荷，`useDownloadProgress` 消费）
-- `download-complete` — 单个视频下载完成
+- `download-complete` — 单个视频下载完成。注意它 emit 于记录落库**之前**，刷新职责实际由 `records-changed` 覆盖，属清理候选
 - `queue-changed` — 下载队列状态变化（带载荷）
-- `scheduler-check-complete` — 任一轮检查完成（自动调度 或 托盘「检查全部」），由 `commands/download.rs::run_check_round` 统一 emit
+- `scheduler-check-complete` — **任一次检查完成**：自动调度与托盘「检查全部」经 `run_check_round`，手动「检查全部」经 `check_all_subscriptions`，手动单订阅经 `check_subscription`；均在该次检查的 `last_check_time` 落盘后 emit。语义是「一次检查完成」，**不是**「调度器轮次」
 - `subscriptions-updated` — 批量导入/删除后
 - `file-sync-complete` — 文件存在性同步结果
 - `health-check-progress` / `health-check-complete` — 健康检查
@@ -99,6 +99,7 @@ commands/               # Tauri IPC 命令处理函数（38 个注册命令）
 services/               # 业务逻辑（多数无状态，通过参数接收路径/配置）
   storage.rs            # JSON 持久化 + 写事务（见「持久化」一节）
   download_queue.rs     # 下载队列：并发控制、子进程生命周期、暂停/恢复/取消（有状态）
+                        #   并导出 notify_records_changed —— records-changed 的唯一 emit 入口
   ytdlp.rs              # yt-dlp 命令行封装（解析频道、检查视频、下载视频）
   opml.rs               # OPML 2.0 XML 导入/导出（quick-xml）
   health.rs             # HTTP 健康检查（reqwest）
@@ -128,6 +129,8 @@ utils/
   事务闭包内**禁止**：调用 `update_*` / `save_settings`（`std::sync::Mutex` 不可重入，会死锁；debug 构建下会 panic 提示）、获取任何其他应用级锁、做文件 I/O。锁序固定为 `QueueContext.queue → 写锁`，不要引入反向路径。
 - **不要用陈旧快照整体覆盖**：跨 `await` 的长流程（`scheduler.rs` 的调度循环、`check_all_subscriptions`、`run_check_round`）一律「边跑边收集结果（`SubCheckOutcome`），收尾按 id 做一次增量事务」。用循环开始时的快照整表 `save` 会 clobber 并发写者（健康检查、单订阅命令）对其它订阅字段的修改。
 - **不要新增派生计数字段**：`Subscription` 与 `AppState` 都**不**再持有「已下载数」。唯一真相源是 `download_records.json`，数量由前端从 `records` 派生（口径 = `status === "completed"` 的记录条数，见 `AppShell.tsx` 与 `DetailPanel.tsx`）。历史上该字段有「完成回调增量」与「启动重算」两个语义不同的写者，导致显示不一致——不要重新引入。
+- **写操作与事件成对**：凡修改持久化数据的路径，必须在写事务完成后 emit 对应事件 —— 记录改动 → `services/download_queue.rs::notify_records_changed`，队列改动 → `DownloadQueue::emit_queue_changed`，settings 改动 → `settings-changed`。emit 一律是**纯 emit**（零 I/O、零加锁），因此可在任意临界区内安全调用；不要为了构造载荷去读文件或加锁。前端对高频事件做短延时合并（`App.tsx` 的 `scheduleRefresh`，150ms 窗口内只排一次，用 schedule-once 而非 debounce 以免连续事件把刷新无限推迟）。
+- 已知死代码（无消费方，待清理）：`useDownloadRecords` 的 `getQueueState` / `getQueue`、`src/lib/tauri.ts` 的 `getQueueState`、后端 `get_queue_state` 命令。
 
 **`check_and_download()`**（`commands/download.rs`）是检查入口：按 `last_check_time` 换算日期下界 → `yt-dlp --flat-playlist` 取新视频 → 对已有记录去重（`failed` 可重试）→ 逐个交给 `DownloadQueue::enqueue_from_video()` 入队。**真正的下载、进度解析与记录状态落库都在 `download_queue.rs` 的 `execute_download_with_control()` 里**（该函数按 `video_url + subscription_id` 定位记录并做事务写入）。
 

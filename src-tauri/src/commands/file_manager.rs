@@ -2,6 +2,7 @@ use std::path::Path;
 
 use tauri::{Emitter, State};
 
+use crate::services::download_queue::notify_records_changed;
 use crate::services::file_manager::{self, FileExistenceResult};
 use crate::services::StorageService;
 use crate::AppContext;
@@ -127,7 +128,7 @@ pub async fn delete_file(
         .map_err(|e| e.to_string())?;
 
     // Notify frontend to refresh records
-    let _ = app_handle.emit("records-changed", ());
+    notify_records_changed(&app_handle);
     Ok(())
 }
 

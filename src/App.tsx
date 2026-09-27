@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   ThemeProvider,
   createTheme,
@@ -102,6 +102,29 @@ export default function App() {
     clearResults: clearHealthResults,
   } = useHealthCheck(refreshSubs);
 
+  // 唯一的事件合并点：同一批后端事件只触发一次 records + subs 全量拉取。
+  //
+  // 用「窗口内只排一次」而不是 debounce —— debounce 在连续入队（背靠背的同步循环）时
+  // 会被不断推迟，永远不会刷新。150ms 足以把一批事件吞进同一窗口，又远低于人眼可感的
+  // 阈值；交互反馈（暂停/取消/恢复）走 queue-changed 到 AppShell，不经过这里。
+  const refreshTimerRef = useRef<number | null>(null);
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current !== null) return; // 本窗口已排定 → 合并
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      void refreshRecords();
+      void refreshSubs();
+    }, 150);
+  }, [refreshRecords, refreshSubs]);
+
+  // StrictMode 双挂载下清理挂起的 timer，避免卸载后仍触发刷新
+  useEffect(() => () => {
+    if (refreshTimerRef.current !== null) {
+      window.clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = null;
+    }
+  }, []);
+
   // Load dark mode preference from settings on mount
   useEffect(() => {
     const loadSettings = async () => {
@@ -125,45 +148,44 @@ export default function App() {
   useEffect(() => {
     const unlistenPromise = listen<{ title: string; channel: string }>(
       "download-complete",
-      (_event) => {
-        refreshRecords();
+      () => {
+        scheduleRefresh();
       },
     );
     return () => {
       unlistenPromise.then((fn) => fn());
     };
-  }, [refreshRecords]);
+  }, [scheduleRefresh]);
 
   // Listen for records-changed events (real-time status updates during check)
   useEffect(() => {
     const unlistenPromise = listen("records-changed", () => {
-      refreshRecords();
+      scheduleRefresh();
     });
     return () => {
       unlistenPromise.then((fn) => fn());
     };
-  }, [refreshRecords]);
+  }, [scheduleRefresh]);
 
-  // Listen for scheduler-check-complete (background check finished)
+  // Listen for scheduler-check-complete (a check round finished — auto, tray, or manual)
   useEffect(() => {
     const unlistenPromise = listen("scheduler-check-complete", () => {
-      refreshRecords();
-      refreshSubs();
+      scheduleRefresh();
     });
     return () => {
       unlistenPromise.then((fn) => fn());
     };
-  }, [refreshRecords, refreshSubs]);
+  }, [scheduleRefresh]);
 
   // Listen for subscriptions-updated (batch import / batch delete completed)
   useEffect(() => {
     const unlistenPromise = listen("subscriptions-updated", () => {
-      refreshSubs();
+      scheduleRefresh();
     });
     return () => {
       unlistenPromise.then((fn) => fn());
     };
-  }, [refreshSubs]);
+  }, [scheduleRefresh]);
 
   // Listen for settings-changed (settings were saved to disk and cache was synced)
   useEffect(() => {

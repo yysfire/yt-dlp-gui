@@ -100,15 +100,13 @@ export default function AppShell({
 
   useEffect(() => {
     refreshQueue();
-    const unlistenQueuePromise = listen<QueueState>("queue-changed", () => {
-      refreshQueue();
-    });
-    const unlistenRecordsPromise = listen("records-changed", () => {
+    // 只订 queue-changed：凡改变队列的操作都会 emit 它（records-changed 的语义是
+    // 「持久化记录变化」，与内存队列无关）
+    const unlistenPromise = listen<QueueState>("queue-changed", () => {
       refreshQueue();
     });
     return () => {
-      unlistenQueuePromise.then((fn) => fn());
-      unlistenRecordsPromise.then((fn) => fn());
+      unlistenPromise.then((fn) => fn());
     };
   }, [refreshQueue]);
 

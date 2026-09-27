@@ -5,7 +5,7 @@ use tauri::{Emitter, Manager, State};
 
 use crate::models::{DownloadRecord, Subscription};
 use crate::services::{StorageService, YtDlpService};
-use crate::services::download_queue::QueueState;
+use crate::services::download_queue::{notify_records_changed, QueueState};
 use crate::utils::AppError;
 use crate::AppContext;
 use crate::QueueContext;
@@ -230,7 +230,7 @@ pub(crate) async fn check_and_download(
             all_records.push(record.clone());
             Ok(())
         })?;
-        let _ = app_handle.emit("records-changed", ());
+        notify_records_changed(app_handle);
 
         new_records.push(record);
     }
@@ -313,14 +313,19 @@ pub async fn check_subscription(
     })
     .map_err(|e| e.to_string())?;
 
+    // 一次检查完成（与 run_check_round / check_all_subscriptions 同一语义：检查已完成、
+    // last_check_time 已落盘）。语义是「一次检查完成」，不是「调度器轮次」。
+    let _ = app_handle.emit("scheduler-check-complete", ());
+
     Ok(new_records)
 }
 
 /// Checks all non-paused subscriptions for new videos and downloads them.
 ///
 /// 注意：本函数与 [`run_check_round`] 是同一件事的两份实现（残留重复）。差异在于
-/// 本命令从 `AppContext.settings` 内存缓存取设置、错误向上传播、返回 `Result` 且不 emit
-/// 事件。将来若收敛为一份，需决定设置来源与错误/事件语义的归属。
+/// 本命令从 `AppContext.settings` 内存缓存取设置、错误向上传播并返回 `Result`
+/// （`run_check_round` 只记日志）。两者都在收尾 emit `scheduler-check-complete`。
+/// 将来若收敛为一份，需决定设置来源与错误语义的归属。
 #[tauri::command]
 pub async fn check_all_subscriptions(
     state: State<'_, AppContext>,
@@ -412,6 +417,9 @@ pub async fn check_all_subscriptions(
         Ok(())
     })
     .map_err(|e| e.to_string())?;
+
+    // 一次检查完成（语义同 run_check_round / check_subscription）
+    let _ = app_handle.emit("scheduler-check-complete", ());
 
     Ok(all_new)
 }
