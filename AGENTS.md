@@ -78,6 +78,7 @@ App.tsx                      # 根组件：主题提供者、暗色模式、事�
 - `health-check-progress` / `health-check-complete` — 健康检查
 - `import-progress` / `import-complete` — 批量导入
 - `tray-state-changed` — 由后端 emit，**当前前端无订阅者**
+- `settings-changed` — settings 落盘并同步缓存后（前端保存 **或** 托盘切换 `scheduler_paused`），**带完整 `AppSettings` 载荷**；`App.tsx` 用它同步 `darkMode`（取代原先的 5 秒轮询）。契约：**凡写 settings 的路径都必须 emit 本事件**
 
 使用的 Tauri 插件：`dialog`（文件对话框）、`notification`（桌面通知）、`shell`（打开 URL）。
 
@@ -121,6 +122,7 @@ utils/
 - Services 层**以无状态为主** —— 通过参数接收路径/配置，不持有全局状态。例外：`download_queue.rs` 与 `tray.rs` 是有状态的（队列、托盘句柄），通过 `AppContext` / `QueueContext` 注入。
 - 全局状态通过 `AppContext`（data_dir + `Mutex<AppSettings>` + scheduler watch channel）与 `QueueContext`（下载队列）管理，通过 `tauri::State` 注入。`scheduler_notify`（watch channel）由设置更新与托盘的暂停切换共同 `send`，调度循环消费；**发送端必须保持存活**，否则 `changed()` 立即返回 `Err` 造成忙循环。
 - **设置不要用快照冻结**：调度循环每轮从磁盘 `load_settings` 重读，因此改 yt-dlp 路径 / 代理 / Cookie / 下载目录无需重启即生效。新增长期运行的任务时同样按轮读取，不要持有 setup 时的设置快照。
+- **settings 变更必须广播**：`update_settings` 与托盘 `handle_toggle_scheduler` 是仅有的两个 settings 写路径，二者都在「落盘成功且缓存已更新」后 emit `settings-changed`（完整 `AppSettings` 载荷）。新增写路径必须同样 emit，且 emit 须在所有应用级锁释放之后——前端不再轮询设置。
 - 持有 `MutexGuard` 时，**先克隆值并释放锁，再进行 `await`**，避免跨异步边界持有互斥锁。**特别注意不要持锁跨越阻塞式子进程调用**（如 yt-dlp）。
 - **持久化写入只有一个入口**：`StorageService::update_download_records` / `update_subscriptions` / `update_state`（闭包式事务，内部持有全局写锁）。`save_subscriptions` / `save_download_records` / `save_state` 是私有原语，外部不可调用（编译器强制）；`load_*` 不加锁。
   事务闭包内**禁止**：调用 `update_*` / `save_settings`（`std::sync::Mutex` 不可重入，会死锁；debug 构建下会 panic 提示）、获取任何其他应用级锁、做文件 I/O。锁序固定为 `QueueContext.queue → 写锁`，不要引入反向路径。

@@ -1,4 +1,4 @@
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use crate::models::{AppSettings, AppState};
 use crate::services::settings_validator;
@@ -43,6 +43,10 @@ pub async fn update_settings(
     let concurrent_changed = cached.max_concurrent_downloads != settings.max_concurrent_downloads;
     *cached = settings.clone();
     drop(cached); // release lock before await
+
+    // 广播设置变更（带完整载荷，前端无需再拉一次）。放在这里是因为此刻磁盘与缓存
+    // 都已生效，且不持任何应用级锁。契约：凡写 settings 的路径都必须 emit 本事件。
+    let _ = app_handle.emit("settings-changed", &settings);
 
     // Notify scheduler if interval changed so it wakes up immediately
     if detect_interval_change(old_interval, settings.check_interval_minutes) {

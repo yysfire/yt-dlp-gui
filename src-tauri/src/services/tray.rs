@@ -272,6 +272,10 @@ impl TrayService {
             cached.scheduler_paused = new_paused;
         }
 
+        // 广播设置变更（契约：凡写 settings 的路径都必须 emit 本事件）。
+        // 此刻磁盘与缓存都已生效，且不持任何应用级锁。
+        let _ = app.emit("settings-changed", &updated);
+
         // 4) 唤醒调度循环，使「恢复定时检查」立即生效而不是等下一个间隔
         let _ = ctx.scheduler_notify.send(());
 

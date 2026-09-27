@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import {
   ThemeProvider,
   createTheme,
@@ -108,17 +108,18 @@ export default function App() {
       try {
         const settings: AppSettings = await api.getSettings();
         setDarkMode(settings.dark_mode);
-        // Apply dark class to html element for Tailwind
-        document.documentElement.classList.toggle(
-          "dark",
-          settings.dark_mode,
-        );
       } catch {
         // Default to light mode
       }
     };
     loadSettings();
   }, []);
+
+  // <html> 上的 dark class 是 darkMode 的唯一投影（Tailwind darkMode: "class" 依赖它）。
+  // 不要在其他地方手写 classList.toggle。
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", darkMode);
+  }, [darkMode]);
 
   // Listen for download-complete events from the Rust backend
   useEffect(() => {
@@ -164,26 +165,15 @@ export default function App() {
     };
   }, [refreshSubs]);
 
-  // Handle dark mode toggle (called when settings are updated externally)
-  const handleDarkModeChange = useCallback((isDark: boolean) => {
-    setDarkMode(isDark);
-    document.documentElement.classList.toggle("dark", isDark);
-  }, []);
-
-  // After settings are saved, re-check dark mode
+  // Listen for settings-changed (settings were saved to disk and cache was synced)
   useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        const settings = await api.getSettings();
-        if (settings.dark_mode !== darkMode) {
-          handleDarkModeChange(settings.dark_mode);
-        }
-      } catch {
-        // Ignore poll errors
-      }
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [darkMode, handleDarkModeChange]);
+    const unlistenPromise = listen<AppSettings>("settings-changed", (event) => {
+      setDarkMode(event.payload.dark_mode);
+    });
+    return () => {
+      unlistenPromise.then((fn) => fn());
+    };
+  }, []);
 
   const theme = darkMode ? darkTheme : lightTheme;
 
