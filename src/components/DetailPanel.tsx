@@ -11,213 +11,15 @@ import {
   Replay as ReplayIcon,
   HourglassEmpty as WaitingIcon,
 } from "@mui/icons-material";
-import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask, ChannelInfo, VideoInfo, UnifiedVideoItem, VideoStatus } from "@/types";
+import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask, ChannelInfo, VideoInfo } from "@/types";
 import { getChannelInfo, getChannelVideos } from "@/lib/tauri";
-
-function formatTime(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleString("zh-CN");
-  } catch {
-    return iso;
-  }
-}
-
-/** 将秒数格式化为人类可读的时长字符串（如 "12:34", "0:30"） */
-function formatDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) return "";
-  const totalSeconds = Math.round(seconds);
-  const h = Math.floor(totalSeconds / 3600);
-  const m = Math.floor((totalSeconds % 3600) / 60);
-  const s = totalSeconds % 60;
-  if (h > 0) {
-    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  }
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-/** 格式化文件大小 */
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return "";
-  const units = ["B", "KB", "MB", "GB"];
-  let size = bytes;
-  let unitIndex = 0;
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex++;
-  }
-  return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
-}
-
-/** 从 yt-dlp epoch 字段或 upload_date (YYYYMMDD) 转为 YYYY-MM-DD 字符串 */
-function formatUploadDate(uploadDate: string | null | undefined, epoch: number | null | undefined): string {
-  if (uploadDate && /^\d{8}$/.test(uploadDate)) {
-    return `${uploadDate.slice(0, 4)}-${uploadDate.slice(4, 6)}-${uploadDate.slice(6, 8)}`;
-  }
-  if (epoch != null && epoch > 0) {
-    const d = new Date(epoch * 1000);
-    return d.toISOString().slice(0, 10);
-  }
-  return "";
-}
-
-/** 按状态排序优先级 (越小越靠前) */
-function statusPriority(status: VideoStatus): number {
-  switch (status) {
-    case "downloading": return 0;
-    case "waiting": return 1;
-    case "paused": return 2;
-    case "completed": return 3;
-    case "new": return 4;
-    case "cancelled": return 5;
-    case "failed": return 6;
-    default: return 9;
-  }
-}
-
-/** 合并频道视频与下载记录为统一列表 */
-function mergeToUnifiedItems(
-  videoList: VideoInfo[],
-  records: DownloadRecord[],
-  queueTasks: DownloadTask[],
-): UnifiedVideoItem[] {
-  const map = new Map<string, UnifiedVideoItem>();
-
-  // 辅助：生成 key（优先 video_id，回退 url）
-  const makeKey = (id: string, url: string): string => {
-    return id || url;
-  };
-
-  // 辅助：获取派生状态
-  const deriveStatus = (item: UnifiedVideoItem): VideoStatus => {
-    const qt = item.queueTask;
-    const di = item.downloadInfo;
-    // queue task 优先级最高
-    if (qt) {
-      if (qt.status === "running") return "downloading";
-      if (qt.status === "paused") return "paused";
-      if (qt.status === "waiting") return "waiting";
-      if (qt.status === "cancelled") return "cancelled";
-      if (qt.status === "failed") return "failed";
-      if (qt.status === "completed") return "completed";
-    }
-    // 回退到 download record 状态
-    if (di) {
-      return di.status as VideoStatus;
-    }
-    return "new";
-  };
-
-  // 第一轮：遍历下载记录
-  for (const r of records) {
-    const key = makeKey(r.video_id, r.video_url);
-    const existing = map.get(key);
-    if (existing) {
-      // 已存在：仅当没有 downloadInfo 时设置
-      if (!existing.downloadInfo) {
-        existing.downloadInfo = r;
-        (existing as { status: VideoStatus }).status = deriveStatus(existing);
-      }
-    } else {
-      const item: UnifiedVideoItem = {
-        downloadInfo: r,
-        channelInfo: undefined,
-        queueTask: undefined,
-        id: key,
-        title: r.video_title,
-        url: r.video_url,
-        status: r.status as VideoStatus,
-      };
-      map.set(key, item);
-    }
-  }
-
-  // 第二轮：遍历队列任务
-  for (const t of queueTasks) {
-    const key = makeKey(t.video_id, t.video_url);
-    const existing = map.get(key);
-    if (existing) {
-      existing.queueTask = t;
-      (existing as { status: VideoStatus }).status = deriveStatus(existing);
-      // 用队列任务的最新标题更新
-      if (t.video_title) {
-        (existing as { title: string }).title = t.video_title;
-      }
-    } else {
-      const item: UnifiedVideoItem = {
-        downloadInfo: undefined,
-        channelInfo: undefined,
-        queueTask: t,
-        id: key,
-        title: t.video_title,
-        url: t.video_url,
-        status: t.status === "running" ? "downloading"
-          : t.status === "paused" ? "paused"
-          : t.status === "waiting" ? "waiting"
-          : (t.status as VideoStatus),
-      };
-      map.set(key, item);
-    }
-  }
-
-  // 第三轮：遍历频道视频
-  for (const v of videoList) {
-    const key = makeKey(v.id, v.url);
-    const existing = map.get(key);
-    if (existing) {
-      existing.channelInfo = v;
-      // 频道视频的标题通常更新
-      (existing as { title: string }).title = v.title;
-      // 如有频道视频 ID，用它
-      if (v.id) {
-        (existing as { id: string }).id = v.id;
-      }
-      // 重新派生状态
-      (existing as { status: VideoStatus }).status = deriveStatus(existing);
-    } else {
-      const item: UnifiedVideoItem = {
-        downloadInfo: undefined,
-        channelInfo: v,
-        queueTask: undefined,
-        id: key,
-        title: v.title,
-        url: v.url,
-        status: "new",
-      };
-      map.set(key, item);
-    }
-  }
-
-  // 排序
-  const items = Array.from(map.values());
-  items.sort((a, b) => {
-    const pa = statusPriority(a.status);
-    const pb = statusPriority(b.status);
-    if (pa !== pb) return pa - pb;
-    // 同状态下按时间倒序
-    const getTime = (item: UnifiedVideoItem): number => {
-      if (item.downloadInfo?.downloaded_at) {
-        return new Date(item.downloadInfo.downloaded_at).getTime();
-      }
-      if (item.queueTask?.created_at) {
-        return new Date(item.queueTask.created_at).getTime();
-      }
-      // 频道视频按 upload_date
-      if (item.channelInfo?.upload_date) {
-        // YYYYMMDD → 转为可比较的时间
-        return new Date(
-          item.channelInfo.upload_date.slice(0, 4) + "-" +
-          item.channelInfo.upload_date.slice(4, 6) + "-" +
-          item.channelInfo.upload_date.slice(6, 8)
-        ).getTime();
-      }
-      return 0;
-    };
-    return getTime(b) - getTime(a);
-  });
-
-  return items;
-}
+import {
+  buildUnifiedVideoList,
+  formatDuration,
+  formatFileSize,
+  formatTime,
+  formatUploadDate,
+} from "@/lib/unifiedVideoList";
 
 interface DetailPanelProps {
   subscription: Subscription | null;
@@ -340,9 +142,9 @@ export default function DetailPanel({
   // 合并频道视频、下载记录、队列任务为统一列表
   const unifiedItems = useMemo(() => {
     try {
-      return mergeToUnifiedItems(videoList, records, queueTasks);
+      return buildUnifiedVideoList({ videos: videoList, records, tasks: queueTasks });
     } catch (e) {
-      console.error("[DetailPanel] mergeToUnifiedItems failed:", e);
+      console.error("[DetailPanel] buildUnifiedVideoList failed:", e);
       return [];
     }
   }, [videoList, records, queueTasks]);
