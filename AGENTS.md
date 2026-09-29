@@ -128,7 +128,11 @@ utils/
 - **持久化写入只有一个入口**：`StorageService::update_download_records` / `update_subscriptions` / `update_state`（闭包式事务，内部持有全局写锁）。`save_subscriptions` / `save_download_records` / `save_state` 是私有原语，外部不可调用（编译器强制）；`load_*` 不加锁。
   事务闭包内**禁止**：调用 `update_*` / `save_settings`（`std::sync::Mutex` 不可重入，会死锁；debug 构建下会 panic 提示）、获取任何其他应用级锁、做文件 I/O。锁序固定为 `QueueContext.queue → 写锁`，不要引入反向路径。
 - **不要用陈旧快照整体覆盖**：跨 `await` 的长流程（`scheduler.rs` 的调度循环、`check_all_subscriptions`、`run_check_round`）一律「边跑边收集结果（`SubCheckOutcome`），收尾按 id 做一次增量事务」。用循环开始时的快照整表 `save` 会 clobber 并发写者（健康检查、单订阅命令）对其它订阅字段的修改。
-- **不要新增派生计数字段**：`Subscription` 与 `AppState` 都**不**再持有「已下载数」。唯一真相源是 `download_records.json`，数量由前端从 `records` 派生（口径 = `status === "completed"` 的记录条数，见 `AppShell.tsx` 与 `DetailPanel.tsx`）。历史上该字段有「完成回调增量」与「启动重算」两个语义不同的写者，导致显示不一致——不要重新引入。
+- **不要新增派生计数字段**：`Subscription` 与 `AppState` 都**不**再持有「已下载数」。唯一真相源是
+  `download_records.json`，所有数字由前端从 `records` 派生，但**两套口径并存、不要互相替换**：
+  - **记录总数**（`records.length`，含 `deleted`）：侧边栏徽标（`AppShell.tsx`）与「已下载」视图标题（`DownloadedList.tsx`）。
+  - **已完成数**（`status === "completed"`）：状态栏（`AppShell.tsx` → `StatusBar`，文案「已完成」）与详情面板头部（`DetailPanel.tsx`，文案「已完成」）。
+  历史上该字段有「完成回调增量」与「启动重算」两个语义不同的写者，导致显示不一致——不要重新引入。
 - **写操作与事件成对**：凡修改持久化数据的路径，必须在写事务完成后 emit 对应事件 —— 记录改动 → `services/download_queue.rs::notify_records_changed`，队列改动 → `DownloadQueue::emit_queue_changed`，settings 改动 → `settings-changed`。emit 一律是**纯 emit**（零 I/O、零加锁），因此可在任意临界区内安全调用；不要为了构造载荷去读文件或加锁。前端对高频事件做短延时合并（`App.tsx` 的 `scheduleRefresh`，150ms 窗口内只排一次，用 schedule-once 而非 debounce 以免连续事件把刷新无限推迟）。
 - 已知死代码（无消费方，待清理）：`useDownloadRecords` 的 `getQueueState` / `getQueue`、`src/lib/tauri.ts` 的 `getQueueState`、后端 `get_queue_state` 命令。
 

@@ -3,7 +3,7 @@ import type {
   DownloadRecord,
   DownloadTask,
   UnifiedVideoItem,
-  VideoStatus,
+  UnifiedVideoStatus,
 } from "@/types";
 
 /**
@@ -68,7 +68,7 @@ export function formatTime(iso: string): string {
 }
 
 /** 按状态排序优先级（越小越靠前） */
-export function statusPriority(status: VideoStatus): number {
+export function statusPriority(status: UnifiedVideoStatus): number {
   switch (status) {
     case "downloading":
       return 0;
@@ -111,7 +111,7 @@ function makeKey(id: string, url: string): string {
  * 派生用于展示的状态：队列任务最权威（它反映此刻正在发生什么），
  * 其次回退到持久化记录，两者都没有就是尚未下载过的新视频。
  */
-function deriveStatus(sources: Sources): VideoStatus {
+function deriveStatus(sources: Sources): UnifiedVideoStatus {
   const task = sources.task;
   if (task) {
     if (task.status === "running") return "downloading";
@@ -122,10 +122,10 @@ function deriveStatus(sources: Sources): VideoStatus {
     if (task.status === "completed") return "completed";
   }
   if (sources.record) {
-    // DownloadRecord.status 可能是 "deleted"（用户删除了已下载的文件），
-    // 而 VideoStatus 不含该值 —— 这里保持既有运行时行为、原样透传：详情面板的渲染
-    // 对 "deleted" 没有任何分支，该条目只会显示标题与链接（已知缺陷，单独处理）。
-    return sources.record.status as VideoStatus;
+    // DownloadRecord.status 含 "deleted"（用户删除了已下载的文件）。该值已纳入
+    // UnifiedVideoStatus 并在此原样透传；DetailPanel 对 "deleted" 有独立的展示分支
+    // （图标 + 删除线 + 「已删除」文字，无操作按钮）。
+    return sources.record.status;
   }
   return "new";
 }

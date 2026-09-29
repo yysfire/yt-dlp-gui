@@ -73,7 +73,7 @@ export default function StatusBar({
         上次检查: {formatTime(state.last_check_time)}
       </Typography>
       <Typography variant="caption" color="text.secondary">
-        已下载: {completedCount} 个视频
+        已完成: {completedCount} 个视频
       </Typography>
     </Box>
   );

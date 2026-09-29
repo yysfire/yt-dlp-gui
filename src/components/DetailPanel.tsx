@@ -10,6 +10,7 @@ import {
   Downloading as DownloadingIcon,
   Replay as ReplayIcon,
   HourglassEmpty as WaitingIcon,
+  DeleteOutline as DeletedIcon,
 } from "@mui/icons-material";
 import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask, ChannelInfo, VideoInfo } from "@/types";
 import { getChannelInfo, getChannelVideos } from "@/lib/tauri";
@@ -149,7 +150,7 @@ export default function DetailPanel({
     }
   }, [videoList, records, queueTasks]);
 
-  // 已下载数从 records 派生（唯一真相源是下载记录，不再由后端维护计数字段）。
+  // 已完成数从 records 派生（唯一真相源是下载记录，不再由后端维护计数字段）。
   // 口径：当前仍处于 completed 的记录条数。必须放在下方提前返回之前。
   const completedCount = useMemo(
     () => records.filter((r) => r.status === "completed").length,
@@ -241,7 +242,7 @@ export default function DetailPanel({
           {/* Per-subscription stats */}
           <div className="flex items-center gap-2 mt-1">
             <Typography variant="caption" color="text.secondary">
-              已下载: {completedCount} 个
+              已完成: {completedCount} 个
             </Typography>
             {channelInfo?.subscriber_count && (
               <Typography variant="caption" color="text.secondary">
@@ -346,6 +347,7 @@ export default function DetailPanel({
                             px: 2,
                             borderBottom: 1,
                             borderColor: "divider",
+                            opacity: item.status === "deleted" ? 0.5 : 1,
                           }}
                         >
                           {/* 第 1 列：状态图标（垂直居中） */}
@@ -357,6 +359,7 @@ export default function DetailPanel({
                             {item.status === "completed" && <SuccessIcon sx={{ fontSize: 18, color: "success.main" }} />}
                             {item.status === "failed" && <ErrorIcon sx={{ fontSize: 18, color: "error.main" }} />}
                             {item.status === "cancelled" && <CancelIcon sx={{ fontSize: 18, color: "text.disabled" }} />}
+                            {item.status === "deleted" && <DeletedIcon sx={{ fontSize: 18, color: "text.disabled" }} />}
                           </Box>
 
                           {/* 第 2 列：三行内容 */}
@@ -371,7 +374,11 @@ export default function DetailPanel({
                               rel="noopener noreferrer"
                               underline="hover"
                               color="inherit"
-                              sx={{ fontSize: "0.8rem", lineHeight: 1.3 }}
+                              sx={{
+                                fontSize: "0.8rem",
+                                lineHeight: 1.3,
+                                ...(item.status === "deleted" && { textDecoration: "line-through" }),
+                              }}
                             >
                               {item.title}
                             </Typography>
@@ -411,6 +418,14 @@ export default function DetailPanel({
                                         </>
                                       )}
                                       {item.status === "cancelled" && `已取消${date ? ` · ${date}` : ""}`}
+                                      {item.status === "deleted" && (
+                                        <>
+                                          <Box component="span" sx={{ color: "text.disabled", fontWeight: 500 }}>已删除</Box>
+                                          {date && ` · ${date}`}
+                                          {!item.channelInfo && item.downloadInfo &&
+                                            ` · ${new Date(item.downloadInfo.downloaded_at).toLocaleDateString("zh-CN")}`}
+                                        </>
+                                      )}
                                     </>
                                   );
                                 })()}

@@ -234,6 +234,9 @@ export type VideoStatus =
   | "failed"
   | "cancelled";
 
+/** 统一视频条目的展示状态：VideoStatus 再并入「记录专属」的 deleted */
+export type UnifiedVideoStatus = VideoStatus | "deleted";
+
 /** 统一视频列表条目：合并频道视频与下载记录 */
 export interface UnifiedVideoItem {
   /** 频道视频信息（仅当该视频来自频道播放列表时有值） */
@@ -249,7 +252,7 @@ export interface UnifiedVideoItem {
   /** 视频链接 */
   readonly url: string;
   /** 视频当前状态 */
-  readonly status: VideoStatus;
+  readonly status: UnifiedVideoStatus;
 }
 
 /** 视频列表分页结果 */

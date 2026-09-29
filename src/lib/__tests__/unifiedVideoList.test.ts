@@ -190,9 +190,9 @@ describe("buildUnifiedVideoList - 状态派生", () => {
     expect(items[0].status).toBe("completed");
   });
 
-  it("已删除（deleted）的记录原样透传 —— 锁定当前行为，UI 对它没有分支", () => {
-    // DownloadRecord.status 可能是 "deleted"（用户删了文件），而 VideoStatus 不含它。
-    // 这是既有的类型不安全点，此处显式锁定其运行时输出，防止后续无声漂移。
+  it("已删除（deleted）的记录原样透传 —— 类型已纳入 UnifiedVideoStatus，锁定 deleted 排最后（优先级 9）", () => {
+    // DownloadRecord.status 可能是 "deleted"（用户删了文件）。该值现已纳入 UnifiedVideoStatus
+    // 并原样透传；此处锁定其运行时输出与排序位置，防止后续无声漂移。
     const items = build([], [makeRecord({ status: "deleted" })]);
 
     expect(items[0].status).toBe("deleted");

@@ -103,7 +103,7 @@ describe("DetailPanel", () => {
       const sub = makeSub({
         last_checked_at: "2026-06-10T12:00:00Z",
       });
-      // 已下载数现在由 records 派生（口径：处于 completed 的记录条数）
+      // 已完成数现在由 records 派生（口径：处于 completed 的记录条数）
       const completedRecords: DownloadRecord[] = Array.from(
         { length: 5 },
         (_, i) => ({
@@ -129,8 +129,43 @@ describe("DetailPanel", () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByText(/已下载: 5 个/)).toBeInTheDocument();
+        expect(screen.getByText(/已完成: 5 个/)).toBeInTheDocument();
       });
+    });
+
+    it("deleted 记录显示「已删除」且不计入已完成数、无操作按钮", async () => {
+      const sub = makeSub();
+      const deletedRecords: DownloadRecord[] = [
+        {
+          id: "rec-del",
+          subscription_id: "sub-1",
+          video_id: "vid-del",
+          video_title: "Deleted Video",
+          video_url: "https://youtu.be/del",
+          file_path: "/tmp/del.mp4",
+          file_size: 1000,
+          status: "deleted",
+          error_message: null,
+          downloaded_at: "2026-06-10T12:00:00Z",
+        },
+      ];
+
+      render(
+        <DetailPanel
+          subscription={sub}
+          {...defaultProps}
+          records={deletedRecords}
+        />,
+      );
+
+      // 命中新增的「已删除」元信息 span
+      await waitFor(() => {
+        expect(screen.getByText("已删除")).toBeInTheDocument();
+      });
+      // deleted 不计入 completed 口径
+      expect(screen.getByText(/已完成: 0 个/)).toBeInTheDocument();
+      // 无操作按钮（重试按钮只在 failed 时出现）
+      expect(screen.queryByTitle("重试")).toBeNull();
     });
 
     it("显示检查失败的提示", async () => {

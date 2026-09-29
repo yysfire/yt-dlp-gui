@@ -85,8 +85,9 @@ export default function AppShell({
   const filteredRecords = selectedId
     ? records.filter((r) => r.subscription_id === selectedId)
     : [];
-  const downloadCount = records.filter((r) => r.status !== "deleted").length;
-  // 状态栏的「已下载」只数当前处于 completed 的记录（与上方侧边栏徽标口径不同）。
+  const recordCount = records.length;
+  // 徽标显示下载记录总数（含 deleted —— 删除文件时记录有意保留以便追溯）；
+  // 状态栏只数其中仍处于 completed 的记录，两者口径不同、不要互相替换。
   const completedCount = records.filter((r) => r.status === "completed").length;
 
   const refreshQueue = useCallback(async () => {
@@ -194,7 +195,7 @@ export default function AppShell({
               <FolderOpenIcon fontSize="small" />
               <span className="flex-1 text-left">已下载</span>
               <span className="text-xs text-gray-400 dark:text-gray-500 tabular-nums">
-                {downloadCount}
+                {recordCount}
               </span>
             </button>
           )}
