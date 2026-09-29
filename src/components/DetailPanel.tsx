@@ -442,6 +442,7 @@ export default function DetailPanel({
                             {item.status === "downloading" && item.downloadInfo && (
                               <Box sx={{ height: 4, bgcolor: "grey.200", borderRadius: 2, mt: 0.5 }}>
                                 <Box
+                                  data-testid="download-progress-fill"
                                   sx={{
                                     height: "100%",
                                     bgcolor: "info.main",
