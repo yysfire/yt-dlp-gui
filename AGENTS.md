@@ -198,6 +198,8 @@ utils/
 
 前端测试用 vitest + @testing-library/react（`npm test`），源码在 `src/**/__tests__/`。注意 `src/hooks/__tests__/useFilter.test.ts` 的 38 个筛选/排序用例测的是 `useFilter.ts` 里真实导出的 `applyFilter`/`applySort`，另有一组 `renderHook` 用例覆盖 Hook 的状态联动。
 
+测试断言按钮时注意 `title` 的来源：直接传给 `IconButton` 的 `title` 会成为原生 `<button title>`（可用 `getByTitle`，如 `DetailPanel` 的暂停/取消/重试）；而传给 MUI `Tooltip` 的 `title` 只映射为子元素的 `aria-label`，DOM 上没有原生 `title`（须用 `getByRole("button", { name })`，如 `DownloadedItem` 的操作按钮）。
+
 ### 平台支持
 
 通过 Tauri 的跨平台打包支持 Windows、macOS 和 Linux。提供了三个平台的图标（`icon.ico`、`icon.icns`、`.png` 变体）。
