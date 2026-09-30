@@ -19,13 +19,36 @@ pub struct ChannelInfo {
 
 /// Information about a single video in a channel/playlist.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(try_from = "RawVideoInfo")]
 pub struct VideoInfo {
     /// Video title
     pub title: String,
-    /// Full video URL (matches `url` in --flat-playlist JSON)
+    /// Full video URL (`url` on flat-playlist entries, `webpage_url` on
+    /// single-video metadata — normalized by `models::video::resolve_video_url`)
     pub url: String,
     /// Video ID from the platform (e.g., YouTube video ID). Used for deduplication.
     pub id: Option<String>,
+}
+
+/// Raw yt-dlp line fields, used only to deserialize `VideoInfo`.
+#[derive(serde::Deserialize)]
+struct RawVideoInfo {
+    title: String,
+    url: Option<String>,
+    webpage_url: Option<String>,
+    id: Option<String>,
+}
+
+impl TryFrom<RawVideoInfo> for VideoInfo {
+    type Error = String;
+
+    fn try_from(raw: RawVideoInfo) -> Result<Self, Self::Error> {
+        Ok(Self {
+            title: raw.title,
+            url: crate::models::video::resolve_video_url(raw.url, raw.webpage_url)?,
+            id: raw.id,
+        })
+    }
 }
 
 /// Result of spawning a yt-dlp download process.
@@ -470,6 +493,39 @@ mod tests {
         let video: VideoInfo = serde_json::from_str(json)
             .expect("should parse VideoInfo without id");
         assert_eq!(video.id, None);
+    }
+
+    #[test]
+    fn test_video_info_channel_flat_entry_with_both_url_keys() {
+        // 真实频道 flat 条目：url 与 webpage_url 同时存在且取值相同。
+        // 给 url 加 #[serde(alias = "webpage_url")] 会因重复字段直接失败。
+        let json = r#"{"_type":"url","id":"llHsd-dI50E","title":"Test Video","url":"https://www.youtube.com/watch?v=llHsd-dI50E","webpage_url":"https://www.youtube.com/watch?v=llHsd-dI50E"}"#;
+
+        let video: VideoInfo =
+            serde_json::from_str(json).expect("channel flat entry should parse");
+
+        assert_eq!(video.url, "https://www.youtube.com/watch?v=llHsd-dI50E");
+        assert_eq!(video.id, Some("llHsd-dI50E".to_string()));
+    }
+
+    #[test]
+    fn test_video_info_single_video_full_metadata() {
+        // 单视频 URL 的完整元数据：没有顶层 url，只有 webpage_url
+        let json = r#"{"id":"lcH2wJMVmP4","title":"Single Video","webpage_url":"https://www.youtube.com/watch?v=lcH2wJMVmP4","original_url":"https://www.youtube.com/watch?v=lcH2wJMVmP4","extractor_key":"Youtube"}"#;
+
+        let video: VideoInfo =
+            serde_json::from_str(json).expect("single video metadata should parse");
+
+        assert_eq!(video.url, "https://www.youtube.com/watch?v=lcH2wJMVmP4");
+        assert_eq!(video.id, Some("lcH2wJMVmP4".to_string()));
+    }
+
+    #[test]
+    fn test_video_info_missing_url_is_error() {
+        let err = serde_json::from_str::<VideoInfo>(r#"{"id":"x","title":"t"}"#)
+            .expect_err("missing url should be an error");
+
+        assert_eq!(err.to_string(), "missing field `url`");
     }
 
     // ── Format string tests ────────────────────────────────────────
