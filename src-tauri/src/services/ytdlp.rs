@@ -33,7 +33,8 @@ pub struct VideoInfo {
 /// Raw yt-dlp line fields, used only to deserialize `VideoInfo`.
 #[derive(serde::Deserialize)]
 struct RawVideoInfo {
-    title: String,
+    /// 私享/不可用视频为 `null`，由 `resolve_video_title` 回退
+    title: Option<String>,
     url: Option<String>,
     webpage_url: Option<String>,
     id: Option<String>,
@@ -44,7 +45,7 @@ impl TryFrom<RawVideoInfo> for VideoInfo {
 
     fn try_from(raw: RawVideoInfo) -> Result<Self, Self::Error> {
         Ok(Self {
-            title: raw.title,
+            title: crate::models::video::resolve_video_title(raw.title, raw.id.as_deref()),
             url: crate::models::video::resolve_video_url(raw.url, raw.webpage_url)?,
             id: raw.id,
         })
@@ -661,6 +662,19 @@ mod tests {
 
         assert_eq!(video.url, "https://www.youtube.com/watch?v=lcH2wJMVmP4");
         assert_eq!(video.id, Some("lcH2wJMVmP4".to_string()));
+    }
+
+    #[test]
+    fn test_video_info_null_title_falls_back() {
+        // 私享/不可用视频在频道 flat 列表里 title 为 null
+        let json = r#"{"title":null,"id":"iDRlnY8RpVQ","url":"https://www.youtube.com/watch?v=iDRlnY8RpVQ"}"#;
+
+        let video: VideoInfo =
+            serde_json::from_str(json).expect("title 为 null 必须能解析");
+
+        assert_eq!(video.title, "私享视频 iDRlnY8RpVQ");
+        assert_eq!(video.id, Some("iDRlnY8RpVQ".to_string()));
+        assert_eq!(video.url, "https://www.youtube.com/watch?v=iDRlnY8RpVQ");
     }
 
     #[test]

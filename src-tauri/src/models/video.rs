@@ -61,6 +61,24 @@ pub(crate) fn resolve_video_url(
         .ok_or_else(|| "missing field `url`".to_string())
 }
 
+/// 统一标题字段。
+///
+/// yt-dlp 对**私享 / 不可用**视频会输出 `"title": null`（频道列表里实际会出现）。
+/// `VideoInfo.title` 是非空字符串，故缺省时回退为占位标题，而不是让整行解析失败 ——
+/// 一行解析失败会连带整个频道的视频列表加载中断（见 `parse_json_lines` 不静默跳过的约定）。
+///
+/// 回退带视频 ID（`私享视频 <id>`）以便同一频道内的多个私享视频可区分；
+/// 连 ID 都没有时退化为不带后缀的 `私享视频`。
+pub(crate) fn resolve_video_title(title: Option<String>, id: Option<&str>) -> String {
+    match title.filter(|t| !t.is_empty()) {
+        Some(title) => title,
+        None => match id.filter(|id| !id.is_empty()) {
+            Some(id) => format!("私享视频 {}", id),
+            None => "私享视频".to_string(),
+        },
+    }
+}
+
 /// 单个视频信息（详情面板分页列表条目）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "RawVideoInfo")]
@@ -88,7 +106,8 @@ pub struct VideoInfo {
 #[derive(Deserialize)]
 struct RawVideoInfo {
     id: String,
-    title: String,
+    /// 私享/不可用视频为 `null`，由 `resolve_video_title` 回退
+    title: Option<String>,
     url: Option<String>,
     webpage_url: Option<String>,
     #[serde(default, deserialize_with = "deserialize_duration")]
@@ -104,9 +123,10 @@ impl TryFrom<RawVideoInfo> for VideoInfo {
     type Error = String;
 
     fn try_from(raw: RawVideoInfo) -> Result<Self, Self::Error> {
+        let title = resolve_video_title(raw.title, Some(&raw.id));
         Ok(Self {
             id: raw.id,
-            title: raw.title,
+            title,
             url: resolve_video_url(raw.url, raw.webpage_url)?,
             duration: raw.duration,
             upload_date: raw.upload_date,
@@ -168,6 +188,25 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_video_title_falls_back_for_null_and_empty() {
+        assert_eq!(resolve_video_title(None, Some("vid1")), "私享视频 vid1");
+        assert_eq!(
+            resolve_video_title(Some(String::new()), Some("vid1")),
+            "私享视频 vid1"
+        );
+        assert_eq!(
+            resolve_video_title(Some("标题".to_string()), Some("vid1")),
+            "标题"
+        );
+    }
+
+    #[test]
+    fn test_resolve_video_title_without_id_falls_back_to_bare_placeholder() {
+        assert_eq!(resolve_video_title(None, None), "私享视频");
+        assert_eq!(resolve_video_title(None, Some("")), "私享视频");
+    }
+
+    #[test]
     fn test_video_info_parses_channel_flat_entry_with_both_url_keys() {
         // 真实频道 flat 条目：url 与 webpage_url 同时存在且取值相同。
         // 这里曾尝试给 url 加 #[serde(alias = "webpage_url")]，会因重复字段直接失败。
@@ -199,6 +238,22 @@ mod tests {
             video.thumbnail,
             Some("https://i.ytimg.com/vi/lcH2wJMVmP4/maxresdefault.jpg".to_string())
         );
+    }
+
+    #[test]
+    fn test_video_info_parses_null_title_from_private_video() {
+        // 频道列表里的私享/不可用视频：title 为 null，其余字段（id/url/thumbnails）照常。
+        // 字段顺序与真实 yt-dlp 频道条目一致（title 在最前）。
+        let json = r#"{"title": null, "thumbnails": [{"url": "https://i.ytimg.com/vi/iDRlnY8RpVQ/hqdefault.jpg", "height": 94, "width": 168}], "duration": null, "ie_key": "Youtube", "id": "iDRlnY8RpVQ", "url": "https://www.youtube.com/watch?v=iDRlnY8RpVQ", "webpage_url": "https://www.youtube.com/watch?v=iDRlnY8RpVQ", "epoch": 1790779395}"#;
+
+        let video: VideoInfo =
+            serde_json::from_str(json).expect("title 为 null 的条目必须能解析");
+
+        assert_eq!(video.id, "iDRlnY8RpVQ");
+        assert_eq!(video.title, "私享视频 iDRlnY8RpVQ");
+        assert_eq!(video.url, "https://www.youtube.com/watch?v=iDRlnY8RpVQ");
+        assert_eq!(video.duration, None);
+        assert_eq!(video.epoch, Some(1790779395));
     }
 
     #[test]
