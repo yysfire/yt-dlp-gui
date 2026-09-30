@@ -67,6 +67,45 @@ fn format_subscriber_count(count: u64) -> String {
     }
 }
 
+/// 解析失败时附带的原始输出行前缀长度（字符数）。
+///
+/// 单视频 URL 走完整元数据输出时一行可达数百 KB，整行塞进错误串会写进
+/// subscriptions.json 的 last_check_error 并刷屏日志，因此只保留开头。
+const RAW_LINE_PREFIX_CHARS: usize = 200;
+
+/// 把一行无法解析的 yt-dlp 输出转成错误。
+///
+/// **不静默跳过**：yt-dlp 的字段名或类型一旦变化，必须让调用方看见。
+/// 历史 bug 就是在这里被吞掉的 —— 单视频 URL 只给 `webpage_url` 而不给 `url`，
+/// 整行解析失败后被丢弃，详情面板恒为空列表且没有任何提示。
+fn unparsable_line_error(err: serde_json::Error, line: &str) -> AppError {
+    let prefix = match line.char_indices().nth(RAW_LINE_PREFIX_CHARS) {
+        Some((idx, _)) => &line[..idx],
+        None => line,
+    };
+    AppError::YtDlp(format!(
+        "无法解析 yt-dlp 的视频信息输出行: {}。原始输出（前 {} 字符）: {}",
+        err, RAW_LINE_PREFIX_CHARS, prefix
+    ))
+}
+
+/// 解析 yt-dlp `--dump-json` 的多行输出（每行一个 JSON 对象）。
+///
+/// 空行忽略；任何一行解析失败都直接返回错误，不丢弃、不降级。
+fn parse_json_lines<T: serde::de::DeserializeOwned>(stdout: &str) -> Result<Vec<T>, AppError> {
+    let mut items: Vec<T> = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let item: T = serde_json::from_str(line)
+            .map_err(|e| unparsable_line_error(e, line))?;
+        items.push(item);
+    }
+    Ok(items)
+}
+
 /// Stateless service wrapping yt-dlp CLI invocations.
 pub struct YtDlpService;
 
@@ -175,20 +214,7 @@ impl YtDlpService {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut videos: Vec<VideoInfo> = Vec::new();
-
-        for line in stdout.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<VideoInfo>(line) {
-                Ok(video) => videos.push(video),
-                Err(e) => {
-                    log::warn!("Failed to parse video line: {} — {}", line, e);
-                }
-            }
-        }
+        let videos: Vec<VideoInfo> = parse_json_lines(&stdout)?;
 
         log::info!("check_new_videos: found {} videos for {}", videos.len(), url);
 
@@ -244,20 +270,7 @@ impl YtDlpService {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut videos: Vec<crate::models::VideoInfo> = Vec::new();
-
-        for line in stdout.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<crate::models::VideoInfo>(line) {
-                Ok(video) => videos.push(video),
-                Err(e) => {
-                    log::warn!("Failed to parse video line: {} — {}", line, e);
-                }
-            }
-        }
+        let videos: Vec<crate::models::VideoInfo> = parse_json_lines(&stdout)?;
 
         log::info!("get_channel_videos_paginated: found {} videos (start={}, end={})",
             videos.len(), start, end);
@@ -526,6 +539,86 @@ mod tests {
             .expect_err("missing url should be an error");
 
         assert_eq!(err.to_string(), "missing field `url`");
+    }
+
+    // ── yt-dlp 输出行解析：坏行必须报错，不得静默丢弃 ──────────────
+
+    #[test]
+    fn test_parse_json_lines_collects_entries_and_skips_blank_lines() {
+        let stdout = concat!(
+            r#"{"id":"a","title":"A","url":"https://e/a"}"#,
+            "\n",
+            "\n",
+            "   \n",
+            r#"{"id":"b","title":"B","url":"https://e/b"}"#,
+            "\n",
+        );
+
+        let videos: Vec<VideoInfo> = parse_json_lines(stdout).expect("两行都应解析成功");
+
+        assert_eq!(videos.len(), 2);
+        assert_eq!(videos[0].title, "A");
+        assert_eq!(videos[1].url, "https://e/b");
+    }
+
+    #[test]
+    fn test_parse_json_lines_fails_on_unparsable_line() {
+        // 坏行夹在好行中间：必须整体失败，不能只丢掉坏行返回 1 条
+        let stdout = concat!(
+            r#"{"id":"a","title":"A","url":"https://e/a"}"#,
+            "\n",
+            r#"{"id":"b","title":"B"}"#,
+            "\n",
+        );
+
+        let err = parse_json_lines::<VideoInfo>(stdout).expect_err("坏行必须导致失败");
+
+        assert_eq!(
+            err.to_string(),
+            concat!(
+                "yt-dlp error: 无法解析 yt-dlp 的视频信息输出行: missing field `url`。",
+                "原始输出（前 200 字符）: {\"id\":\"b\",\"title\":\"B\"}"
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_json_lines_truncates_long_raw_line() {
+        let long_line = "a".repeat(300);
+
+        let err = parse_json_lines::<VideoInfo>(&long_line).expect_err("非 JSON 行必须失败");
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                concat!(
+                    "yt-dlp error: 无法解析 yt-dlp 的视频信息输出行: {}。",
+                    "原始输出（前 200 字符）: {}"
+                ),
+                "expected value at line 1 column 1",
+                "a".repeat(200)
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_json_lines_truncates_on_char_boundary() {
+        // 按字符而非字节截断：多字节字符不能被从中间切开（否则会 panic）
+        let long_line = "中".repeat(300);
+
+        let err = parse_json_lines::<VideoInfo>(&long_line).expect_err("非 JSON 行必须失败");
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                concat!(
+                    "yt-dlp error: 无法解析 yt-dlp 的视频信息输出行: {}。",
+                    "原始输出（前 200 字符）: {}"
+                ),
+                "expected value at line 1 column 1",
+                "中".repeat(200)
+            )
+        );
     }
 
     // ── Format string tests ────────────────────────────────────────

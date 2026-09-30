@@ -128,7 +128,11 @@ export default function DetailPanel({
             setTotalVideos(res.total);
             if (!res.has_more) break;
             page++;
-          } catch {
+          } catch (e) {
+            // 不能静默中断：后端解析失败时只会表现为「列表少了一截」，
+            // 而后端早已改成解析失败即报错，这里吞掉就等于让那个改动失效。
+            // 已加载的条目保留，同时把错误显示出来。
+            if (currentRequestId === requestIdRef.current) setLoadError(String(e));
             break;
           }
         }

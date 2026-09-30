@@ -320,6 +320,34 @@ describe("DetailPanel", () => {
         expect(screen.getByText("暂无视频")).toBeInTheDocument();
       });
     });
+
+    it("翻页失败时显示错误，且不丢弃已加载的第一页", async () => {
+      // 后台翻页循环原先是 `catch { break }` 静默中断：后端已改为解析失败即报错，
+      // 若这里继续吞掉，第二页起就表现为「列表莫名少了一截」而毫无提示。
+      vi.mocked(getChannelVideos)
+        .mockResolvedValueOnce({
+          videos: [
+            makeVideo({ id: "vid-p1", title: "Page 1 Video", url: "https://e/p1" }),
+          ],
+          total: 2,
+          page: 1,
+          page_size: 10,
+          has_more: true,
+        })
+        .mockRejectedValueOnce(new Error("第 2 页解析失败"));
+
+      render(
+        <DetailPanel
+          subscription={makeSub()}
+          {...defaultProps}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Error: 第 2 页解析失败")).toBeInTheDocument();
+      });
+      expect(screen.getByText("Page 1 Video")).toBeInTheDocument();
+    });
   });
 
   // 统一视频列表是详情面板信息密度最高的区域：8 种状态各有独立的图标、文案、
