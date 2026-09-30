@@ -224,7 +224,6 @@ export default function AppShell({
             )}
           </div>
           <StatusBar
-            refreshTrigger={view.kind === "detail" ? selectedId : undefined}
             completedCount={completedCount}
           />
         </div>

@@ -5,16 +5,14 @@ import * as api from "@/lib/tauri";
 import type { AppState } from "@/types";
 
 /**
- * Bottom status bar showing last check time, completed download count, and scheduler status.
+ * Bottom status bar showing last check time and completed download count.
  *
  * 已完成数由父组件从下载记录派生后传入（单一真相源是下载记录，后端不再维护计数字段）；
  * 本组件只负责从后端取 `last_check_time`。
  */
 export default function StatusBar({
-  refreshTrigger,
   completedCount = 0,
 }: {
-  refreshTrigger?: string | null;
   completedCount?: number;
 }) {
   const [state, setState] = useState<AppState>({
@@ -31,17 +29,16 @@ export default function StatusBar({
   }, []);
 
   useEffect(() => {
+    // 挂载时拉取一次初始值；此后的更新全部来自 scheduler-check-complete
     refresh();
-  }, [refresh, refreshTrigger]);
+  }, [refresh]);
 
   useEffect(() => {
-    // 周期性兜底刷新
-    const interval = setInterval(refresh, 60_000);
-    // 任一次检查完成时立即刷新 —— last_check_time 只在那里被写入
-    // （records-changed 与本组件无关：它的 emit 点无一写 last_check_time）
+    // 本组件唯一的实时刷新来源：last_check_time 只在两处被写入
+    // （run_check_round 与 check_subscription），两处都会在落盘后 emit 本事件，
+    // 已由后端契约（落盘后必 emit）保证，故不再需要轮询兜底。
     const unlistenPromise = listen("scheduler-check-complete", () => { refresh(); });
     return () => {
-      clearInterval(interval);
       unlistenPromise.then((fn) => fn());
     };
   }, [refresh]);
