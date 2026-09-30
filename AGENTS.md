@@ -89,7 +89,8 @@ App.tsx                      # 根组件：主题提供者、暗色模式、事�
 ```
 commands/               # Tauri IPC 命令处理函数（38 个注册命令）
   subscription.rs       # 订阅增删改查、分组、batch_delete、get_channel_info
-  download.rs           # check_subscription / check_all、记录查询、队列控制、get_channel_videos
+  download.rs           # check_subscription / check_all（后者是 run_check_round 的薄委托）、
+                        #   记录查询、队列控制、get_channel_videos
                         #   以及共享的 check_and_download / run_check_round（被 scheduler 与 tray 调用）
   settings.rs           # get/update 设置、get_app_state、路径与代理校验
   health.rs             # check_all_health / check_selected_health（快照后 spawn 后台任务）
@@ -119,7 +120,6 @@ utils/
 
 **关键设计规则**：
 - Commands 层**不在命令里写业务逻辑** —— 命令只做参数传递、服务调用和序列化返回。注意 `commands/download.rs` 里有一组 `pub(crate)` 的**非命令**函数（`check_and_download`、`SubCheckOutcome`、`apply_check_outcomes`、`run_check_round`），它们是业务逻辑，被命令层与 `services/`（scheduler、tray）共同调用；`services` → `commands` 的引用在 `tray.rs` 已有先例。
-- 已知残留重复：`check_all_subscriptions` 与 `run_check_round` 是同一件事的两份实现（设置来源、错误传播、返回值、是否 emit 事件不同）。`check_all_subscriptions` 自带循环，收敛需先决定这些语义的归属。
 - Services 层**以无状态为主** —— 通过参数接收路径/配置，不持有全局状态。例外：`download_queue.rs` 与 `tray.rs` 是有状态的（队列、托盘句柄），通过 `AppContext` / `QueueContext` 注入。
 - 全局状态通过 `AppContext`（data_dir + `Mutex<AppSettings>` + scheduler watch channel）与 `QueueContext`（下载队列）管理，通过 `tauri::State` 注入。`scheduler_notify`（watch channel）由设置更新与托盘的暂停切换共同 `send`，调度循环消费；**发送端必须保持存活**，否则 `changed()` 立即返回 `Err` 造成忙循环。
 - **设置不要用快照冻结**：调度循环每轮从磁盘 `load_settings` 重读，因此改 yt-dlp 路径 / 代理 / Cookie / 下载目录无需重启即生效。新增长期运行的任务时同样按轮读取，不要持有 setup 时的设置快照。
@@ -127,7 +127,7 @@ utils/
 - 持有 `MutexGuard` 时，**先克隆值并释放锁，再进行 `await`**，避免跨异步边界持有互斥锁。**特别注意不要持锁跨越阻塞式子进程调用**（如 yt-dlp）。
 - **持久化写入只有一个入口**：`StorageService::update_download_records` / `update_subscriptions` / `update_state`（闭包式事务，内部持有全局写锁）。`save_subscriptions` / `save_download_records` / `save_state` 是私有原语，外部不可调用（编译器强制）；`load_*` 不加锁。
   事务闭包内**禁止**：调用 `update_*` / `save_settings`（`std::sync::Mutex` 不可重入，会死锁；debug 构建下会 panic 提示）、获取任何其他应用级锁、做文件 I/O。锁序固定为 `QueueContext.queue → 写锁`，不要引入反向路径。
-- **不要用陈旧快照整体覆盖**：跨 `await` 的长流程（`scheduler.rs` 的调度循环、`check_all_subscriptions`、`run_check_round`）一律「边跑边收集结果（`SubCheckOutcome`），收尾按 id 做一次增量事务」。用循环开始时的快照整表 `save` 会 clobber 并发写者（健康检查、单订阅命令）对其它订阅字段的修改。
+- **不要用陈旧快照整体覆盖**：跨 `await` 的长流程（`scheduler.rs` 的调度循环、`run_check_round`）一律「边跑边收集结果（`SubCheckOutcome`），收尾按 id 做一次增量事务」。用循环开始时的快照整表 `save` 会 clobber 并发写者（健康检查、单订阅命令）对其它订阅字段的修改。
 - **不要新增派生计数字段**：`Subscription` 与 `AppState` 都**不**再持有「已下载数」。唯一真相源是
   `download_records.json`，所有数字由前端从 `records` 派生，但**两套口径并存、不要互相替换**：
   - **记录总数**（`records.length`，含 `deleted`）：侧边栏徽标（`AppShell.tsx`）与「已下载」视图标题（`DownloadedList.tsx`）。

@@ -248,7 +248,9 @@ impl TrayService {
         let data_dir = self.data_dir.clone();
         tauri::async_runtime::spawn(async move {
             // 与自动调度共用同一轮检查逻辑：会写回 last_checked_at 等字段并 emit 事件
-            let _ = crate::commands::download::run_check_round(&data_dir, &app_handle).await;
+            if let Err(e) = crate::commands::download::run_check_round(&data_dir, &app_handle).await {
+                log::error!("tray: check round failed: {}", e);
+            }
         });
     }
 

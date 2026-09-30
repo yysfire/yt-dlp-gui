@@ -71,7 +71,9 @@ async fn run_scheduler_loop(
 
         if should_run_round(settings.scheduler_paused) {
             log::info!("Scheduler: checking subscriptions...");
-            let _ = crate::commands::download::run_check_round(&data_dir, &app_handle).await;
+            if let Err(e) = crate::commands::download::run_check_round(&data_dir, &app_handle).await {
+                log::error!("scheduler: check round failed: {}", e);
+            }
         } else {
             log::info!("Scheduler: paused, skipping this round");
         }

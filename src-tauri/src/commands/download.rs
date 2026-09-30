@@ -46,14 +46,17 @@ pub(crate) fn apply_check_outcomes(
 ///
 /// - 每轮自行从磁盘重读 `AppSettings`：yt-dlp 路径 / 代理 / Cookie / 下载目录的改动
 ///   下一轮即生效，调用方不需要（也不应该）传设置快照。
-/// - 错误只记日志、不向上传播：这是周期性任务，单轮失败不应终止循环。
+/// - 基础设施错误（快照读取、收尾写回）向上传播，由调用方决定处置：周期任务（scheduler）
+///   与托盘吞掉并记日志，命令层（`check_all_subscriptions`）转成前端契约的 `String`。
+///   单订阅失败仍只记日志并记入 `failed` outcome，不中断整轮。
 /// - 不判断 `scheduler_paused`：暂停是「自动调度」的策略，托盘手动触发的检查不应被它拦下。
 ///
-/// 由 `services::scheduler` 的自动检查与 `services::tray` 的「检查全部」共同调用。
+/// 由 `services::scheduler` 的自动检查、`services::tray` 的「检查全部」以及
+/// 命令层 `check_all_subscriptions`（薄委托）共同调用。
 pub(crate) async fn run_check_round(
     data_dir: &Path,
     app_handle: &tauri::AppHandle,
-) -> Vec<DownloadRecord> {
+) -> Result<Vec<DownloadRecord>, AppError> {
     let settings = StorageService::load_settings(data_dir);
     let yt_dlp_path = settings.yt_dlp_path.clone();
     let proxy = Some(settings.proxy_url.clone());
@@ -61,12 +64,18 @@ pub(crate) async fn run_check_round(
     let download_dir = PathBuf::from(&settings.download_dir);
 
     // 只读快照（长耗时阶段不持任何 storage 锁）
-    let subs = StorageService::load_subscriptions(data_dir).unwrap_or_default();
-    let records = StorageService::load_download_records(data_dir).unwrap_or_default();
-    let last_check_time = StorageService::load_state(data_dir)
-        .unwrap_or_default()
-        .last_check_time;
+    let subs = StorageService::load_subscriptions(data_dir)?;
+    let records = StorageService::load_download_records(data_dir)?;
+    let last_check_time = StorageService::load_state(data_dir)?.last_check_time;
     let data_dir_buf = data_dir.to_path_buf();
+
+    log::info!(
+        "check_round: {} subscriptions, cookie={}, proxy={}, ytdlp={}",
+        subs.len(),
+        cookie_file.as_deref().unwrap_or("none"),
+        proxy.as_deref().unwrap_or("none"),
+        yt_dlp_path,
+    );
 
     let mut all_new: Vec<DownloadRecord> = Vec::new();
     let mut outcomes: Vec<SubCheckOutcome> = Vec::new();
@@ -110,23 +119,19 @@ pub(crate) async fn run_check_round(
     // 收尾：按 id 增量写回，不再整表覆盖（否则会 clobber
     // 并发写者对同一订阅其它字段的修改）
     if !outcomes.is_empty() {
-        if let Err(e) = apply_check_outcomes(data_dir, &outcomes) {
-            log::error!("check_round: apply outcomes failed: {}", e);
-        }
+        apply_check_outcomes(data_dir, &outcomes)?;
     }
 
     // 只更新 last_check_time
-    if let Err(e) = StorageService::update_state(data_dir, |state| {
+    StorageService::update_state(data_dir, |state| {
         state.last_check_time = Some(Utc::now().to_rfc3339());
         Ok(())
-    }) {
-        log::error!("check_round: update last_check_time failed: {}", e);
-    }
+    })?;
 
     // 通知前端刷新
     let _ = app_handle.emit("scheduler-check-complete", ());
 
-    all_new
+    Ok(all_new)
 }
 
 /// Core logic for checking a single subscription for new videos and downloading them.
@@ -322,106 +327,21 @@ pub async fn check_subscription(
 
 /// Checks all non-paused subscriptions for new videos and downloads them.
 ///
-/// 注意：本函数与 [`run_check_round`] 是同一件事的两份实现（残留重复）。差异在于
-/// 本命令从 `AppContext.settings` 内存缓存取设置、错误向上传播并返回 `Result`
-/// （`run_check_round` 只记日志）。两者都在收尾 emit `scheduler-check-complete`。
-/// 将来若收敛为一份，需决定设置来源与错误语义的归属。
+/// 与后台自动调度（`services::scheduler`）、托盘「检查全部」（`services::tray`）共用
+/// [`run_check_round`]（含设置来源与收尾逻辑），此处只负责把错误转成前端契约要求的
+/// `String`。
+///
+/// 注意：设置来源由 `run_check_round` 从磁盘 `settings.json` 读取（而非
+/// `AppContext.settings` 内存缓存）。这修掉了「外部修改 `settings.json` 后本命令仍看到旧值」
+/// 的偏差；正常路径下两条写路径都是「先落盘、再更新缓存」，因此两者一致。
 #[tauri::command]
 pub async fn check_all_subscriptions(
     state: State<'_, AppContext>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<DownloadRecord>, String> {
-    // 只读快照（长耗时阶段不再持有它）
-    let subs = StorageService::load_subscriptions(&state.data_dir)
-        .map_err(|e| e.to_string())?;
-
-    // Clone settings values and drop the MutexGuard before awaiting
-    let (yt_dlp_path, proxy, cookie_file, download_dir) = {
-        let settings = state.settings.lock().map_err(|e| e.to_string())?;
-        (
-            settings.yt_dlp_path.clone(),
-            Some(settings.proxy_url.clone()),
-            Some(settings.cookie_file.clone()),
-            PathBuf::from(&settings.download_dir),
-        )
-    };
-
-    let last_check_time = StorageService::load_state(&state.data_dir)
-        .map_err(|e| e.to_string())?
-        .last_check_time;
-    let records =
-        StorageService::load_download_records(&state.data_dir).map_err(|e| e.to_string())?;
-
-    let mut all_new: Vec<DownloadRecord> = Vec::new();
-    let mut outcomes: Vec<SubCheckOutcome> = Vec::new();
-
-    log::info!(
-        "check_all: {} subscriptions, cookie={}, proxy={}, ytdlp={}",
-        subs.len(),
-        cookie_file.as_deref().unwrap_or("none"),
-        proxy.as_deref().unwrap_or("none"),
-        yt_dlp_path,
-    );
-
-    // 长耗时阶段：逐个检查，结果先攒在 outcomes 里，不持任何 storage 锁
-    for sub in subs.iter().filter(|s| !s.paused) {
-        let checked_at = chrono::Utc::now().to_rfc3339();
-        match check_and_download(
-            sub,
-            &yt_dlp_path,
-            &proxy,
-            &cookie_file,
-            &download_dir,
-            &state.data_dir,
-            &last_check_time,
-            &records,
-            &app_handle,
-        )
+    run_check_round(&state.data_dir, &app_handle)
         .await
-        {
-            Ok(new_records) => {
-                all_new.extend(new_records);
-                outcomes.push(SubCheckOutcome {
-                    sub_id: sub.id.clone(),
-                    checked_at,
-                    status: "success",
-                    error: None,
-                });
-            }
-            Err(e) => {
-                let message = e.to_string();
-                log::error!(
-                    "check_all: error checking {}: {}",
-                    sub.channel_name,
-                    message
-                );
-                outcomes.push(SubCheckOutcome {
-                    sub_id: sub.id.clone(),
-                    checked_at,
-                    status: "failed",
-                    error: Some(message),
-                });
-            }
-        }
-    }
-
-    // 收尾：一次事务按 id 增量写回 —— 不再用陈旧快照整表覆盖，
-    // 因此不会 clobber 并发写者（健康检查、单订阅命令）对其它订阅字段的修改。
-    if !outcomes.is_empty() {
-        apply_check_outcomes(&state.data_dir, &outcomes).map_err(|e| e.to_string())?;
-    }
-
-    // 只更新 last_check_time
-    StorageService::update_state(&state.data_dir, |app_state| {
-        app_state.last_check_time = Some(Utc::now().to_rfc3339());
-        Ok(())
-    })
-    .map_err(|e| e.to_string())?;
-
-    // 一次检查完成（语义同 run_check_round / check_subscription）
-    let _ = app_handle.emit("scheduler-check-complete", ());
-
-    Ok(all_new)
+        .map_err(|e| e.to_string())
 }
 
 /// Returns download records, optionally filtered by subscription ID.
