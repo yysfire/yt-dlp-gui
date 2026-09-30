@@ -144,19 +144,6 @@ export default function App() {
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
 
-  // Listen for download-complete events from the Rust backend
-  useEffect(() => {
-    const unlistenPromise = listen<{ title: string; channel: string }>(
-      "download-complete",
-      () => {
-        scheduleRefresh();
-      },
-    );
-    return () => {
-      unlistenPromise.then((fn) => fn());
-    };
-  }, [scheduleRefresh]);
-
   // Listen for records-changed events (real-time status updates during check)
   useEffect(() => {
     const unlistenPromise = listen("records-changed", () => {

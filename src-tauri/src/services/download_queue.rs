@@ -491,13 +491,6 @@ impl DownloadQueue {
 
         match status {
             Some(Ok(s)) if s.success() => {
-                let _ = app_handle.emit(
-                    "download-complete",
-                    serde_json::json!({
-                        "title": &task.video_title,
-                    }),
-                );
-
                 // Update file info in DownloadRecord
                 if !file_path.is_empty() {
                     // 只读定位目标记录（不加锁），文件大小在锁外算好
@@ -758,19 +751,19 @@ impl DownloadQueue {
         }
 
         // Fallback: search the waiting queue
-        let waiting_id = {
+        let waiting_task = {
             let mut queue = self.queue.lock().unwrap();
             if let Some(pos) = queue.iter().position(|t| t.video_url == video_url) {
                 let task = queue.remove(pos).unwrap();
-                Some(task.id)
+                Some((task.video_url, task.subscription_id))
             } else {
                 None
             }
             // queue lock guard dropped here
         };
 
-        if let Some(id) = waiting_id {
-            self.update_record_status(&ctx.data_dir, video_url, "", "cancelled", Some("Cancelled by user".to_string()));
+        if let Some((url, sub_id)) = waiting_task {
+            self.update_record_status(&ctx.data_dir, &url, &sub_id, "cancelled", Some("Cancelled by user".to_string()));
             self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());

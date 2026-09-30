@@ -120,14 +120,6 @@ export interface AppSettings {
   scheduler_paused: boolean;
 }
 
-/** Runtime system tray state. */
-export interface TrayState {
-  status: "idle" | "downloading" | "checking";
-  window_visible: boolean;
-  tray_supported: boolean;
-  active_downloads: number;
-}
-
 /** Result of download path validation. */
 export interface PathValidateResult {
   valid: boolean;

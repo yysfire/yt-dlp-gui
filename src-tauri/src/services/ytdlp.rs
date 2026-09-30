@@ -1,10 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
-
 use crate::utils::AppError;
-use crate::utils::progress_parser::{self, ProgressEvent};
 
 /// Information returned when parsing a channel/playlist page.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -12,9 +9,6 @@ pub struct ChannelInfo {
     /// Human-readable channel name
     #[serde(alias = "channel")]
     pub channel_name: String,
-    /// Canonical channel URL
-    #[serde(alias = "channel_url")]
-    pub channel_url: String,
     /// URL of the channel avatar/thumbnail
     #[serde(alias = "thumbnail")]
     pub channel_avatar_url: String,
@@ -32,23 +26,11 @@ pub struct VideoInfo {
     pub url: String,
     /// Video ID from the platform (e.g., YouTube video ID). Used for deduplication.
     pub id: Option<String>,
-    /// Upload date in YYYYMMDD format
-    pub upload_date: Option<String>,
-}
-
-/// Result of a successful video download.
-#[derive(Debug, Clone)]
-pub struct DownloadResult {
-    /// Absolute path to the downloaded file
-    pub file_path: String,
-    /// File size in bytes
-    pub file_size: u64,
 }
 
 /// Result of spawning a yt-dlp download process.
 pub struct SpawnedDownload {
     pub child: tokio::process::Child,
-    pub output_template: String,
 }
 
 /// 将订阅数格式化为人类可读的字符串（如 "12.3K", "1.5M"）
@@ -188,215 +170,6 @@ impl YtDlpService {
         log::info!("check_new_videos: found {} videos for {}", videos.len(), url);
 
         Ok(videos)
-    }
-
-    /// Downloads a single video.
-    ///
-    /// Executes: `yt-dlp -f bestvideo[height<=1080]+bestaudio/best[height<=1080] -o <output_template> <url>`
-    /// Returns the local file path and size on success.
-    pub fn download_video(
-        yt_dlp_path: &str,
-        proxy: &Option<String>,
-        cookie_file: &Option<String>,
-        url: &str,
-        quality: &str,
-        output_dir: &Path,
-    ) -> Result<DownloadResult, AppError> {
-        // Ensure output directory exists
-        std::fs::create_dir_all(output_dir)?;
-
-        let output_template = output_dir.join("%(title)s.%(ext)s");
-
-        let mut cmd = Command::new(yt_dlp_path);
-
-        // Build format string based on quality preset
-        let format_str = match quality {
-            "best" => "best".to_string(),
-            "2160p" => "bestvideo[height<=2160]+bestaudio/best[height<=2160]".to_string(),
-            "1440p" => "bestvideo[height<=1440]+bestaudio/best[height<=1440]".to_string(),
-            "720p" => "bestvideo[height<=720]+bestaudio/best[height<=720]".to_string(),
-            "480p" => "bestvideo[height<=480]+bestaudio/best[height<=480]".to_string(),
-            _ => "bestvideo[height<=1080]+bestaudio/best[height<=1080]".to_string(),
-        };
-
-        cmd.args([
-            "-f", &format_str,
-            "-o", &output_template.to_string_lossy(),
-            "--no-playlist",
-            "--print", "after_move:filepath",
-            url,
-        ]);
-
-        if let Some(ref proxy_url) = proxy {
-            if !proxy_url.is_empty() {
-                cmd.arg("--proxy").arg(proxy_url);
-            }
-        }
-
-        if let Some(ref cf) = cookie_file {
-            if !cf.is_empty() {
-                cmd.arg("--cookies").arg(cf);
-            }
-        }
-
-        let output = cmd.output().map_err(|e| AppError::YtDlp(format!(
-            "Failed to execute yt-dlp: {}",
-            e
-        )))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(AppError::YtDlp(format!(
-                "yt-dlp download failed: {}",
-                stderr.trim()
-            )));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let file_path = stdout.lines().last().unwrap_or("").trim().to_string();
-
-        if file_path.is_empty() {
-            return Err(AppError::YtDlp(
-                "yt-dlp completed but no output file path was returned".to_string(),
-            ));
-        }
-
-        let file_size = std::fs::metadata(&file_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-
-        Ok(DownloadResult {
-            file_path,
-            file_size,
-        })
-    }
-
-    /// Downloads a single video with real-time progress streaming.
-    ///
-    /// Uses `tokio::process::Command` for async execution and `--progress-template`
-    /// to output structured progress lines. The `on_progress` callback is called
-    /// for each progress line parsed from stdout.
-    ///
-    /// Progress template format: `percent|speed|downloaded_bytes|total_bytes|eta`
-    pub async fn download_video_streaming(
-        yt_dlp_path: &str,
-        proxy: &Option<String>,
-        cookie_file: &Option<String>,
-        url: &str,
-        quality: &str,
-        output_dir: &Path,
-        on_progress: impl Fn(ProgressEvent),
-    ) -> Result<DownloadResult, AppError> {
-        // Ensure output directory exists
-        std::fs::create_dir_all(output_dir)?;
-
-        let output_template = output_dir.join("%(title)s.%(ext)s");
-
-        let mut cmd = tokio::process::Command::new(yt_dlp_path);
-
-        // Build format string based on quality preset
-        let format_str = match quality {
-            "best" => "best".to_string(),
-            "2160p" => "bestvideo[height<=2160]+bestaudio/best[height<=2160]".to_string(),
-            "1440p" => "bestvideo[height<=1440]+bestaudio/best[height<=1440]".to_string(),
-            "720p" => "bestvideo[height<=720]+bestaudio/best[height<=720]".to_string(),
-            "480p" => "bestvideo[height<=480]+bestaudio/best[height<=480]".to_string(),
-            _ => "bestvideo[height<=1080]+bestaudio/best[height<=1080]".to_string(),
-        };
-
-        cmd.args([
-            "-f", &format_str,
-            "-o", &output_template.to_string_lossy(),
-            "--no-playlist",
-            "--progress-template",
-            "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_estimate)s|%(progress._eta_str)s",
-            "--print", "after_move:filepath",
-            url,
-        ]);
-
-        if let Some(ref proxy_url) = proxy {
-            if !proxy_url.is_empty() {
-                cmd.arg("--proxy").arg(proxy_url);
-            }
-        }
-
-        if let Some(ref cf) = cookie_file {
-            if !cf.is_empty() {
-                cmd.arg("--cookies").arg(cf);
-            }
-        }
-
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-
-        let mut child = cmd.spawn().map_err(|e| AppError::YtDlp(format!(
-            "Failed to execute yt-dlp: {}",
-            e
-        )))?;
-
-        let stdout = child.stdout.take().ok_or_else(|| AppError::YtDlp(
-            "Failed to capture yt-dlp stdout".to_string(),
-        ))?;
-        let stderr = child.stderr.take();
-
-        let reader = BufReader::new(stdout);
-        let mut lines = reader.lines();
-
-        let mut file_path = String::new();
-
-        // Read stdout line by line
-        while let Ok(Some(line)) = lines.next_line().await {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            // Try parsing as progress event first
-            if let Some(event) = progress_parser::parse_progress_line(trimmed) {
-                on_progress(event);
-            } else {
-                // Not a progress line — could be the file path output
-                file_path = trimmed.to_string();
-            }
-        }
-
-        // Await child process completion
-        let status = child.wait().await.map_err(|e| AppError::YtDlp(format!(
-            "Failed to wait for yt-dlp process: {}",
-            e
-        )))?;
-
-        if !status.success() {
-            let mut error_msg = String::new();
-            if let Some(stderr_pipe) = stderr {
-                let mut stderr_reader = BufReader::new(stderr_pipe);
-                let mut buf = String::new();
-                while let Ok(n) = stderr_reader.read_line(&mut buf).await {
-                    if n == 0 { break; }
-                    error_msg.push_str(&buf);
-                    buf.clear();
-                }
-            }
-            return Err(AppError::YtDlp(format!(
-                "yt-dlp download failed: {}",
-                error_msg.trim()
-            )));
-        }
-
-        if file_path.is_empty() {
-            return Err(AppError::YtDlp(
-                "yt-dlp completed but no output file path was returned".to_string(),
-            ));
-        }
-
-        let file_size = std::fs::metadata(&file_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-
-        Ok(DownloadResult {
-            file_path,
-            file_size,
-        })
     }
 
     /// 分页获取频道视频列表。
@@ -618,10 +391,7 @@ impl YtDlpService {
             e
         )))?;
 
-        Ok(SpawnedDownload {
-            child,
-            output_template: output_template.to_string_lossy().to_string(),
-        })
+        Ok(SpawnedDownload { child })
     }
 }
 
@@ -644,7 +414,6 @@ mod tests {
             .expect("should parse ChannelInfo");
 
         assert_eq!(info.channel_name, "Test Channel");
-        assert_eq!(info.channel_url, "https://youtube.com/@test");
         assert_eq!(info.channel_avatar_url, "https://example.com/avatar.jpg");
         assert_eq!(info.platform, "Youtube");
     }
@@ -661,7 +430,6 @@ mod tests {
         let info: ChannelInfo = serde_json::from_str(json)
             .expect("should parse with all aliases");
         assert_eq!(info.channel_name, "MyChannel");
-        assert_eq!(info.channel_url, "https://u");
         assert_eq!(info.channel_avatar_url, "https://t");
         assert_eq!(info.platform, "youtube");
     }
@@ -679,19 +447,6 @@ mod tests {
 
         assert_eq!(video.title, "Amazing Video");
         assert_eq!(video.url, "https://youtube.com/watch?v=abc");
-        assert_eq!(video.upload_date, Some("20250528".to_string()));
-    }
-
-    #[test]
-    fn test_video_info_without_upload_date() {
-        let json = r#"{
-            "title": "No Date Video",
-            "url": "https://youtube.com/watch?v=xyz"
-        }"#;
-
-        let video: VideoInfo = serde_json::from_str(json)
-            .expect("should parse without upload_date");
-        assert_eq!(video.upload_date, None);
     }
 
     #[test]

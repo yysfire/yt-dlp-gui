@@ -5,7 +5,7 @@ use tauri::{Emitter, Manager, State};
 
 use crate::models::{DownloadRecord, Subscription};
 use crate::services::{StorageService, YtDlpService};
-use crate::services::download_queue::{notify_records_changed, QueueState};
+use crate::services::download_queue::notify_records_changed;
 use crate::utils::AppError;
 use crate::AppContext;
 use crate::QueueContext;
@@ -408,21 +408,6 @@ pub fn recover_state(data_dir: &PathBuf) -> Result<(), AppError> {
     Ok(())
 }
 
-#[tauri::command]
-pub async fn get_queue_state(
-    queue_ctx: State<'_, QueueContext>,
-) -> Result<QueueState, String> {
-    let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
-    match guard.as_ref() {
-        Some(q) => Ok(q.get_state()),
-        None => Ok(QueueState {
-            active_count: 0,
-            waiting_count: 0,
-            max_concurrent: 1,
-        }),
-    }
-}
-
 /// Pauses a running download task by its task ID.
 #[tauri::command]
 pub async fn pause_download(
@@ -511,16 +496,6 @@ pub async fn cancel_download_by_url(
         Some(q) => q.cancel_by_url(&video_url, &ctx).map_err(|e| e.to_string()),
         None => Err("Download queue not initialized".to_string()),
     }
-}
-
-/// Manually triggers a full check of all subscriptions (same as check_all_subscriptions).
-/// This is the user-facing "Check All" action.
-#[tauri::command]
-pub async fn manual_check_all(
-    state: State<'_, AppContext>,
-    app_handle: tauri::AppHandle,
-) -> Result<Vec<DownloadRecord>, String> {
-    check_all_subscriptions(state, app_handle).await
 }
 
 /// 分页获取订阅频道的视频列表。
@@ -870,7 +845,7 @@ mod tests {
 
     #[test]
     fn test_video_list_result_construction_empty_channel() {
-        use crate::models::{VideoInfo, VideoListResult};
+        use crate::models::VideoListResult;
 
         let result = VideoListResult {
             videos: vec![],

@@ -1,11 +1,9 @@
 //! System tray icon service.
 //!
-//! Manages the lifecycle of the system tray icon: creation, menu events,
-//! state updates (idle/downloading/checking), and cleanup.
+//! Manages the lifecycle of the system tray icon: creation and menu events.
 //!
 //! See `specs/005-system-tray-icon/spec.md` for full feature specification.
 
-use serde::Serialize;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::menu::{
     Menu, MenuBuilder, MenuEvent, MenuItem, MenuItemBuilder, PredefinedMenuItem,
@@ -18,78 +16,21 @@ use crate::utils::error::AppError;
 use crate::AppContext;
 use std::path::PathBuf;
 
-macro_rules! include_icon {
-    ($path:literal) => {
-        include_bytes!(concat!("../../icons/", $path))
-    };
-}
-
-/// Tray icon runtime status.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub enum TrayStatus {
-    Idle,
-    Downloading { active_count: u32 },
-    Checking,
-}
-
 /// Runtime state of the system tray icon.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct TrayState {
-    pub status: TrayStatus,
     pub window_visible: bool,
-    pub tray_supported: bool,
-    pub active_downloads: u32,
 }
 
 impl Default for TrayState {
     fn default() -> Self {
         Self {
-            status: TrayStatus::Idle,
             window_visible: true,
-            tray_supported: true,
-            active_downloads: 0,
         }
     }
 }
 
 impl TrayState {
-    pub fn set_status(&mut self, new_status: TrayStatus) -> Result<(), String> {
-        match (&self.status, &new_status) {
-            (_, TrayStatus::Idle) => {}
-            (TrayStatus::Idle, TrayStatus::Downloading { .. }) => {}
-            (TrayStatus::Idle, TrayStatus::Checking) => {}
-            (TrayStatus::Downloading { .. }, TrayStatus::Checking) => {
-                return Err("Cannot transition from Downloading to Checking".into());
-            }
-            (TrayStatus::Checking, TrayStatus::Downloading { .. }) => {
-                return Err("Cannot transition from Checking to Downloading".into());
-            }
-            (TrayStatus::Downloading { .. }, TrayStatus::Downloading { active_count }) => {
-                self.active_downloads = *active_count;
-                self.status = new_status;
-                return Ok(());
-            }
-            _ => {}
-        }
-        if let TrayStatus::Downloading { active_count } = &new_status {
-            self.active_downloads = *active_count;
-        } else {
-            self.active_downloads = 0;
-        }
-        self.status = new_status;
-        Ok(())
-    }
-
-    pub fn tooltip_text(&self) -> String {
-        match &self.status {
-            TrayStatus::Idle => "yt-dlp 订阅管理器 - 空闲".to_string(),
-            TrayStatus::Downloading { active_count } => {
-                format!("正在下载 {} 个视频", active_count)
-            }
-            TrayStatus::Checking => "正在检查订阅更新...".to_string(),
-        }
-    }
-
     pub fn window_menu_text(&self) -> &str {
         if self.window_visible {
             "隐藏主窗口"
@@ -200,10 +141,7 @@ impl TrayService {
                 );
                 Ok(TrayService {
                     tray_icon: None,
-                    state: Mutex::new(TrayState {
-                        tray_supported: false,
-                        ..Default::default()
-                    }),
+                    state: Mutex::new(TrayState::default()),
                     menu_show_item: show_item,
                     menu_scheduler_item: scheduler_item,
                     data_dir,
@@ -289,14 +227,8 @@ impl TrayService {
     }
 
     fn handle_quit(&self, app: &AppHandle) {
-        let has_active = if let Ok(state) = self.state.lock() {
-            matches!(state.status, TrayStatus::Downloading { .. })
-        } else {
-            false
-        };
-        if has_active {
-            log::info!("Active downloads detected during tray quit, exiting per user request");
-        }
+        // 托盘状态更新从未实现（set_status/update_status 无调用方），故原先「有活跃下载时
+        // 再退出」的判断恒为 false、从未生效，已移除。
         log::info!("Tray quit: exiting application");
         app.exit(0);
     }
@@ -313,63 +245,8 @@ impl TrayService {
         }
     }
 
-    /// Show the main window.
-    pub fn show_window(&self, app: &AppHandle) {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.set_focus();
-            if let Ok(mut state) = self.state.lock() {
-                state.window_visible = true;
-                let text = state.window_menu_text();
-                let _ = self.menu_show_item.set_text(text);
-            }
-        }
-    }
-
-    /// Update tray visual status (icon + tooltip).
-    pub fn update_status(
-        &self,
-        app: &AppHandle,
-        new_status: TrayStatus,
-    ) -> Result<(), String> {
-        let mut state = self.state.lock().map_err(|e| e.to_string())?;
-        state.set_status(new_status)?;
-
-        if let Some(ref tray) = self.tray_icon {
-            let tooltip = state.tooltip_text();
-            let _ = tray.set_tooltip(Some(&tooltip));
-
-            let icon_bytes: &[u8] = match &state.status {
-                TrayStatus::Idle => include_icon!("tray-idle.png"),
-                TrayStatus::Downloading { .. } => include_icon!("tray-downloading.png"),
-                TrayStatus::Checking => include_icon!("tray-checking.png"),
-            };
-            match tauri::image::Image::from_bytes(icon_bytes) {
-                Ok(image) => {
-                    let _ = tray.set_icon(Some(image));
-                }
-                Err(e) => {
-                    log::error!("Failed to load tray icon image: {}", e);
-                }
-            }
-        }
-
-        let _ = app.emit("tray-state-changed", &*state);
-        log::info!("Tray status updated: tooltip={}", state.tooltip_text());
-        Ok(())
-    }
-
     pub fn is_supported(&self) -> bool {
         self.tray_icon.is_some()
-    }
-
-    pub fn update_scheduler_menu_text(&self, paused: bool) {
-        let text = TrayState::scheduler_menu_text(paused);
-        let _ = self.menu_scheduler_item.set_text(text);
-    }
-
-    pub fn cleanup(&self) {
-        log::info!("Tray service cleanup");
     }
 }
 
@@ -380,52 +257,7 @@ mod tests {
     #[test]
     fn test_default_tray_state() {
         let state = TrayState::default();
-        assert_eq!(state.status, TrayStatus::Idle);
         assert!(state.window_visible);
-        assert!(state.tray_supported);
-        assert_eq!(state.active_downloads, 0);
-    }
-
-    #[test]
-    fn test_status_transition_idle_to_downloading() {
-        let mut state = TrayState::default();
-        assert!(state.set_status(TrayStatus::Downloading { active_count: 3 }).is_ok());
-        assert_eq!(state.status, TrayStatus::Downloading { active_count: 3 });
-        assert_eq!(state.active_downloads, 3);
-    }
-
-    #[test]
-    fn test_status_transition_downloading_to_idle() {
-        let mut state = TrayState::default();
-        state.set_status(TrayStatus::Downloading { active_count: 2 }).unwrap();
-        assert!(state.set_status(TrayStatus::Idle).is_ok());
-        assert_eq!(state.status, TrayStatus::Idle);
-    }
-
-    #[test]
-    fn test_status_transition_downloading_to_checking_invalid() {
-        let mut state = TrayState::default();
-        state.set_status(TrayStatus::Downloading { active_count: 1 }).unwrap();
-        assert!(state.set_status(TrayStatus::Checking).is_err());
-    }
-
-    #[test]
-    fn test_tooltip_idle() {
-        assert_eq!(TrayState::default().tooltip_text(), "yt-dlp 订阅管理器 - 空闲");
-    }
-
-    #[test]
-    fn test_tooltip_downloading() {
-        let mut state = TrayState::default();
-        state.set_status(TrayStatus::Downloading { active_count: 3 }).unwrap();
-        assert_eq!(state.tooltip_text(), "正在下载 3 个视频");
-    }
-
-    #[test]
-    fn test_tooltip_checking() {
-        let mut state = TrayState::default();
-        state.set_status(TrayStatus::Checking).unwrap();
-        assert_eq!(state.tooltip_text(), "正在检查订阅更新...");
     }
 
     #[test]

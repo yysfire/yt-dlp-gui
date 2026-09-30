@@ -66,28 +66,26 @@ App.tsx                      # 根组件：主题提供者、暗色模式、事�
 
 > 注意：把状态下移到局部组件时，要确认该组件不会因折叠/切换而卸载（`SubscriptionList` 就依赖「始终挂载、仅 CSS 隐藏」这一点来保住筛选状态）。
 
-**后端通信**: `src/lib/tauri.ts` 封装了全部 38 个 Tauri `invoke()` 调用，返回类型与 `src/types/index.ts` 一致（类型是手写断言，与 Rust 侧 serde 结构各自维护，没有校验机制，改字段时两边都要动）。前端通过 `listen()` 订阅后端推送事件，事件名分散在多个文件中定义，**没有单一契约清单**（下面这份即事实上的契约，改事件名或载荷时请同步此处）：
+**后端通信**: `src/lib/tauri.ts` 封装了全部 36 个 Tauri `invoke()` 调用，返回类型与 `src/types/index.ts` 一致（类型是手写断言，与 Rust 侧 serde 结构各自维护，没有校验机制，改字段时两边都要动）。前端通过 `listen()` 订阅后端推送事件，事件名分散在多个文件中定义，**没有单一契约清单**（下面这份即事实上的契约，改事件名或载荷时请同步此处）：
 
 - `records-changed` — 下载记录发生变化（**无载荷**）。**唯一订阅者是 `App.tsx`**（`AppShell` 只订 `queue-changed`，`StatusBar` 只订 `scheduler-check-complete`）。所有 emit 统一走 `services/download_queue.rs::notify_records_changed`（纯 emit，零 I/O 零加锁，可在临界区安全调用）；契约：**凡写 `download_records.json` 的路径都必须调用它**
 - `download-progress` — 单条下载的进度（带载荷，`useDownloadProgress` 消费）
-- `download-complete` — 单个视频下载完成。注意它 emit 于记录落库**之前**，刷新职责实际由 `records-changed` 覆盖，属清理候选
 - `queue-changed` — 下载队列状态变化（带载荷）
 - `scheduler-check-complete` — **任一次检查完成**：自动调度与托盘「检查全部」经 `run_check_round`，手动「检查全部」经 `check_all_subscriptions`，手动单订阅经 `check_subscription`；均在该次检查的 `last_check_time` 落盘后 emit。语义是「一次检查完成」，**不是**「调度器轮次」
 - `subscriptions-updated` — 批量导入/删除后
 - `file-sync-complete` — 文件存在性同步结果
 - `health-check-progress` / `health-check-complete` — 健康检查
 - `import-progress` / `import-complete` — 批量导入
-- `tray-state-changed` — 由后端 emit，**当前前端无订阅者**
 - `settings-changed` — settings 落盘并同步缓存后（前端保存 **或** 托盘切换 `scheduler_paused`），**带完整 `AppSettings` 载荷**；`App.tsx` 用它同步 `darkMode`（取代原先的 5 秒轮询）。契约：**凡写 settings 的路径都必须 emit 本事件**
 
 使用的 Tauri 插件：`dialog`（文件对话框）、`notification`（桌面通知）、`shell`（打开 URL）。
 
 ### Rust 后端（`src-tauri/src/`）
 
-`lib.rs` 定义模块划分、注册命令（38 个，见末尾 `generate_handler!`）、装配全局状态；后台周期任务委托给 `services::scheduler`。
+`lib.rs` 定义模块划分、注册命令（36 个，见末尾 `generate_handler!`）、装配全局状态；后台周期任务委托给 `services::scheduler`。
 
 ```
-commands/               # Tauri IPC 命令处理函数（38 个注册命令）
+commands/               # Tauri IPC 命令处理函数（36 个注册命令）
   subscription.rs       # 订阅增删改查、分组、batch_delete、get_channel_info
   download.rs           # check_subscription / check_all（后者是 run_check_round 的薄委托）、
                         #   记录查询、队列控制、get_channel_videos
@@ -134,8 +132,6 @@ utils/
   - **已完成数**（`status === "completed"`）：状态栏（`AppShell.tsx` → `StatusBar`，文案「已完成」）与详情面板头部（`DetailPanel.tsx`，文案「已完成」）。
   历史上该字段有「完成回调增量」与「启动重算」两个语义不同的写者，导致显示不一致——不要重新引入。
 - **写操作与事件成对**：凡修改持久化数据的路径，必须在写事务完成后 emit 对应事件 —— 记录改动 → `services/download_queue.rs::notify_records_changed`，队列改动 → `DownloadQueue::emit_queue_changed`，settings 改动 → `settings-changed`。emit 一律是**纯 emit**（零 I/O、零加锁），因此可在任意临界区内安全调用；不要为了构造载荷去读文件或加锁。前端对高频事件做短延时合并（`App.tsx` 的 `scheduleRefresh`，150ms 窗口内只排一次，用 schedule-once 而非 debounce 以免连续事件把刷新无限推迟）。
-- 已知死代码（无消费方，待清理）：`useDownloadRecords` 的 `getQueueState` / `getQueue`、`src/lib/tauri.ts` 的 `getQueueState`、后端 `get_queue_state` 命令。
-
 **`check_and_download()`**（`commands/download.rs`）是检查入口：按 `last_check_time` 换算日期下界 → `yt-dlp --flat-playlist` 取新视频 → 对已有记录去重（`failed` 可重试）→ 逐个交给 `DownloadQueue::enqueue_from_video()` 入队。**真正的下载、进度解析与记录状态落库都在 `download_queue.rs` 的 `execute_download_with_control()` 里**（该函数按 `video_url + subscription_id` 定位记录并做事务写入）。
 
 `check_and_download` 还有一个「无队列时直接建记录」的兜底分支 —— 因为 `QueueContext` 在 `lib.rs` setup 里必然注册，该分支实际上走不到。
