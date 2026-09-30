@@ -266,7 +266,7 @@ describe("DetailPanel", () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByText(/错误: Network timeout/)).toBeInTheDocument();
+        expect(screen.getByText("错误: Network timeout")).toBeInTheDocument();
       });
     });
   });
