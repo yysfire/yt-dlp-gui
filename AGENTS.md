@@ -212,7 +212,7 @@ utils/
 
 ### 测试
 
-所有 Rust 测试均为源代码文件内的 `#[cfg(test)]` 模块 —— 共 234 个测试函数，分布在 models、services 和 commands 中。测试重点包括序列化往返、默认值、OPML 解析/构建、存储事务语义（提交/回滚/并发无丢失更新）、健康状态更新和画质格式字符串。没有需要实际执行 yt-dlp CLI 的集成测试。
+所有 Rust 测试均为源代码文件内的 `#[cfg(test)]` 模块 —— 共 259 个测试函数，分布在 models、services 和 commands 中。测试重点包括序列化往返、默认值、OPML 解析/构建、存储事务语义（提交/回滚/并发无丢失更新）、健康状态更新和画质格式字符串。没有需要实际执行 yt-dlp CLI 的集成测试。
 
 前端测试用 vitest + @testing-library/react（`npm test`），源码在 `src/**/__tests__/`。注意 `src/hooks/__tests__/useFilter.test.ts` 的 38 个筛选/排序用例测的是 `useFilter.ts` 里真实导出的 `applyFilter`/`applySort`，另有一组 `renderHook` 用例覆盖 Hook 的状态联动。
 
@@ -221,6 +221,20 @@ utils/
 ### 平台支持
 
 通过 Tauri 的跨平台打包支持 Windows、macOS 和 Linux。提供了三个平台的图标（`icon.ico`、`icon.icns`、`.png` 变体）。
+
+**Linux AppImage 会污染子进程的 Python 环境**：linuxdeploy 生成的 `AppRun`（内部 `AppRun.wrapped`）会**无条件**设置
+`PYTHONHOME=$APPDIR/usr/` 与 `PYTHONPATH=$APPDIR/usr/share/pyshared/:<原值>` —— 这是给「AppDir 自带 Python」的
+AppImage 准备的，而本项目 AppDir 内只有 GTK/WebKit 库。`yt-dlp` 是 `#!/usr/bin/env python3` 脚本，继承这些变量后会去
+AppImage 挂载点里找 Python 标准库，直接崩溃：
+
+```
+Fatal Python error: Failed to import encodings module
+ModuleNotFoundError: No module named 'encodings'
+```
+
+因此 **spawn yt-dlp 一律走 `services/ytdlp.rs` 的 `yt_dlp_command()` / `yt_dlp_command_async()`**，二者经
+`sanitize_python_env()` 清理：仅在环境存在 `APPDIR`（即确实运行在 AppImage 内）时才动手，非 AppImage 环境不碰用户配置。
+新增 yt-dlp 调用点不要直接用 `Command::new`。其它子进程（`gio`、`xdg-open` 等文件管理器）不是 Python 程序，无需处理。
 
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,

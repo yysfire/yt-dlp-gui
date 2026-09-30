@@ -56,6 +56,108 @@ pub struct SpawnedDownload {
     pub child: tokio::process::Child,
 }
 
+/// 让 `std::process::Command` 与 `tokio::process::Command` 共用同一套环境清理逻辑。
+trait EnvCommand {
+    fn remove_env(&mut self, key: &str);
+    fn set_env(&mut self, key: &str, value: &str);
+}
+
+impl EnvCommand for Command {
+    fn remove_env(&mut self, key: &str) {
+        self.env_remove(key);
+    }
+
+    fn set_env(&mut self, key: &str, value: &str) {
+        self.env(key, value);
+    }
+}
+
+impl EnvCommand for tokio::process::Command {
+    fn remove_env(&mut self, key: &str) {
+        self.env_remove(key);
+    }
+
+    fn set_env(&mut self, key: &str, value: &str) {
+        self.env(key, value);
+    }
+}
+
+/// `path` 是否就是 AppImage 挂载目录 `appdir`（已去掉尾部斜杠）或位于其下。
+fn is_inside_appdir(path: &str, appdir: &str) -> bool {
+    match path.strip_prefix(appdir) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    }
+}
+
+/// 从 `PYTHONPATH` 中剔除位于 `appdir` 下的条目；若一条不剩则返回 `None`，
+/// 表示该变量应当整体移除。
+fn strip_appdir_entries(value: &str, appdir: &str) -> Option<String> {
+    let kept: Vec<&str> = value
+        .split(':')
+        .filter(|entry| !entry.is_empty() && !is_inside_appdir(entry, appdir))
+        .collect();
+    if kept.is_empty() {
+        None
+    } else {
+        Some(kept.join(":"))
+    }
+}
+
+/// 清除 AppImage 注入的 Python 环境污染。
+///
+/// Tauri 打出的 AppImage 由 linuxdeploy 生成 `AppRun`，其内部二进制（`AppRun.wrapped`）
+/// 会**无条件**设置 `PYTHONHOME=$APPDIR/usr/` 与
+/// `PYTHONPATH=$APPDIR/usr/share/pyshared/:<原值>`。子进程继承后，`yt-dlp`
+/// （`#!/usr/bin/env python3` 脚本）会去 AppImage 挂载点里找 Python 标准库，直接以
+/// `Fatal Python error: Failed to import encodings module` 崩溃。
+fn sanitize_python_env<C: EnvCommand>(cmd: &mut C) {
+    let appdir = std::env::var_os("APPDIR").map(|v| v.to_string_lossy().into_owned());
+    let python_path = std::env::var_os("PYTHONPATH").map(|v| v.to_string_lossy().into_owned());
+
+    for (key, value) in python_env_fixes(appdir.as_deref(), python_path.as_deref()) {
+        match value {
+            Some(value) => cmd.set_env(key, &value),
+            None => cmd.remove_env(key),
+        }
+    }
+}
+
+/// 计算应施加到 yt-dlp 子进程环境的修正：`(键, Some(新值))` 表示覆盖，`None` 表示移除。
+///
+/// 仅在 AppImage 内（存在 `APPDIR`）才产生修正，因此开发模式与用户自己的 Python
+/// 配置都不受影响。`PYTHONHOME` 已被 `AppRun` 整体覆盖、原值无从恢复，直接移除；
+/// `PYTHONPATH` 是前置拼接，只剔除指向挂载目录的条目，保留用户自己的。
+fn python_env_fixes(
+    appdir: Option<&str>,
+    python_path: Option<&str>,
+) -> Vec<(&'static str, Option<String>)> {
+    let Some(appdir) = appdir else {
+        return Vec::new();
+    };
+    let appdir = appdir.trim_end_matches('/');
+
+    let mut fixes = vec![("PYTHONHOME", None)];
+    if let Some(path) = python_path {
+        fixes.push(("PYTHONPATH", strip_appdir_entries(path, appdir)));
+    }
+    fixes
+}
+
+/// 构造已清理 Python 环境的 yt-dlp 命令（同步）。
+fn yt_dlp_command(yt_dlp_path: &str) -> Command {
+    let mut cmd = Command::new(yt_dlp_path);
+    sanitize_python_env(&mut cmd);
+    cmd
+}
+
+/// 构造已清理 Python 环境的 yt-dlp 命令（异步）。
+fn yt_dlp_command_async(yt_dlp_path: &str) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(yt_dlp_path);
+    sanitize_python_env(&mut cmd);
+    cmd
+}
+
 /// 将订阅数格式化为人类可读的字符串（如 "12.3K", "1.5M"）
 fn format_subscriber_count(count: u64) -> String {
     if count >= 1_000_000 {
@@ -120,7 +222,7 @@ impl YtDlpService {
         cookie_file: &Option<String>,
         url: &str,
     ) -> Result<ChannelInfo, AppError> {
-        let mut cmd = Command::new(yt_dlp_path);
+        let mut cmd = yt_dlp_command(yt_dlp_path);
         cmd.args(["--dump-json", "--playlist-items", "1"])
             .arg(url);
 
@@ -175,7 +277,7 @@ impl YtDlpService {
         url: &str,
         since: Option<&str>,
     ) -> Result<Vec<VideoInfo>, AppError> {
-        let mut cmd = Command::new(yt_dlp_path);
+        let mut cmd = yt_dlp_command(yt_dlp_path);
         cmd.args([
             "--flat-playlist",
             "--dump-json",
@@ -233,7 +335,7 @@ impl YtDlpService {
         start: u32,
         end: u32,
     ) -> Result<Vec<crate::models::VideoInfo>, AppError> {
-        let mut cmd = Command::new(yt_dlp_path);
+        let mut cmd = yt_dlp_command(yt_dlp_path);
         cmd.args([
             "--flat-playlist",
             "--dump-json",
@@ -288,7 +390,7 @@ impl YtDlpService {
         cookie_file: &Option<String>,
         url: &str,
     ) -> Result<crate::models::ChannelInfo, AppError> {
-        let mut cmd = Command::new(yt_dlp_path);
+        let mut cmd = yt_dlp_command(yt_dlp_path);
         cmd.args(["--dump-json", "--playlist-items", "1"])
             .arg(url);
 
@@ -386,7 +488,7 @@ impl YtDlpService {
 
         let output_template = output_dir.join("%(title)s.%(ext)s");
 
-        let mut cmd = tokio::process::Command::new(yt_dlp_path);
+        let mut cmd = yt_dlp_command_async(yt_dlp_path);
 
         let format_str = match quality {
             "best" => "best".to_string(),
@@ -794,5 +896,93 @@ mod tests {
         // Unknown format (should fail gracefully)
         assert!(parse_progress_line("not a progress line").is_none());
         assert!(parse_progress_line("").is_none());
+    }
+
+    // ── AppImage 环境清理 ──────────────────────────────────────────
+
+    #[test]
+    fn test_strip_appdir_entries_drops_mount_paths_and_keeps_user_entries() {
+        // AppRun 把挂载目录拼在原 PYTHONPATH 之前
+        assert_eq!(
+            strip_appdir_entries(
+                "/tmp/.mount_ytdlpX/usr/share/pyshared/:/home/me/mymods",
+                "/tmp/.mount_ytdlpX"
+            ),
+            Some("/home/me/mymods".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_appdir_entries_returns_none_when_only_mount_paths_remain() {
+        // 用户原本没有 PYTHONPATH 时，AppRun 会留下挂载目录加一个尾随冒号（空条目）
+        assert_eq!(
+            strip_appdir_entries(
+                "/tmp/.mount_ytdlpX/usr/share/pyshared/:",
+                "/tmp/.mount_ytdlpX"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_strip_appdir_entries_keeps_entries_merely_sharing_appdir_prefix() {
+        // 只有字符串前缀相同、实际不在挂载目录内，必须保留（含挂载目录自身要剔除）
+        assert_eq!(
+            strip_appdir_entries(
+                "/tmp/.mount_ytdlpX-backup:/tmp/.mount_ytdlpX/usr/lib",
+                "/tmp/.mount_ytdlpX"
+            ),
+            Some("/tmp/.mount_ytdlpX-backup".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_appdir_entries_keeps_unrelated_entries() {
+        assert_eq!(
+            strip_appdir_entries("/home/me/a:/home/me/b", "/tmp/.mount_ytdlpX"),
+            Some("/home/me/a:/home/me/b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_python_env_fixes_is_noop_outside_appimage() {
+        // 没有 APPDIR 就不是 AppImage 环境，绝不能动用户自己的 Python 配置
+        assert_eq!(
+            python_env_fixes(None, Some("/home/me/mymods")),
+            Vec::<(&str, Option<String>)>::new()
+        );
+    }
+
+    #[test]
+    fn test_python_env_fixes_removes_pythonhome_and_strips_appdir_from_pythonpath() {
+        assert_eq!(
+            python_env_fixes(
+                Some("/tmp/.mount_ytdlpX"),
+                Some("/tmp/.mount_ytdlpX/usr/share/pyshared/:/home/me/mymods")
+            ),
+            vec![
+                ("PYTHONHOME", None),
+                ("PYTHONPATH", Some("/home/me/mymods".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_python_env_fixes_removes_pythonpath_when_it_becomes_empty() {
+        assert_eq!(
+            python_env_fixes(
+                Some("/tmp/.mount_ytdlpX"),
+                Some("/tmp/.mount_ytdlpX/usr/share/pyshared/:")
+            ),
+            vec![("PYTHONHOME", None), ("PYTHONPATH", None)]
+        );
+    }
+
+    #[test]
+    fn test_python_env_fixes_ignores_pythonpath_when_unset() {
+        assert_eq!(
+            python_env_fixes(Some("/tmp/.mount_ytdlpX"), None),
+            vec![("PYTHONHOME", None)]
+        );
     }
 }
