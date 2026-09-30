@@ -68,7 +68,11 @@ impl Default for AppSettings {
 /// Runtime application state persisted to state.json.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppState {
-    /// ISO 8601 timestamp of the last time all subscriptions were checked
+    /// ISO 8601 timestamp of the last time all subscriptions were checked.
+    ///
+    /// **仅供状态栏显示「上次检查」，不参与检查的日期过滤** —— 日期下界取自每条订阅
+    /// 自己的 `Subscription::last_checked_at`（见 `commands/download.rs::date_lower_bound`）。
+    /// 用它当游标会让新加入的订阅带上晚于目标视频的下界而永远抓不到该视频。
     pub last_check_time: Option<String>,
 }
 

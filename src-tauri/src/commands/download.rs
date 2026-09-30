@@ -66,7 +66,6 @@ pub(crate) async fn run_check_round(
     // 只读快照（长耗时阶段不持任何 storage 锁）
     let subs = StorageService::load_subscriptions(data_dir)?;
     let records = StorageService::load_download_records(data_dir)?;
-    let last_check_time = StorageService::load_state(data_dir)?.last_check_time;
     let data_dir_buf = data_dir.to_path_buf();
 
     log::info!(
@@ -89,7 +88,6 @@ pub(crate) async fn run_check_round(
             &cookie_file,
             &download_dir,
             &data_dir_buf,
-            &last_check_time,
             &records,
             app_handle,
         )
@@ -134,6 +132,28 @@ pub(crate) async fn run_check_round(
     Ok(all_new)
 }
 
+/// 把某条订阅的「上次检查时间」（ISO 8601）换算成 yt-dlp `--dateafter` 的下界
+/// （`YYYYMMDD`）。
+///
+/// 返回 `None` 表示**不设日期下界**，即该订阅首次检查 —— 这是有意为之：
+/// 新订阅应当能抓到「加入之前就已上传」的视频（典型场景是订阅单个视频 URL）。
+/// 因此下界必须取自**订阅自己的** `last_checked_at`，不能用全局的
+/// `state.last_check_time`：全局游标会被其它订阅的检查推进，导致新订阅一加入
+/// 就带着一个晚于目标视频的日期下界，从而永远抓不到它。
+///
+/// 无法解析的时间戳按「不设下界」处理（宁可多抓，不可漏抓）。
+fn date_lower_bound(last_checked_at: &Option<String>) -> Option<String> {
+    let t = last_checked_at.as_deref()?;
+    // 前 10 个字符即 `YYYY-MM-DD`。应用自己写的格式是
+    // `Utc::now().to_rfc3339()` → `2026-09-30T13:12:37.659045467+00:00`，
+    // 尾部的 `+00:00` / `Z` 与时间部分对 `--dateafter` 都无意义，故只取日期部分。
+    // 必须用 get 而不是切片：last_checked_at 来自磁盘上的 subscriptions.json，
+    // 短串或非 ASCII 内容用 &t[..10] 会直接 panic（旧实现在此处就会崩）。
+    let date = t.get(..10)?;
+    let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    Some(parsed.format("%Y%m%d").to_string())
+}
+
 /// Core logic for checking a single subscription for new videos and downloading them.
 /// Used by both the command layer and the scheduler.
 pub(crate) async fn check_and_download(
@@ -143,27 +163,11 @@ pub(crate) async fn check_and_download(
     cookie_file: &Option<String>,
     download_dir: &PathBuf,
     data_dir: &PathBuf,
-    last_check_time: &Option<String>,
     existing_records: &[DownloadRecord],
     app_handle: &tauri::AppHandle,
 ) -> Result<Vec<DownloadRecord>, AppError> {
-    // Determine the date cutoff for checking
-    let since = match last_check_time {
-        Some(t) => {
-            // Convert ISO 8601 to YYYYMMDD
-            let parsed = chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.fZ")
-                .or_else(|_| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%SZ"))
-                .or_else(|_| {
-                    chrono::NaiveDate::parse_from_str(&t[..10], "%Y-%m-%d")
-                        .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
-                });
-            match parsed {
-                Ok(dt) => Some(dt.format("%Y%m%d").to_string()),
-                Err(_) => None,
-            }
-        }
-        None => None,
-    };
+    // 日期下界取自本条订阅自己的游标：首次为 None（不过滤日期）
+    let since = date_lower_bound(&sub.last_checked_at);
 
     // Check for new videos
     log::info!("check_and_download: since={:?}, url={}", since, sub.url);
@@ -277,9 +281,6 @@ pub async fn check_subscription(
         )
     };
 
-    let last_check_time = StorageService::load_state(&state.data_dir)
-        .map_err(|e| e.to_string())?
-        .last_check_time;
     let records =
         StorageService::load_download_records(&state.data_dir).map_err(|e| e.to_string())?;
 
@@ -291,7 +292,6 @@ pub async fn check_subscription(
         &cookie_file,
         &download_dir,
         &state.data_dir,
-        &last_check_time,
         &records,
         &app_handle,
     )
@@ -669,6 +669,51 @@ mod tests {
         let recovered = StorageService::load_download_records(tmp.path())
             .expect("load should succeed");
         assert_eq!(recovered[0].status, "completed");
+    }
+
+    // ── 日期下界换算：取自订阅自己的 last_checked_at ────────────────
+
+    #[test]
+    fn test_date_lower_bound_none_means_no_filter() {
+        // 首次检查没有下界 —— 这正是「订阅单个视频 URL」能抓到该视频的前提。
+        // 若改用全局 state.last_check_time，新订阅一加入就会带上下界，永远抓不到。
+        assert_eq!(date_lower_bound(&None), None);
+    }
+
+    #[test]
+    fn test_date_lower_bound_parses_app_rfc3339_format() {
+        // 应用实际写入的格式：Utc::now().to_rfc3339()，尾部是 +00:00 而非 Z
+        assert_eq!(
+            date_lower_bound(&Some("2026-09-30T13:12:37.659045467+00:00".to_string())),
+            Some("20260930".to_string())
+        );
+    }
+
+    #[test]
+    fn test_date_lower_bound_parses_zulu_and_date_only() {
+        assert_eq!(
+            date_lower_bound(&Some("2026-06-02T12:00:00Z".to_string())),
+            Some("20260602".to_string())
+        );
+        assert_eq!(
+            date_lower_bound(&Some("2026-06-02".to_string())),
+            Some("20260602".to_string())
+        );
+    }
+
+    #[test]
+    fn test_date_lower_bound_invalid_falls_back_to_no_filter() {
+        // 宁可多抓，不可漏抓：解析不了就不设下界
+        assert_eq!(date_lower_bound(&Some("not-a-timestamp".to_string())), None);
+        assert_eq!(date_lower_bound(&Some("2026-13-45T00:00:00Z".to_string())), None);
+    }
+
+    #[test]
+    fn test_date_lower_bound_never_panics_on_short_or_non_ascii_input() {
+        // last_checked_at 来自磁盘，可能是被手改过的脏数据。
+        // 旧实现用 &t[..10] 切字节，这两种输入都会 panic。
+        assert_eq!(date_lower_bound(&Some("abc".to_string())), None);
+        assert_eq!(date_lower_bound(&Some("2026年09月30日".to_string())), None);
     }
 
     // ── Dedup logic tests (T014) ───────────────────────────────────

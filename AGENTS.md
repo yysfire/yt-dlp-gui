@@ -145,7 +145,9 @@ utils/
   - **已完成数**（`status === "completed"`）：状态栏（`AppShell.tsx` → `StatusBar`，文案「已完成」）与详情面板头部（`DetailPanel.tsx`，文案「已完成」）。
   历史上该字段有「完成回调增量」与「启动重算」两个语义不同的写者，导致显示不一致——不要重新引入。
 - **写操作与事件成对**：凡修改持久化数据的路径，必须在写事务完成后 emit 对应事件 —— 记录改动 → `services/download_queue.rs::notify_records_changed`，队列改动 → `DownloadQueue::emit_queue_changed`，settings 改动 → `settings-changed`。emit 一律是**纯 emit**（零 I/O、零加锁），因此可在任意临界区内安全调用；不要为了构造载荷去读文件或加锁。前端对高频事件做短延时合并（`App.tsx` 的 `scheduleRefresh`，150ms 窗口内只排一次，用 schedule-once 而非 debounce 以免连续事件把刷新无限推迟）。
-**`check_and_download()`**（`commands/download.rs`）是检查入口：按 `last_check_time` 换算日期下界 → `yt-dlp --flat-playlist` 取新视频 → 对已有记录去重（`failed` 可重试）→ 逐个交给 `DownloadQueue::enqueue_from_video()` 入队。**真正的下载、进度解析与记录状态落库都在 `download_queue.rs` 的 `execute_download_with_control()` 里**（该函数按 `video_url + subscription_id` 定位记录并做事务写入）。
+**`check_and_download()`**（`commands/download.rs`）是检查入口：按 **该订阅自己的 `last_checked_at`** 换算日期下界（`date_lower_bound()`）→ `yt-dlp --flat-playlist` 取新视频 → 对已有记录去重（`failed` 可重试）→ 逐个交给 `DownloadQueue::enqueue_from_video()` 入队。**真正的下载、进度解析与记录状态落库都在 `download_queue.rs` 的 `execute_download_with_control()` 里**（该函数按 `video_url + subscription_id` 定位记录并做事务写入）。
+
+> 日期下界必须取自订阅自己的 `last_checked_at`，**不要**改回全局的 `state.last_check_time`。全局游标会被其它订阅的检查推进，导致新加入的订阅带上一个晚于目标视频的下界而永远抓不到它（`state.last_check_time` 现在只服务状态栏的「上次检查」显示）。首次检查时 `last_checked_at` 为 `None` → 不带 `--dateafter`，因此新订阅能抓到加入之前上传的视频；此时 yt-dlp 会返回该 URL 的全部视频（`--playlist-end 5` 的限制已被移除，是 `cc0583f` 的有意决定）。
 
 `check_and_download` 还有一个「无队列时直接建记录」的兜底分支 —— 因为 `QueueContext` 在 `lib.rs` setup 里必然注册，该分支实际上走不到。
 
@@ -156,7 +158,7 @@ utils/
 | 用途 | 命令 |
 |------|------|
 | 解析频道信息 | `yt-dlp --dump-json --playlist-items 1 <url>` |
-| 检查新视频 | `yt-dlp --flat-playlist --dump-json --playlist-end 5 --dateafter <YYYYMMDD> <url>` |
+| 检查新视频 | `yt-dlp --flat-playlist --dump-json [--dateafter <YYYYMMDD>] <url>` |
 | 下载视频 | `yt-dlp -f <format> -o <template> --no-playlist --print after_move:filepath <url>` |
 
 画质预设映射为格式字符串（如 "1080p" → `bestvideo[height<=1080]+bestaudio/best[height<=1080]`）。代理（`--proxy`）和 Cookie（`--cookies`）仅非空时才传入。
