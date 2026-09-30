@@ -23,11 +23,22 @@ pub struct Subscription {
     pub group_name: String,
     /// ISO 8601 creation timestamp
     pub created_at: String,
-    /// ISO 8601 timestamp of the last check, or None if never checked.
+    /// ISO 8601 timestamp of the last check **attempt**, or None if never checked.
     ///
-    /// 同时是**该订阅的检查游标**：`check_and_download` 用它换算 `--dateafter` 下界，
-    /// 为 `None`（从未检查）时不设下界，因此新订阅能抓到加入之前上传的视频。
+    /// 仅供「上次检查」显示（`DetailPanel`），语义是「最近一次尝试，无论成败」——
+    /// 与 `last_check_status` / `last_check_error` 同属一次尝试的结果。
+    /// **不要**拿它做日期过滤，游标见 `last_successful_check_at`。
     pub last_checked_at: Option<String>,
+    /// ISO 8601 timestamp of the last **successful** check — 该订阅的检查游标。
+    ///
+    /// `check_and_download` 用它换算 `--dateafter` 下界（见
+    /// `commands/download.rs::date_lower_bound`）；为 `None` 时不设下界，即
+    /// 「首次检查」或「从未成功过」，因此能抓到加入之前上传的视频。
+    ///
+    /// **只在检查成功时推进**：失败时若也推进，失败窗口内上传的视频会被
+    /// `--dateafter` 永久排除（已下载的记录无法察觉这种遗漏）。
+    #[serde(default)]
+    pub last_successful_check_at: Option<String>,
     /// Status of the last check: "success" or "failed"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_check_status: Option<String>,
@@ -65,6 +76,7 @@ impl Subscription {
             group_name: "未分组".to_string(),
             created_at: Utc::now().to_rfc3339(),
             last_checked_at: None,
+            last_successful_check_at: None,
             last_check_status: None,
             last_check_error: None,
             tags: Vec::new(),
@@ -366,6 +378,11 @@ mod tests {
         assert!(sub.tags.is_empty(), "tags should default to empty vec for old JSON");
         assert_eq!(sub.health_status, None, "health_status should default to None for old JSON");
         assert_eq!(sub.last_health_check, None, "last_health_check should default to None for old JSON");
+        // 旧数据没有游标字段：默认 None → 下次检查不设日期下界，全量重列一次
+        assert_eq!(
+            sub.last_successful_check_at, None,
+            "last_successful_check_at should default to None for old JSON"
+        );
     }
 
     #[test]

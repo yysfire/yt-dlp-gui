@@ -21,6 +21,7 @@ const makeSub = (overrides: Partial<Subscription> = {}): Subscription => ({
   group_name: "未分组",
   created_at: "2025-01-01T00:00:00Z",
   last_checked_at: null,
+  last_successful_check_at: null,
   last_check_status: null,
   last_check_error: null,
   tags: [],

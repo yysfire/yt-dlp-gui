@@ -32,7 +32,13 @@ export interface Subscription {
   quality_preset: string;
   group_name: string;
   created_at: string; // ISO 8601
+  /** 最近一次检查**尝试**的时间（无论成败），仅供「上次检查」显示 */
   last_checked_at: string | null;
+  /**
+   * 该订阅的**检查游标**：最近一次成功检查时间（ISO 8601）。
+   * 后端用它换算 `--dateafter` 下界；前端不消费，仅为与 Rust 侧 serde 结构保持一致。
+   */
+  last_successful_check_at: string | null;
   last_check_status: "success" | "failed" | null;
   last_check_error: string | null;
   /** 分组标签名数组（如 ["学习", "音乐"]） */

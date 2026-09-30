@@ -10,6 +10,24 @@ use crate::utils::AppError;
 use crate::AppContext;
 use crate::QueueContext;
 
+/// 一轮检查的结果。用枚举而非 `&'static str`，是为了让「只有成功才推进游标」
+/// 这个判断由编译器兜底 —— 写成魔法字符串的话，拼错会静默反转行为。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckStatus {
+    Success,
+    Failed,
+}
+
+impl CheckStatus {
+    /// 持久化到 `Subscription::last_check_status` 的取值。
+    fn as_str(self) -> &'static str {
+        match self {
+            CheckStatus::Success => "success",
+            CheckStatus::Failed => "failed",
+        }
+    }
+}
+
 /// 单个订阅一轮检查完成后需要落库的结果。
 ///
 /// 只携带订阅 id 与要更新的字段，不携带订阅快照 —— 收尾时按 id 在事务内增量应用，
@@ -17,8 +35,7 @@ use crate::QueueContext;
 pub(crate) struct SubCheckOutcome {
     pub sub_id: String,
     pub checked_at: String,
-    /// `"success"` 或 `"failed"`
-    pub status: &'static str,
+    pub status: CheckStatus,
     pub error: Option<String>,
 }
 
@@ -26,6 +43,10 @@ pub(crate) struct SubCheckOutcome {
 ///
 /// 「边跑边收集、收尾一次写入」模式的关键一步：长耗时阶段不持任何 storage 锁，
 /// 收尾时也只按 id 改字段，而不是用陈旧快照整表覆盖。
+///
+/// 时间字段的写回规则不同，不要合并：`last_checked_at` 每次尝试都写（供显示），
+/// `last_successful_check_at`（日期游标）**只在成功时**推进 —— 失败时若也推进，
+/// 失败窗口内上传的视频会被 `--dateafter` 永久排除。
 pub(crate) fn apply_check_outcomes(
     data_dir: &Path,
     outcomes: &[SubCheckOutcome],
@@ -34,7 +55,10 @@ pub(crate) fn apply_check_outcomes(
         for outcome in outcomes {
             if let Some(sub) = subs.iter_mut().find(|s| s.id == outcome.sub_id) {
                 sub.last_checked_at = Some(outcome.checked_at.clone());
-                sub.last_check_status = Some(outcome.status.to_string());
+                if outcome.status == CheckStatus::Success {
+                    sub.last_successful_check_at = Some(outcome.checked_at.clone());
+                }
+                sub.last_check_status = Some(outcome.status.as_str().to_string());
                 sub.last_check_error = outcome.error.clone();
             }
         }
@@ -98,7 +122,7 @@ pub(crate) async fn run_check_round(
                 outcomes.push(SubCheckOutcome {
                     sub_id: sub.id.clone(),
                     checked_at,
-                    status: "success",
+                    status: CheckStatus::Success,
                     error: None,
                 });
             }
@@ -107,7 +131,7 @@ pub(crate) async fn run_check_round(
                 outcomes.push(SubCheckOutcome {
                     sub_id: sub.id.clone(),
                     checked_at,
-                    status: "failed",
+                    status: CheckStatus::Failed,
                     error: Some(e.to_string()),
                 });
             }
@@ -132,22 +156,26 @@ pub(crate) async fn run_check_round(
     Ok(all_new)
 }
 
-/// 把某条订阅的「上次检查时间」（ISO 8601）换算成 yt-dlp `--dateafter` 的下界
-/// （`YYYYMMDD`）。
+/// 把订阅的**检查游标**（`last_successful_check_at`，ISO 8601）换算成 yt-dlp
+/// `--dateafter` 的下界（`YYYYMMDD`）。
 ///
-/// 返回 `None` 表示**不设日期下界**，即该订阅首次检查 —— 这是有意为之：
-/// 新订阅应当能抓到「加入之前就已上传」的视频（典型场景是订阅单个视频 URL）。
-/// 因此下界必须取自**订阅自己的** `last_checked_at`，不能用全局的
+/// 返回 `None` 表示**不设日期下界**，即该订阅从未成功检查过（含刚加入订阅）。
+/// 这是有意为之：新订阅应当能抓到「加入之前就已上传」的视频（典型场景是订阅
+/// 单个视频 URL）。因此下界必须取自**订阅自己的**游标，不能用全局的
 /// `state.last_check_time`：全局游标会被其它订阅的检查推进，导致新订阅一加入
 /// 就带着一个晚于目标视频的日期下界，从而永远抓不到它。
 ///
+/// 也**不能**用 `last_checked_at`（每次尝试都写）—— 检查失败时它会早于真实进度，
+/// 于是失败窗口内上传的视频会被静默跳过。游标只在成功时推进，见
+/// [`apply_check_outcomes`]。
+///
 /// 无法解析的时间戳按「不设下界」处理（宁可多抓，不可漏抓）。
-fn date_lower_bound(last_checked_at: &Option<String>) -> Option<String> {
-    let t = last_checked_at.as_deref()?;
+fn date_lower_bound(cursor: &Option<String>) -> Option<String> {
+    let t = cursor.as_deref()?;
     // 前 10 个字符即 `YYYY-MM-DD`。应用自己写的格式是
     // `Utc::now().to_rfc3339()` → `2026-09-30T13:12:37.659045467+00:00`，
     // 尾部的 `+00:00` / `Z` 与时间部分对 `--dateafter` 都无意义，故只取日期部分。
-    // 必须用 get 而不是切片：last_checked_at 来自磁盘上的 subscriptions.json，
+    // 必须用 get 而不是切片：该字符串来自磁盘上的 subscriptions.json，
     // 短串或非 ASCII 内容用 &t[..10] 会直接 panic（旧实现在此处就会崩）。
     let date = t.get(..10)?;
     let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
@@ -166,8 +194,8 @@ pub(crate) async fn check_and_download(
     existing_records: &[DownloadRecord],
     app_handle: &tauri::AppHandle,
 ) -> Result<Vec<DownloadRecord>, AppError> {
-    // 日期下界取自本条订阅自己的游标：首次为 None（不过滤日期）
-    let since = date_lower_bound(&sub.last_checked_at);
+    // 日期下界取自本条订阅自己的游标（只在成功时推进）：从未成功过时为 None（不过滤日期）
+    let since = date_lower_bound(&sub.last_successful_check_at);
 
     // Check for new videos
     log::info!("check_and_download: since={:?}, url={}", since, sub.url);
@@ -305,7 +333,7 @@ pub async fn check_subscription(
         &[SubCheckOutcome {
             sub_id: sub.id.clone(),
             checked_at: chrono::Utc::now().to_rfc3339(),
-            status: "success",
+            status: CheckStatus::Success,
             error: None,
         }],
     )
@@ -671,11 +699,124 @@ mod tests {
         assert_eq!(recovered[0].status, "completed");
     }
 
-    // ── 日期下界换算：取自订阅自己的 last_checked_at ────────────────
+    // ── 日期下界换算 + 游标推进：取自订阅自己的 last_successful_check_at ──
+
+    /// 造一条带指定游标的订阅，用于 apply_check_outcomes 的落库断言。
+    fn make_sub_with_cursor(cursor: Option<&str>) -> Subscription {
+        let mut sub = Subscription::new(
+            "https://youtube.com/@test".to_string(),
+            "youtube".to_string(),
+            "Test Channel".to_string(),
+            String::new(),
+        );
+        sub.last_successful_check_at = cursor.map(str::to_string);
+        sub
+    }
+
+    #[test]
+    fn test_check_status_as_str_matches_persisted_values() {
+        // 这两个字面量是 subscriptions.json 的对外取值，前端据此显示成功/失败
+        assert_eq!(CheckStatus::Success.as_str(), "success");
+        assert_eq!(CheckStatus::Failed.as_str(), "failed");
+    }
+
+    #[test]
+    fn test_apply_check_outcomes_success_advances_cursor() {
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let sub = make_sub_with_cursor(None);
+        StorageService::seed_subscriptions(tmp.path(), std::slice::from_ref(&sub))
+            .expect("seed should succeed");
+
+        apply_check_outcomes(
+            tmp.path(),
+            &[SubCheckOutcome {
+                sub_id: sub.id.clone(),
+                checked_at: "2026-09-30T13:12:37.659045467+00:00".to_string(),
+                status: CheckStatus::Success,
+                error: None,
+            }],
+        )
+        .expect("apply should succeed");
+
+        let applied = StorageService::load_subscriptions(tmp.path())
+            .expect("load should succeed")
+            .remove(0);
+        assert_eq!(
+            applied.last_checked_at.as_deref(),
+            Some("2026-09-30T13:12:37.659045467+00:00")
+        );
+        assert_eq!(
+            applied.last_successful_check_at.as_deref(),
+            Some("2026-09-30T13:12:37.659045467+00:00")
+        );
+        assert_eq!(applied.last_check_status.as_deref(), Some("success"));
+        assert_eq!(applied.last_check_error, None);
+    }
+
+    #[test]
+    fn test_apply_check_outcomes_failure_keeps_cursor() {
+        // 失败只更新「尝试」时间与状态。游标必须留在上次成功的位置，否则
+        // 失败窗口内上传的视频会被 --dateafter 永久排除，且没有任何记录能反映这次遗漏。
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let sub = make_sub_with_cursor(Some("2026-09-01T00:00:00+00:00"));
+        StorageService::seed_subscriptions(tmp.path(), std::slice::from_ref(&sub))
+            .expect("seed should succeed");
+
+        apply_check_outcomes(
+            tmp.path(),
+            &[SubCheckOutcome {
+                sub_id: sub.id.clone(),
+                checked_at: "2026-09-30T13:12:37.659045467+00:00".to_string(),
+                status: CheckStatus::Failed,
+                error: Some("boom".to_string()),
+            }],
+        )
+        .expect("apply should succeed");
+
+        let applied = StorageService::load_subscriptions(tmp.path())
+            .expect("load should succeed")
+            .remove(0);
+        assert_eq!(
+            applied.last_checked_at.as_deref(),
+            Some("2026-09-30T13:12:37.659045467+00:00")
+        );
+        assert_eq!(
+            applied.last_successful_check_at.as_deref(),
+            Some("2026-09-01T00:00:00+00:00")
+        );
+        assert_eq!(applied.last_check_status.as_deref(), Some("failed"));
+        assert_eq!(applied.last_check_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn test_apply_check_outcomes_failure_on_never_succeeded_sub_keeps_cursor_none() {
+        // 从未成功过的订阅连续失败：游标保持 None，下次检查仍不设下界
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let sub = make_sub_with_cursor(None);
+        StorageService::seed_subscriptions(tmp.path(), std::slice::from_ref(&sub))
+            .expect("seed should succeed");
+
+        apply_check_outcomes(
+            tmp.path(),
+            &[SubCheckOutcome {
+                sub_id: sub.id.clone(),
+                checked_at: "2026-09-30T13:12:37.659045467+00:00".to_string(),
+                status: CheckStatus::Failed,
+                error: Some("boom".to_string()),
+            }],
+        )
+        .expect("apply should succeed");
+
+        let applied = StorageService::load_subscriptions(tmp.path())
+            .expect("load should succeed")
+            .remove(0);
+        assert_eq!(applied.last_successful_check_at, None);
+        assert_eq!(date_lower_bound(&applied.last_successful_check_at), None);
+    }
 
     #[test]
     fn test_date_lower_bound_none_means_no_filter() {
-        // 首次检查没有下界 —— 这正是「订阅单个视频 URL」能抓到该视频的前提。
+        // 没有游标就不设下界 —— 这正是「订阅单个视频 URL」能抓到该视频的前提。
         // 若改用全局 state.last_check_time，新订阅一加入就会带上下界，永远抓不到。
         assert_eq!(date_lower_bound(&None), None);
     }

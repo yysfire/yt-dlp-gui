@@ -145,9 +145,16 @@ utils/
   - **已完成数**（`status === "completed"`）：状态栏（`AppShell.tsx` → `StatusBar`，文案「已完成」）与详情面板头部（`DetailPanel.tsx`，文案「已完成」）。
   历史上该字段有「完成回调增量」与「启动重算」两个语义不同的写者，导致显示不一致——不要重新引入。
 - **写操作与事件成对**：凡修改持久化数据的路径，必须在写事务完成后 emit 对应事件 —— 记录改动 → `services/download_queue.rs::notify_records_changed`，队列改动 → `DownloadQueue::emit_queue_changed`，settings 改动 → `settings-changed`。emit 一律是**纯 emit**（零 I/O、零加锁），因此可在任意临界区内安全调用；不要为了构造载荷去读文件或加锁。前端对高频事件做短延时合并（`App.tsx` 的 `scheduleRefresh`，150ms 窗口内只排一次，用 schedule-once 而非 debounce 以免连续事件把刷新无限推迟）。
-**`check_and_download()`**（`commands/download.rs`）是检查入口：按 **该订阅自己的 `last_checked_at`** 换算日期下界（`date_lower_bound()`）→ `yt-dlp --flat-playlist` 取新视频 → 对已有记录去重（`failed` 可重试）→ 逐个交给 `DownloadQueue::enqueue_from_video()` 入队。**真正的下载、进度解析与记录状态落库都在 `download_queue.rs` 的 `execute_download_with_control()` 里**（该函数按 `video_url + subscription_id` 定位记录并做事务写入）。
+**`check_and_download()`**（`commands/download.rs`）是检查入口：按 **该订阅自己的检查游标 `last_successful_check_at`** 换算日期下界（`date_lower_bound()`）→ `yt-dlp --flat-playlist` 取新视频 → 对已有记录去重（`failed` 可重试）→ 逐个交给 `DownloadQueue::enqueue_from_video()` 入队。**真正的下载、进度解析与记录状态落库都在 `download_queue.rs` 的 `execute_download_with_control()` 里**（该函数按 `video_url + subscription_id` 定位记录并做事务写入）。
 
-> 日期下界必须取自订阅自己的 `last_checked_at`，**不要**改回全局的 `state.last_check_time`。全局游标会被其它订阅的检查推进，导致新加入的订阅带上一个晚于目标视频的下界而永远抓不到它（`state.last_check_time` 现在只服务状态栏的「上次检查」显示）。首次检查时 `last_checked_at` 为 `None` → 不带 `--dateafter`，因此新订阅能抓到加入之前上传的视频；此时 yt-dlp 会返回该 URL 的全部视频（`--playlist-end 5` 的限制已被移除，是 `cc0583f` 的有意决定）。
+> **两个时间字段，语义不可互换**（`Subscription`）：
+> - `last_checked_at` —— 最近一次检查**尝试**（无论成败），供 `DetailPanel` 的「上次检查」显示，与 `last_check_status` / `last_check_error` 同属一次尝试的结果；
+> - `last_successful_check_at` —— **检查游标**，只在检查成功时推进（`apply_check_outcomes` 里由 `CheckStatus::Success` 判定，不要写成 `"success"` 字符串）。
+>
+> 三条不要破坏的约束：
+> 1. 日期下界只能取自订阅自己的游标，**不要**用全局 `state.last_check_time`（它已被其它订阅的检查推进，会让新订阅带上晚于目标视频的下界而永远抓不到；该字段现在只服务状态栏显示）；
+> 2. 游标**只在成功时**推进 —— 失败时若也推进，失败窗口内上传的视频会被 `--dateafter` 永久排除，而且没有任何记录能反映这次遗漏；
+> 3. 游标为 `None`（从未成功过，含刚加入）时**不带 `--dateafter`**，因此新订阅能抓到加入之前上传的视频。此时 yt-dlp 会返回该 URL 的全部视频（`--playlist-end 5` 的限制已被移除，是 `cc0583f` 的有意决定），大频道的首轮检查可能较慢。
 
 `check_and_download` 还有一个「无队列时直接建记录」的兜底分支 —— 因为 `QueueContext` 在 `lib.rs` setup 里必然注册，该分支实际上走不到。
 
