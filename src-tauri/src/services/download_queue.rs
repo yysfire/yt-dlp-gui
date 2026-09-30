@@ -304,7 +304,6 @@ impl DownloadQueue {
                 let queue_clone = Arc::clone(&queue);
                 let active_clone = Arc::clone(&active_tasks);
                 let app_clone = app_handle.clone();
-                let sem_clone = Arc::clone(&semaphore);
                 let max_conc_clone = Arc::clone(&max_conc);
 
                 tokio::spawn(async move {
@@ -313,8 +312,10 @@ impl DownloadQueue {
                     Self::execute_download_with_control(
                         &task,
                         &ctx_clone,
+                        &queue_clone,
                         &active_clone,
                         &app_clone,
+                        &max_conc_clone,
                     ).await;
 
                     // Clean up active entry
@@ -323,13 +324,13 @@ impl DownloadQueue {
                         active.remove(&task.id);
                     }
 
-                    // Emit queue changed
-                    let state = QueueState {
-                        active_count: sem_clone.available_permits() as usize,
-                        waiting_count: queue_clone.lock().unwrap().len(),
-                        max_concurrent: max_conc_clone.load(Ordering::Relaxed),
-                    };
-                    let _ = app_clone.emit("queue-changed", state);
+                    // 任务结束（成功/失败/取消）后活动项已移除，通知前端重新拉取
+                    emit_queue_state(
+                        &app_clone,
+                        &queue_clone,
+                        &active_clone,
+                        max_conc_clone.load(Ordering::Relaxed),
+                    );
                 });
             }
         });
@@ -340,8 +341,10 @@ impl DownloadQueue {
     async fn execute_download_with_control(
         task: &DownloadTask,
         ctx: &DownloadContext,
+        queue: &Arc<Mutex<VecDeque<DownloadTask>>>,
         active_tasks: &Arc<Mutex<HashMap<String, ActiveTask>>>,
         app_handle: &AppHandle,
+        max_concurrent: &Arc<AtomicU32>,
     ) {
         let task_id = task.id.clone();
 
@@ -397,13 +400,27 @@ impl DownloadQueue {
         };
         {
             let mut active = active_tasks.lock().unwrap();
+            // 任务此刻真正开始执行，状态必须从入队时的 Waiting 推进到 Running。
+            // 前端 `deriveStatus` 只把 running 映射为「下载中」，而进度条只在「下载中」渲染；
+            // 状态停在 waiting 会让整段下载期间都没有进度条。
+            let mut running_task = task.clone();
+            running_task.status = TaskStatus::Running;
             active.insert(task_id.clone(), ActiveTask {
                 child: Some(child),
                 pid,
-                task: task.clone(),
+                task: running_task,
                 last_progress_percent: 0.0,
             });
         }
+
+        // 通知前端「该任务已进入运行态」。`queue-changed` 是 AppShell 唯一重新拉取队列的
+        // 触发点，缺了这次 emit，前端会一直停留在入队时的「等待中」直到下载结束。
+        emit_queue_state(
+            app_handle,
+            queue,
+            active_tasks,
+            max_concurrent.load(Ordering::Relaxed),
+        );
 
         // Read progress from stdout
         let reader = BufReader::new(stdout);
@@ -982,6 +999,28 @@ impl DownloadQueue {
 /// 契约：凡写 `download_records.json` 的路径都必须调用本函数。
 pub(crate) fn notify_records_changed(app_handle: &tauri::AppHandle) {
     let _ = app_handle.emit("records-changed", ());
+}
+
+/// 构造并 emit 队列状态快照，供前端在任务状态变化时重新拉取队列。
+///
+/// 加锁顺序固定为 `queue → active_tasks`，与 [`DownloadQueue::get_state`] 一致，
+/// 避免与其它取状态的路径形成反向锁序；两把锁都只短暂持有，emit 在锁外进行。
+fn emit_queue_state(
+    app_handle: &AppHandle,
+    queue: &Arc<Mutex<VecDeque<DownloadTask>>>,
+    active_tasks: &Arc<Mutex<HashMap<String, ActiveTask>>>,
+    max_concurrent: u32,
+) {
+    let state = {
+        let waiting_count = queue.lock().unwrap().len();
+        let active_count = active_tasks.lock().unwrap().len();
+        QueueState {
+            active_count,
+            waiting_count,
+            max_concurrent,
+        }
+    };
+    let _ = app_handle.emit("queue-changed", state);
 }
 
 #[cfg(test)]

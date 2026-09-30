@@ -56,6 +56,38 @@ pub struct SpawnedDownload {
     pub child: tokio::process::Child,
 }
 
+/// yt-dlp 进度模板，字段顺序与 `utils::progress_parser::parse_progress_line` 的契约一一对应：
+/// `percent|speed|downloaded_bytes|total_bytes|eta`。
+///
+/// `percent` / `downloaded_bytes` / `total_bytes` 必须取裸数值字段。历史 bug 用的是
+/// `_percent_str`（渲染成 `"  0.0%"`）与 `_downloaded_bytes_str`（渲染成 `"  1.00KiB"`），
+/// 解析器里的 `parse::<f32>()` / `parse::<u64>()` 会因 `%` 和单位后缀而全部失败，
+/// 进度事件一条都发不出来。`_total_bytes_estimate` 这个键并不存在，yt-dlp 只会渲染成 `NA`。
+const PROGRESS_TEMPLATE: &str =
+    "%(progress._percent)s|%(progress._speed_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress._eta_str)s";
+
+/// 构造 yt-dlp 下载参数（代理与 Cookie 不在此处，由调用方按需追加）。
+///
+/// `--newline` 与 `--progress` 都不可省：
+/// - 没有 `--newline`，进度以 `\r` 分隔，`BufReader::lines()`（只按 `\n` 切）永远拿不到完整行；
+/// - `--print` 隐含 `--quiet`，没有 `--progress` 时进度输出会被整体抑制。
+fn build_download_args(format_str: &str, output_template: &str, url: &str) -> Vec<String> {
+    vec![
+        "-f".to_string(),
+        format_str.to_string(),
+        "-o".to_string(),
+        output_template.to_string(),
+        "--no-playlist".to_string(),
+        "--newline".to_string(),
+        "--progress".to_string(),
+        "--progress-template".to_string(),
+        PROGRESS_TEMPLATE.to_string(),
+        "--print".to_string(),
+        "after_move:filepath".to_string(),
+        url.to_string(),
+    ]
+}
+
 /// 让 `std::process::Command` 与 `tokio::process::Command` 共用同一套环境清理逻辑。
 trait EnvCommand {
     fn remove_env(&mut self, key: &str);
@@ -499,15 +531,11 @@ impl YtDlpService {
             _ => "bestvideo[height<=1080]+bestaudio/best[height<=1080]".to_string(),
         };
 
-        cmd.args([
-            "-f", &format_str,
-            "-o", &output_template.to_string_lossy(),
-            "--no-playlist",
-            "--progress-template",
-            "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_estimate)s|%(progress._eta_str)s",
-            "--print", "after_move:filepath",
+        cmd.args(build_download_args(
+            &format_str,
+            &output_template.to_string_lossy(),
             url,
-        ]);
+        ));
 
         if let Some(ref proxy_url) = proxy {
             if !proxy_url.is_empty() {
@@ -824,6 +852,60 @@ mod tests {
         // --no-playlist should always be present in download commands
         // to avoid downloading entire playlists
         assert!(true, "--no-playlist is always included in download_video");
+    }
+
+    // ── 下载进度：参数与模板必须与 parser 契约一致 ──────────────────
+    //
+    // 这三条锁住历史 bug：`--print` 隐含 `--quiet` 抑制进度、缺 `--newline` 导致
+    // `BufReader::lines()` 切不开 `\r`、模板用 `_str` 字段导致解析器全部失败。
+
+    #[test]
+    fn test_build_download_args_exact() {
+        let args = build_download_args("best", "/out/%(title)s.%(ext)s", "https://example.com/v");
+
+        let expected: Vec<String> = [
+            "-f",
+            "best",
+            "-o",
+            "/out/%(title)s.%(ext)s",
+            "--no-playlist",
+            "--newline",
+            "--progress",
+            "--progress-template",
+            PROGRESS_TEMPLATE,
+            "--print",
+            "after_move:filepath",
+            "https://example.com/v",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn test_progress_template_uses_raw_numeric_fields() {
+        // percent / downloaded_bytes / total_bytes 必须是裸数值字段，不能是 _str 变体
+        assert_eq!(
+            PROGRESS_TEMPLATE,
+            "%(progress._percent)s|%(progress._speed_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress._eta_str)s"
+        );
+    }
+
+    #[test]
+    fn test_progress_template_rendered_line_parses() {
+        // 真实 yt-dlp（2026.08.19）按本模板渲染出的行，必须能被解析器接受
+        use crate::utils::progress_parser::parse_progress_line;
+
+        let event = parse_progress_line("3.49184|   2.21MiB/s|1047552|30000000|00:12")
+            .expect("模板渲染出的行必须能被解析");
+
+        assert!((event.percent - 3.49184).abs() < 1e-6);
+        assert_eq!(event.speed, "   2.21MiB/s");
+        assert_eq!(event.downloaded_bytes, 1047552);
+        assert_eq!(event.total_bytes, 30000000);
+        assert_eq!(event.eta, "00:12");
     }
 
     // ── Edge case: proxy handling logic ────────────────────────────

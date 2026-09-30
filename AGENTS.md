@@ -166,9 +166,16 @@ utils/
 |------|------|
 | 解析频道信息 | `yt-dlp --dump-json --playlist-items 1 <url>` |
 | 检查新视频 | `yt-dlp --flat-playlist --dump-json [--dateafter <YYYYMMDD>] <url>` |
-| 下载视频 | `yt-dlp -f <format> -o <template> --no-playlist --print after_move:filepath <url>` |
+| 下载视频 | `yt-dlp -f <format> -o <template> --no-playlist --newline --progress --progress-template <模板> --print after_move:filepath <url>` |
 
-画质预设映射为格式字符串（如 "1080p" → `bestvideo[height<=1080]+bestaudio/best[height<=1080]`）。代理（`--proxy`）和 Cookie（`--cookies`）仅非空时才传入。
+画质预设映射为格式字符串（如 "1080p" → `bestvideo[height<=1080]+bestaudio/best[height<=1080]`）。代理（`--proxy`）和 Cookie（`--cookies`）仅非空时才传入。下载参数由 `services/ytdlp.rs::build_download_args()` 统一构造。
+
+**下载命令里的进度参数一条都不能少**（三者缺一进度条就是空的，历史 bug）：
+- `--print` **隐含 `--quiet`**，会整体抑制进度输出，必须用 `--progress` 抵消；
+- `--newline` 让进度以 `\n` 而非 `\r` 结尾 —— `BufReader::lines()` 只按 `\n` 切，没有它一条完整行都读不到；
+- `--progress-template` 的字段必须与 `utils/progress_parser::parse_progress_line` 的契约一致（`percent|speed|downloaded_bytes|total_bytes|eta`，前三者为**裸数值**）。用 `_percent_str`（`"  0.0%"`）或 `_downloaded_bytes_str`（`"  1.00KiB"`）会因 `%` 与单位后缀导致解析全部失败；`_total_bytes_estimate` 这个键并不存在，只会渲染成 `NA`。
+
+读取 stdout 的 `download_queue.rs::execute_download_with_control` 把进度事件 `download-progress` 发给前端。前端 `DetailPanel` **只在队列任务状态为 `running`（映射为「下载中」）时渲染进度条**，因此任务从等待队列取出、子进程启动后必须把状态推进到 `Running` 并 emit `queue-changed`（`queue-changed` 是 `AppShell` 唯一重新拉取队列的触发点）。
 
 ### 数据流程：添加订阅
 
