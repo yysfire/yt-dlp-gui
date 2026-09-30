@@ -28,6 +28,19 @@ cargo check              # 快速编译检查，不生成二进制文件
 npx tsc --noEmit         # 仅类型检查，不输出文件
 ```
 
+## 辅助脚本
+
+```bash
+# 从 Firefox 导出 YouTube 认证 Cookie（Netscape 格式），供 yt-dlp 使用。
+# 用于解决 YouTube 的 "Sign in to confirm you're not a bot" 校验。
+# 默认输出 ~/youtube-cookies.txt（权限 0600），在「设置 → Cookie 文件」中指定。
+python3 scripts/export-yt-cookies.py
+```
+
+仅支持 Firefox：Chrome 系在 Linux/macOS 上把 Cookie 值用系统密钥环加密，纯标准库无法解密。
+导出文件只保留 `.youtube.com` / `.google.com` / `accounts.google.com` / `gds.google.com` 四个域，
+以免把浏览器内其它站点的登录凭证一并写出。
+
 ## 架构
 
 ### 前端（`src/`）
