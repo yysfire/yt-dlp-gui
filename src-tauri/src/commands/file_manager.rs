@@ -105,6 +105,8 @@ pub fn open_in_folder(
         return Err("不支持的操作系统".to_string());
     }
 
+    // Linux 分支已在上方 return，只有 macOS/Windows 分支正常结束会走到这里。
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     Ok(())
 }
 
