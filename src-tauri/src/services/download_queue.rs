@@ -703,7 +703,7 @@ impl DownloadQueue {
             let mut found = None;
             for (_task_id, entry) in active.iter_mut() {
                 if entry.task.video_url == video_url {
-                    let pid = entry.pid;
+                    let _pid = entry.pid;
                     #[cfg(unix)]
                     {
                         unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
