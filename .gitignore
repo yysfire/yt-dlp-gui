@@ -23,6 +23,15 @@ Thumbs.db
 .env.local
 dist/
 
+# Python
+__pycache__/
+*.pyc
+
+# 导出的浏览器 Cookie（含账号登录凭证，禁止提交）
+cookies.txt
+youtube-cookies.txt
+*-cookies.txt
+
 .specify/bridge-events.jsonl
 .specify/superpowers-handoff.json
 .specify/bridge-snapshots/

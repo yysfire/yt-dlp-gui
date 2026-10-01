@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import {
   FolderOpen as FolderOpenIcon,
 } from "@mui/icons-material";
-import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask, QueueState, HealthCheckSummary, FilterState, SortState } from "@/types";
+import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask, QueueState, HealthCheckSummary } from "@/types";
 import { listen } from "@tauri-apps/api/event";
 import TopBar from "./TopBar";
 import StatusBar from "./StatusBar";
@@ -16,13 +16,16 @@ import ImportDialog from "./ImportDialog";
 import HealthCheckPanel from "./HealthCheckPanel";
 import * as api from "@/lib/tauri";
 
+/** 主面板视图：detail 携带选中的订阅 id（null 表示未选中）；downloads 无「选中」概念 */
+type AppView =
+  | { kind: "detail"; subscriptionId: string | null }
+  | { kind: "downloads" };
+
 interface AppShellProps {
   subscriptions: Subscription[];
   subscriptionsLoading: boolean;
   subscriptionsError: string | null;
   recordsError: string | null;
-  selectedId: string | null;
-  onSelectSubscription: (id: string | null) => void;
   onAddSubscription: (url: string) => Promise<Subscription>;
   onDeleteSubscription: (id: string) => Promise<void>;
   onTogglePause: (id: string) => Promise<void>;
@@ -38,13 +41,6 @@ interface AppShellProps {
   onHealthCheckAll: () => Promise<void>;
   onHealthCheckSelected: (ids: string[]) => Promise<void>;
   onHealthClearResults: () => void;
-  /** 筛选和排序状态 */
-  filter: FilterState;
-  onFilterChange: (partial: Partial<FilterState>) => void;
-  sort: SortState;
-  onSortChange: (sort: SortState) => void;
-  filteredSubscriptions: Subscription[];
-  filteredCount: number;
 }
 
 /**
@@ -55,8 +51,6 @@ export default function AppShell({
   subscriptionsLoading,
   subscriptionsError,
   recordsError,
-  selectedId,
-  onSelectSubscription,
   onAddSubscription,
   onDeleteSubscription,
   onTogglePause,
@@ -72,12 +66,6 @@ export default function AppShell({
   onHealthCheckAll,
   onHealthCheckSelected,
   onHealthClearResults,
-  filter,
-  onFilterChange,
-  sort,
-  onSortChange,
-  filteredSubscriptions,
-  filteredCount,
 }: AppShellProps) {
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -85,14 +73,22 @@ export default function AppShell({
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [queueTasks, setQueueTasks] = useState<DownloadTask[]>([]);
-  const [activeView, setActiveView] = useState<"detail" | "downloads">("detail");
   const [healthCheckOpen, setHealthCheckOpen] = useState(false);
+  // 主面板视图与选中订阅合并为一个可辨识联合：downloads 分支在类型上不存在 id，
+  // 因此「已下载视图 + 有选中项」这种非法组合无法表示，也不再需要手动清空选中。
+  const [view, setView] = useState<AppView>({ kind: "detail", subscriptionId: null });
+
+  // 供侧边栏高亮、记录过滤、状态栏刷新使用；downloads 视图下恒为 null
+  const selectedId = view.kind === "detail" ? view.subscriptionId : null;
 
   const selectedSub = subscriptions.find((s) => s.id === selectedId) ?? null;
   const filteredRecords = selectedId
     ? records.filter((r) => r.subscription_id === selectedId)
     : [];
-  const downloadCount = records.filter((r) => r.status !== "deleted").length;
+  const recordCount = records.length;
+  // 徽标显示下载记录总数（含 deleted —— 删除文件时记录有意保留以便追溯）；
+  // 状态栏只数其中仍处于 completed 的记录，两者口径不同、不要互相替换。
+  const completedCount = records.filter((r) => r.status === "completed").length;
 
   const refreshQueue = useCallback(async () => {
     try {
@@ -105,15 +101,13 @@ export default function AppShell({
 
   useEffect(() => {
     refreshQueue();
-    const unlistenQueuePromise = listen<QueueState>("queue-changed", () => {
-      refreshQueue();
-    });
-    const unlistenRecordsPromise = listen("records-changed", () => {
+    // 只订 queue-changed：凡改变队列的操作都会 emit 它（records-changed 的语义是
+    // 「持久化记录变化」，与内存队列无关）
+    const unlistenPromise = listen<QueueState>("queue-changed", () => {
       refreshQueue();
     });
     return () => {
-      unlistenQueuePromise.then((fn) => fn());
-      unlistenRecordsPromise.then((fn) => fn());
+      unlistenPromise.then((fn) => fn());
     };
   }, [refreshQueue]);
 
@@ -176,10 +170,7 @@ export default function AppShell({
               loading={subscriptionsLoading}
               error={subscriptionsError}
               selectedId={selectedId}
-              onSelect={(id) => {
-                setActiveView("detail");
-                onSelectSubscription(id);
-              }}
+              onSelect={(id) => setView({ kind: "detail", subscriptionId: id })}
               onDelete={onDeleteSubscription}
               onTogglePause={onTogglePause}
               onCheckSubscription={onCheckSubscription}
@@ -189,31 +180,22 @@ export default function AppShell({
               onOpenImport={() => setImportDialogOpen(true)}
               onOpenHealthCheck={() => setHealthCheckOpen(true)}
               onUpdateGroup={onUpdateGroup}
-              filter={filter}
-              onFilterChange={onFilterChange}
-              sort={sort}
-              onSortChange={onSortChange}
-              filteredSubscriptions={filteredSubscriptions}
-              filteredCount={filteredCount}
             />
           </div>
 
           {/* Bottom: "已下载" navigation button */}
           {!sidebarCollapsed && (
             <button
-              onClick={() => {
-                setActiveView("downloads");
-                onSelectSubscription(null);
-              }}
+              onClick={() => setView({ kind: "downloads" })}
               className={`flex items-center gap-2 w-full px-3 py-1 text-xs font-medium border-t border-gray-200 dark:border-gray-700 transition-colors
-                ${activeView === "downloads"
+                ${view.kind === "downloads"
                   ? "text-primary-600 dark:text-primary-400 bg-primary-50 dark:bg-primary-900/20"
                   : "text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800"}`}
             >
               <FolderOpenIcon fontSize="small" />
               <span className="flex-1 text-left">已下载</span>
               <span className="text-xs text-gray-400 dark:text-gray-500 tabular-nums">
-                {downloadCount}
+                {recordCount}
               </span>
             </button>
           )}
@@ -222,7 +204,7 @@ export default function AppShell({
         {/* Main Panel */}
         <div className="flex-1 flex flex-col min-w-0">
           <div className="flex-1 overflow-y-auto">
-            {activeView === "downloads" ? (
+            {view.kind === "downloads" ? (
               <DownloadedList
                 records={records}
                 onRefresh={onRefreshSubscriptions}
@@ -241,7 +223,9 @@ export default function AppShell({
               />
             )}
           </div>
-          <StatusBar refreshTrigger={activeView === "detail" ? selectedId : undefined} />
+          <StatusBar
+            completedCount={completedCount}
+          />
         </div>
       </div>
 

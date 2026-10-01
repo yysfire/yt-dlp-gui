@@ -249,10 +249,11 @@ impl DownloadQueue {
             video_id.clone(),
         );
 
-        let mut all_records = StorageService::load_download_records(data_dir)?;
-        all_records.push(record);
-        StorageService::save_download_records(data_dir, &all_records)?;
-        let _ = self.app_handle.emit("records-changed", ());
+        StorageService::update_download_records(data_dir, |all_records| {
+            all_records.push(record);
+            Ok(())
+        })?;
+        self.notify_records_changed();
 
         let mut queue = self.queue.lock().unwrap();
         queue.push_back(DownloadTask {
@@ -303,7 +304,6 @@ impl DownloadQueue {
                 let queue_clone = Arc::clone(&queue);
                 let active_clone = Arc::clone(&active_tasks);
                 let app_clone = app_handle.clone();
-                let sem_clone = Arc::clone(&semaphore);
                 let max_conc_clone = Arc::clone(&max_conc);
 
                 tokio::spawn(async move {
@@ -312,8 +312,10 @@ impl DownloadQueue {
                     Self::execute_download_with_control(
                         &task,
                         &ctx_clone,
+                        &queue_clone,
                         &active_clone,
                         &app_clone,
+                        &max_conc_clone,
                     ).await;
 
                     // Clean up active entry
@@ -322,13 +324,13 @@ impl DownloadQueue {
                         active.remove(&task.id);
                     }
 
-                    // Emit queue changed
-                    let state = QueueState {
-                        active_count: sem_clone.available_permits() as usize,
-                        waiting_count: queue_clone.lock().unwrap().len(),
-                        max_concurrent: max_conc_clone.load(Ordering::Relaxed),
-                    };
-                    let _ = app_clone.emit("queue-changed", state);
+                    // 任务结束（成功/失败/取消）后活动项已移除，通知前端重新拉取
+                    emit_queue_state(
+                        &app_clone,
+                        &queue_clone,
+                        &active_clone,
+                        max_conc_clone.load(Ordering::Relaxed),
+                    );
                 });
             }
         });
@@ -339,8 +341,10 @@ impl DownloadQueue {
     async fn execute_download_with_control(
         task: &DownloadTask,
         ctx: &DownloadContext,
+        queue: &Arc<Mutex<VecDeque<DownloadTask>>>,
         active_tasks: &Arc<Mutex<HashMap<String, ActiveTask>>>,
         app_handle: &AppHandle,
+        max_concurrent: &Arc<AtomicU32>,
     ) {
         let task_id = task.id.clone();
 
@@ -358,11 +362,6 @@ impl DownloadQueue {
                     let default_dir = crate::models::settings::default_download_dir();
                     let default = std::path::PathBuf::from(&default_dir);
                     let _ = std::fs::create_dir_all(&default);
-                    let _ = app_handle.emit("records-changed", serde_json::json!({
-                        "path_fallback": true,
-                        "original": ctx.download_dir.to_string_lossy(),
-                        "fallback": default_dir,
-                    }));
                     default
                 }
             }
@@ -401,13 +400,27 @@ impl DownloadQueue {
         };
         {
             let mut active = active_tasks.lock().unwrap();
+            // 任务此刻真正开始执行，状态必须从入队时的 Waiting 推进到 Running。
+            // 前端 `deriveStatus` 只把 running 映射为「下载中」，而进度条只在「下载中」渲染；
+            // 状态停在 waiting 会让整段下载期间都没有进度条。
+            let mut running_task = task.clone();
+            running_task.status = TaskStatus::Running;
             active.insert(task_id.clone(), ActiveTask {
                 child: Some(child),
                 pid,
-                task: task.clone(),
+                task: running_task,
                 last_progress_percent: 0.0,
             });
         }
+
+        // 通知前端「该任务已进入运行态」。`queue-changed` 是 AppShell 唯一重新拉取队列的
+        // 触发点，缺了这次 emit，前端会一直停留在入队时的「等待中」直到下载结束。
+        emit_queue_state(
+            app_handle,
+            queue,
+            active_tasks,
+            max_concurrent.load(Ordering::Relaxed),
+        );
 
         // Read progress from stdout
         let reader = BufReader::new(stdout);
@@ -495,81 +508,70 @@ impl DownloadQueue {
 
         match status {
             Some(Ok(s)) if s.success() => {
-                let _ = app_handle.emit(
-                    "download-complete",
-                    serde_json::json!({
-                        "title": &task.video_title,
-                    }),
-                );
-
                 // Update file info in DownloadRecord
                 if !file_path.is_empty() {
-                    let all_records = StorageService::load_download_records(&ctx.data_dir)
-                        .unwrap_or_default();
-                    let matching: Vec<_> = all_records.iter()
+                    // 只读定位目标记录（不加锁），文件大小在锁外算好
+                    let record_id = StorageService::load_download_records(&ctx.data_dir)
+                        .unwrap_or_default()
+                        .iter()
                         .filter(|r| r.video_url == task.video_url
                             && r.subscription_id == task.subscription_id)
-                        .collect();
-                    if let Some(record_id) = matching.last().map(|r| r.id.clone()) {
-                        let mut records = StorageService::load_download_records(&ctx.data_dir)
-                            .unwrap_or_default();
-                        if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
-                            existing.file_path = file_path.clone();
-                            existing.file_size = std::fs::metadata(&file_path)
-                                .map(|m| m.len())
-                                .unwrap_or(0);
-                            existing.status = "completed".to_string();
-                        }
-                        let _ = StorageService::save_download_records(&ctx.data_dir, &records);
+                        .last()
+                        .map(|r| r.id.clone());
+
+                    if let Some(record_id) = record_id {
+                        let file_size = std::fs::metadata(&file_path)
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        let _ = StorageService::update_download_records(&ctx.data_dir, |records| {
+                            if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
+                                existing.file_path = file_path;
+                                existing.file_size = file_size;
+                                existing.status = "completed".to_string();
+                            }
+                            Ok(())
+                        });
                     }
                 }
 
-                // Increment total downloads counter
-                if let Ok(mut app_state) = StorageService::load_state(&ctx.data_dir) {
-                    app_state.total_downloads += 1;
-                    let _ = StorageService::save_state(&ctx.data_dir, &app_state);
-                }
-
-                // Increment per-subscription download count
-                if let Ok(mut subs) = StorageService::load_subscriptions(&ctx.data_dir) {
-                    if let Some(sub) = subs.iter_mut().find(|s| s.id == task.subscription_id) {
-                        sub.download_count += 1;
-                        let _ = StorageService::save_subscriptions(&ctx.data_dir, &subs);
-                    }
-                }
-
-                let _ = app_handle.emit("records-changed", ());
+                // 计数不再在写端维护：前端的「已下载」由下载记录派生
+                // （口径 = status == "completed" 的条数），故此处只需落状态并通知刷新。
+                notify_records_changed(app_handle);
             }
             _ => {
                 log::error!("yt-dlp process failed for {}", task.video_title);
-                // Update record with error
-                let all_records = StorageService::load_download_records(&ctx.data_dir)
-                    .unwrap_or_default();
-                let matching: Vec<_> = all_records.iter()
+                // Update record with error — 同样先只读定位，再单次事务写入
+                let record_id = StorageService::load_download_records(&ctx.data_dir)
+                    .unwrap_or_default()
+                    .iter()
                     .filter(|r| r.video_url == task.video_url
                         && r.subscription_id == task.subscription_id)
-                    .collect();
-                if let Some(record_id) = matching.last().map(|r| r.id.clone()) {
-                    let mut records = StorageService::load_download_records(&ctx.data_dir)
-                        .unwrap_or_default();
-                    if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
-                        if existing.status != "cancelled" {
-                            existing.status = "failed".to_string();
-                            // FR-011: distinguish proxy failure from other errors
-                            let has_proxy = ctx.proxy.as_ref()
-                                .map(|p| !p.is_empty())
-                                .unwrap_or(false);
-                            if has_proxy {
-                                existing.error_message = Some("代理连接失败".to_string());
-                            } else {
-                                existing.error_message = Some("yt-dlp process exited with error".to_string());
+                    .last()
+                    .map(|r| r.id.clone());
+
+                if let Some(record_id) = record_id {
+                    // FR-011: distinguish proxy failure from other errors
+                    let has_proxy = ctx.proxy.as_ref()
+                        .map(|p| !p.is_empty())
+                        .unwrap_or(false);
+                    let error_message = if has_proxy {
+                        "代理连接失败".to_string()
+                    } else {
+                        "yt-dlp process exited with error".to_string()
+                    };
+
+                    let _ = StorageService::update_download_records(&ctx.data_dir, |records| {
+                        if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
+                            if existing.status != "cancelled" {
+                                existing.status = "failed".to_string();
+                                existing.error_message = Some(error_message);
                             }
                         }
-                    }
-                    let _ = StorageService::save_download_records(&ctx.data_dir, &records);
+                        Ok(())
+                    });
                 }
 
-                let _ = app_handle.emit("records-changed", ());
+                notify_records_changed(app_handle);
             }
         }
     }
@@ -603,7 +605,7 @@ impl DownloadQueue {
 
         if let Some((video_url, subscription_id)) = paused_info {
             self.update_record_status(data_dir, &video_url, &subscription_id, "paused", None);
-            let _ = self.app_handle.emit("records-changed", ());
+            self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
@@ -626,7 +628,7 @@ impl DownloadQueue {
 
         if let Some((video_url, subscription_id)) = waiting_paused {
             self.update_record_status(data_dir, &video_url, &subscription_id, "paused", None);
-            let _ = self.app_handle.emit("records-changed", ());
+            self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
@@ -663,7 +665,7 @@ impl DownloadQueue {
 
         if let Some((video_url, subscription_id)) = resumed_info {
             self.update_record_status(data_dir, &video_url, &subscription_id, "downloading", None);
-            let _ = self.app_handle.emit("records-changed", ());
+            self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
@@ -686,7 +688,7 @@ impl DownloadQueue {
 
         if let Some((video_url, subscription_id)) = waiting_resumed {
             self.update_record_status(data_dir, &video_url, &subscription_id, "downloading", None);
-            let _ = self.app_handle.emit("records-changed", ());
+            self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
@@ -719,7 +721,7 @@ impl DownloadQueue {
             Some((url, sub_id)) => {
                 log::info!("Paused download by url {}", video_url);
                 self.update_record_status(data_dir, &url, &sub_id, "paused", None);
-                let _ = self.app_handle.emit("records-changed", ());
+                self.notify_records_changed();
                 self.emit_queue_changed();
                 Ok(())
             }
@@ -742,7 +744,7 @@ impl DownloadQueue {
                     Some((url, sub_id)) => {
                         log::info!("Paused waiting download by url {}", video_url);
                         self.update_record_status(data_dir, &url, &sub_id, "paused", None);
-                        let _ = self.app_handle.emit("records-changed", ());
+                        self.notify_records_changed();
                         self.emit_queue_changed();
                         Ok(())
                     }
@@ -766,20 +768,20 @@ impl DownloadQueue {
         }
 
         // Fallback: search the waiting queue
-        let waiting_id = {
+        let waiting_task = {
             let mut queue = self.queue.lock().unwrap();
             if let Some(pos) = queue.iter().position(|t| t.video_url == video_url) {
                 let task = queue.remove(pos).unwrap();
-                Some(task.id)
+                Some((task.video_url, task.subscription_id))
             } else {
                 None
             }
             // queue lock guard dropped here
         };
 
-        if let Some(_id) = waiting_id {
-            self.update_record_status(&ctx.data_dir, video_url, "", "cancelled", Some("Cancelled by user".to_string()));
-            let _ = self.app_handle.emit("records-changed", ());
+        if let Some((url, sub_id)) = waiting_task {
+            self.update_record_status(&ctx.data_dir, &url, &sub_id, "cancelled", Some("Cancelled by user".to_string()));
+            self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
@@ -809,7 +811,7 @@ impl DownloadQueue {
             self.cleanup_partial_files(&entry.task.video_title, &ctx.download_dir);
 
             // Mark matching records as cancelled
-            if let Ok(mut records) = StorageService::load_download_records(&ctx.data_dir) {
+            let _ = StorageService::update_download_records(&ctx.data_dir, |records| {
                 for r in records.iter_mut() {
                     if r.video_url == entry.task.video_url
                         && r.subscription_id == entry.task.subscription_id
@@ -819,10 +821,10 @@ impl DownloadQueue {
                         r.downloaded_at = Utc::now().to_rfc3339();
                     }
                 }
-                let _ = StorageService::save_download_records(&ctx.data_dir, &records);
-            }
+                Ok(())
+            });
 
-            let _ = self.app_handle.emit("records-changed", ());
+            self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
@@ -840,7 +842,7 @@ impl DownloadQueue {
 
         if let Some(task) = cancelled_task {
             self.update_record_status(&ctx.data_dir, &task.video_url, &task.subscription_id, "cancelled", Some("Cancelled by user".to_string()));
-            let _ = self.app_handle.emit("records-changed", ());
+            self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
@@ -868,7 +870,7 @@ impl DownloadQueue {
 
     /// Updates a DownloadRecord's status and error message.
     fn update_record_status(&self, data_dir: &PathBuf, video_url: &str, subscription_id: &str, status: &str, error_message: Option<String>) {
-        if let Ok(mut records) = StorageService::load_download_records(data_dir) {
+        let _ = StorageService::update_download_records(data_dir, |records| {
             for r in records.iter_mut() {
                 if r.video_url == video_url && r.subscription_id == subscription_id {
                     r.status = status.to_string();
@@ -876,8 +878,8 @@ impl DownloadQueue {
                     r.downloaded_at = Utc::now().to_rfc3339();
                 }
             }
-            let _ = StorageService::save_download_records(data_dir, &records);
-        }
+            Ok(())
+        });
     }
 
     /// Returns runtime queue state.
@@ -984,6 +986,41 @@ impl DownloadQueue {
         let state = self.get_state();
         let _ = self.app_handle.emit("queue-changed", state);
     }
+
+    /// 见模块级 [`notify_records_changed`] —— 仅为对齐 `self.emit_queue_changed()` 的调用样式。
+    fn notify_records_changed(&self) {
+        notify_records_changed(&self.app_handle);
+    }
+}
+
+/// 通知前端「下载记录已变化」（无载荷）。
+///
+/// 纯 emit：零 I/O、零加锁、不阻塞，因此可在任意临界区内安全调用。
+/// 契约：凡写 `download_records.json` 的路径都必须调用本函数。
+pub(crate) fn notify_records_changed(app_handle: &tauri::AppHandle) {
+    let _ = app_handle.emit("records-changed", ());
+}
+
+/// 构造并 emit 队列状态快照，供前端在任务状态变化时重新拉取队列。
+///
+/// 加锁顺序固定为 `queue → active_tasks`，与 [`DownloadQueue::get_state`] 一致，
+/// 避免与其它取状态的路径形成反向锁序；两把锁都只短暂持有，emit 在锁外进行。
+fn emit_queue_state(
+    app_handle: &AppHandle,
+    queue: &Arc<Mutex<VecDeque<DownloadTask>>>,
+    active_tasks: &Arc<Mutex<HashMap<String, ActiveTask>>>,
+    max_concurrent: u32,
+) {
+    let state = {
+        let waiting_count = queue.lock().unwrap().len();
+        let active_count = active_tasks.lock().unwrap().len();
+        QueueState {
+            active_count,
+            waiting_count,
+            max_concurrent,
+        }
+    };
+    let _ = app_handle.emit("queue-changed", state);
 }
 
 #[cfg(test)]

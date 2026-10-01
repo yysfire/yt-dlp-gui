@@ -6,19 +6,17 @@ use tokio::sync::Semaphore;
 use crate::models::health::{HealthCheckResult, HealthCheckSummary, HealthStatus};
 use crate::models::Subscription;
 use crate::services::{HealthService, StorageService};
+use crate::utils::AppError;
 use crate::AppContext;
 
 // ── 内部辅助函数（可单独测试）────────────────────────────────────
 
-/// 根据健康检查结果更新订阅列表中对应条目的 `health_status` 和
-/// `last_health_check`，并自动暂停标记为 Dead 的订阅。
-///
-/// 更新完成后将完整订阅列表持久化到 `subscriptions.json`。
-fn update_subscriptions_health(
-    data_dir: &std::path::Path,
+/// 根据健康检查结果在内存中更新订阅的 `health_status` 与 `last_health_check`，
+/// 并自动暂停标记为 Dead 的订阅。纯内存操作，不做任何持久化。
+pub(crate) fn apply_health_updates(
     subscriptions: &mut [Subscription],
     results: &[HealthCheckResult],
-) -> Result<(), String> {
+) {
     for result in results {
         if let Some(sub) = subscriptions
             .iter_mut()
@@ -32,8 +30,17 @@ fn update_subscriptions_health(
             }
         }
     }
-    StorageService::save_subscriptions(data_dir, subscriptions)
-        .map_err(|e| format!("保存订阅失败: {}", e))
+}
+
+/// 在写事务内应用健康检查结果并持久化订阅列表。
+fn persist_health(
+    data_dir: &std::path::Path,
+    results: &[HealthCheckResult],
+) -> Result<(), AppError> {
+    StorageService::update_subscriptions(data_dir, |subs| {
+        apply_health_updates(subs, results);
+        Ok(())
+    })
 }
 
 // ── Tauri 命令 ──────────────────────────────────────────────────
@@ -67,9 +74,7 @@ pub async fn check_all_health(
             HealthService::check_batch(&subscriptions, &client, semaphore).await;
 
         // 更新订阅健康状态并持久化
-        let mut subs =
-            StorageService::load_subscriptions(&data_dir).unwrap_or_default();
-        let _ = update_subscriptions_health(&data_dir, &mut subs, &summary.results);
+        let _ = persist_health(&data_dir, &summary.results);
 
         let _ = app_handle_clone
             .emit("health-check-complete", serde_json::json!(&summary));
@@ -116,9 +121,8 @@ pub async fn check_selected_health(
         let summary =
             HealthService::check_batch(&subscriptions, &client, semaphore).await;
 
-        let mut subs =
-            StorageService::load_subscriptions(&data_dir).unwrap_or_default();
-        let _ = update_subscriptions_health(&data_dir, &mut subs, &summary.results);
+        // 更新订阅健康状态并持久化
+        let _ = persist_health(&data_dir, &summary.results);
 
         let _ = app_handle_clone
             .emit("health-check-complete", serde_json::json!(&summary));
@@ -224,7 +228,6 @@ mod tests {
 
     #[test]
     fn test_update_subscriptions_health_ok() {
-        let tmp = TempDir::new().unwrap();
         let mut sub = make_sub("id-1", "https://youtube.com/@a", "A");
         sub.health_status = None;
         sub.last_health_check = None;
@@ -239,7 +242,7 @@ mod tests {
             checked_at: "2026-06-10T12:00:00Z".to_string(),
         }];
 
-        update_subscriptions_health(tmp.path(), &mut subs, &results).unwrap();
+        apply_health_updates(&mut subs, &results);
 
         assert_eq!(subs[0].health_status, Some(HealthStatus::Ok));
         assert_eq!(
@@ -251,7 +254,6 @@ mod tests {
 
     #[test]
     fn test_update_subscriptions_health_warning() {
-        let tmp = TempDir::new().unwrap();
         let mut sub = make_sub("id-1", "https://youtube.com/@a", "A");
         sub.paused = false;
 
@@ -265,7 +267,7 @@ mod tests {
             checked_at: "2026-06-10T12:00:00Z".to_string(),
         }];
 
-        update_subscriptions_health(tmp.path(), &mut subs, &results).unwrap();
+        apply_health_updates(&mut subs, &results);
 
         assert_eq!(subs[0].health_status, Some(HealthStatus::Warning));
         assert!(!subs[0].paused, "Warning 状态不应自动暂停");
@@ -277,7 +279,7 @@ mod tests {
         let mut sub = make_sub("id-1", "https://youtube.com/@a", "A");
         sub.health_status = None;
 
-        let mut subs = vec![sub.clone()];
+        let subs = vec![sub.clone()];
         let results = vec![HealthCheckResult {
             subscription_id: "id-1".to_string(),
             url: "https://youtube.com/@a".to_string(),
@@ -287,7 +289,8 @@ mod tests {
             checked_at: "2026-06-10T12:00:00Z".to_string(),
         }];
 
-        update_subscriptions_health(tmp.path(), &mut subs, &results).unwrap();
+        StorageService::seed_subscriptions(tmp.path(), &subs).unwrap();
+        persist_health(tmp.path(), &results).unwrap();
 
         // 验证磁盘持久化
         let loaded = StorageService::load_subscriptions(tmp.path()).unwrap();
@@ -303,7 +306,6 @@ mod tests {
 
     #[test]
     fn test_auto_pause_on_dead() {
-        let tmp = TempDir::new().unwrap();
         let mut sub = make_sub("id-1", "https://youtube.com/@a", "A");
         sub.paused = false;
 
@@ -317,7 +319,7 @@ mod tests {
             checked_at: "2026-06-10T12:00:00Z".to_string(),
         }];
 
-        update_subscriptions_health(tmp.path(), &mut subs, &results).unwrap();
+        apply_health_updates(&mut subs, &results);
 
         assert_eq!(subs[0].health_status, Some(HealthStatus::Dead));
         assert!(subs[0].paused, "Dead 状态必须自动暂停订阅");
@@ -329,7 +331,7 @@ mod tests {
         let mut sub = make_sub("id-1", "https://youtube.com/@a", "A");
         sub.paused = false;
 
-        let mut subs = vec![sub.clone()];
+        let subs = vec![sub.clone()];
         let results = vec![HealthCheckResult {
             subscription_id: "id-1".to_string(),
             url: "https://youtube.com/@a".to_string(),
@@ -339,7 +341,8 @@ mod tests {
             checked_at: "2026-06-10T12:00:00Z".to_string(),
         }];
 
-        update_subscriptions_health(tmp.path(), &mut subs, &results).unwrap();
+        StorageService::seed_subscriptions(tmp.path(), &subs).unwrap();
+        persist_health(tmp.path(), &results).unwrap();
 
         // 验证磁盘上的 paused 状态
         let loaded = StorageService::load_subscriptions(tmp.path()).unwrap();
@@ -351,8 +354,6 @@ mod tests {
     #[test]
     fn test_auto_pause_only_for_dead() {
         // 验证只有 Dead 状态会暂停，Ok 和 Warning 不会
-        let tmp = TempDir::new().unwrap();
-
         let mut sub_ok = make_sub("id-ok", "https://youtube.com/@ok", "OK");
         sub_ok.paused = false;
         let mut sub_warn = make_sub("id-warn", "https://youtube.com/@warn", "Warn");
@@ -388,7 +389,7 @@ mod tests {
             },
         ];
 
-        update_subscriptions_health(tmp.path(), &mut subs, &results).unwrap();
+        apply_health_updates(&mut subs, &results);
 
         let sub_ok = subs.iter().find(|s| s.id == "id-ok").unwrap();
         let sub_warn = subs.iter().find(|s| s.id == "id-warn").unwrap();
@@ -401,7 +402,6 @@ mod tests {
 
     #[test]
     fn test_update_subscriptions_health_id_not_found_skips() {
-        let tmp = TempDir::new().unwrap();
         let sub = make_sub("id-1", "https://youtube.com/@a", "A");
         let original_paused = sub.paused;
 
@@ -416,8 +416,8 @@ mod tests {
             checked_at: "2026-06-10T12:00:00Z".to_string(),
         }];
 
-        let result = update_subscriptions_health(tmp.path(), &mut subs, &results);
-        assert!(result.is_ok(), "不存在的 ID 应被跳过，不应报错");
+        apply_health_updates(&mut subs, &results);
+
         assert_eq!(subs[0].paused, original_paused, "不应影响未匹配的订阅");
         assert_eq!(subs[0].health_status, None, "不应更新未匹配订阅的状态");
     }

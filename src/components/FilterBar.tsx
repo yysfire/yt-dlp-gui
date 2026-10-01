@@ -18,7 +18,7 @@ import {
   ArrowUpward as AscIcon,
   ArrowDownward as DescIcon,
 } from "@mui/icons-material";
-import type { FilterState, SortState, Subscription } from "../types";
+import type { FilterState, SortState } from "../types";
 import { GROUPS } from "../types";
 
 interface FilterBarProps {
@@ -26,7 +26,6 @@ interface FilterBarProps {
   onFilterChange: (partial: Partial<FilterState>) => void;
   sort: SortState;
   onSortChange: (sort: SortState) => void;
-  subscriptions: Subscription[];
   count: number;
 }
 

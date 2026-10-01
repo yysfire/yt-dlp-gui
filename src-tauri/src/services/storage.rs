@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 
 use crate::models::{AppSettings, AppState, DownloadRecord, Subscription};
 use crate::utils::AppError;
@@ -7,7 +8,120 @@ use crate::utils::AppError;
 /// Stateless service for reading/writing JSON persistence files.
 pub struct StorageService;
 
+/// 全局写事务锁。
+///
+/// 所有写路径（`update_*` 与 `save_settings`）都必须经过它，使「读当前内容 → 改内存
+/// → 写回」成为原子操作，消除并发读改写（RMW）造成的丢失更新。
+///
+/// 读路径（`load_*`）不加锁：`write_json` 采用「写同目录临时文件 + 原子 rename」，
+/// 读端不会看到被截断的半个文件。
+///
+/// 锁序：应用里唯一涉及本锁的嵌套是 `QueueContext.queue → 本锁`（`commands/download.rs`
+/// 持队列锁调用 `enqueue_from_video`，后者先完成 storage 写、之后才锁自身队列）。
+/// 维持「无反向路径」结论的前提是事务闭包不获取任何其它锁 —— 见 `update_*` 的约束说明。
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+// debug 构建下标记「本线程正处于写事务中」，用于捕获会导致死锁的嵌套调用。
+#[cfg(debug_assertions)]
+thread_local! {
+    static IN_TXN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 退栈时复位 `IN_TXN`，闭包 panic 时同样生效。
+#[cfg(debug_assertions)]
+struct TxnFlag;
+
+#[cfg(debug_assertions)]
+impl Drop for TxnFlag {
+    fn drop(&mut self) {
+        IN_TXN.with(|c| c.set(false));
+    }
+}
+
+/// 在全局写锁保护下执行 `f`。
+///
+/// 锁被 poison 时恢复而非报错：被守护的数据是 `()`，真实状态都在磁盘上，
+/// 让一次 panic 永久瘫痪所有持久化写入并不划算。
+fn with_write_lock<R>(f: impl FnOnce() -> Result<R, AppError>) -> Result<R, AppError> {
+    // 必须在 lock() 之前检查：同线程重入会在 lock() 处直接死锁，根本到不了检查。
+    #[cfg(debug_assertions)]
+    {
+        if IN_TXN.with(|c| c.get()) {
+            panic!("storage: 检测到嵌套写事务（update_*/save_settings 重入），会死锁");
+        }
+        IN_TXN.with(|c| c.set(true));
+    }
+    #[cfg(debug_assertions)]
+    let _flag = TxnFlag;
+
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|poisoned| {
+        log::warn!("storage: 写锁已被 poison，已恢复");
+        poisoned.into_inner()
+    });
+
+    f()
+}
+
 impl StorageService {
+    // ── 事务式写入 ─────────────────────────────────────────────────
+    //
+    // 以下 update_* 是生产代码唯一的写入接口。闭包约束（务必遵守）：
+    //
+    // 1. 禁止调用 `update_*` 或 `save_settings`：`std::sync::Mutex` 不可重入，会死锁
+    //    （debug 构建下会 panic 提示）。
+    // 2. 禁止获取任何应用级锁（`AppContext.settings`、`QueueContext.queue`、
+    //    `DownloadQueue` 的队列/任务锁、`TrayService.state`、`ImportContext.cancel_flag`）：
+    //    会与「持队列锁 → 本锁」的顺序形成反向环。
+    // 3. 禁止做文件 I/O：会长时间占用写锁，阻塞下载队列的记录更新。
+    // 4. 如需读取其它实体，请在闭包外先读好再传入。闭包内调 `load_*` 不会死锁，
+    //    但读到的是本事务开始之前的快照。
+
+    /// 以事务方式修改 `download_records.json`。
+    ///
+    /// 拿写锁 → 读取磁盘当前内容 → 交给 `f` → `f` 返回 `Ok` 时写回并返回其值；
+    /// 返回 `Err` 时不写回（丢弃内存改动）并把错误原样返回。
+    pub fn update_download_records<R>(
+        data_dir: &Path,
+        f: impl FnOnce(&mut Vec<DownloadRecord>) -> Result<R, AppError>,
+    ) -> Result<R, AppError> {
+        let path = data_dir.join("download_records.json");
+        with_write_lock(|| {
+            let mut records: Vec<DownloadRecord> = Self::read_json_array(&path)?;
+            let result = f(&mut records)?;
+            Self::save_download_records(data_dir, &records)?;
+            Ok(result)
+        })
+    }
+
+    /// 以事务方式修改 `subscriptions.json`。语义与约束同 [`Self::update_download_records`]。
+    pub fn update_subscriptions<R>(
+        data_dir: &Path,
+        f: impl FnOnce(&mut Vec<Subscription>) -> Result<R, AppError>,
+    ) -> Result<R, AppError> {
+        let path = data_dir.join("subscriptions.json");
+        with_write_lock(|| {
+            let mut subs: Vec<Subscription> = Self::read_json_array(&path)?;
+            let result = f(&mut subs)?;
+            Self::save_subscriptions(data_dir, &subs)?;
+            Ok(result)
+        })
+    }
+
+    /// 以事务方式修改 `state.json`（单对象，不是数组）。语义与约束同
+    /// [`Self::update_download_records`]；文件缺失或损坏时以默认值起算。
+    pub fn update_state<R>(
+        data_dir: &Path,
+        f: impl FnOnce(&mut AppState) -> Result<R, AppError>,
+    ) -> Result<R, AppError> {
+        let path = data_dir.join("state.json");
+        with_write_lock(|| {
+            let mut state: AppState = Self::read_json(&path).unwrap_or_default();
+            let result = f(&mut state)?;
+            Self::save_state(data_dir, &state)?;
+            Ok(result)
+        })
+    }
+
     // ── Subscriptions ──────────────────────────────────────────────
 
     /// Loads all subscriptions from `subscriptions.json`.
@@ -17,48 +131,16 @@ impl StorageService {
         Self::read_json_array(&path)
     }
 
-    /// Saves the full subscription list to `subscriptions.json`.
-    pub fn save_subscriptions(
+    /// 将完整订阅列表写入 `subscriptions.json`。
+    ///
+    /// 私有：生产代码一律走 [`Self::update_subscriptions`] 事务，以便由编译器
+    /// 保证不存在绕过写锁的读改写。
+    fn save_subscriptions(
         data_dir: &Path,
         subs: &[Subscription],
     ) -> Result<(), AppError> {
         let path = data_dir.join("subscriptions.json");
         Self::write_json(&path, subs)
-    }
-
-    /// 从所有订阅中收集标签并去重，按字母排序返回
-    pub fn get_all_tags(data_dir: &Path) -> Result<Vec<String>, AppError> {
-        let subs = Self::load_subscriptions(data_dir)?;
-        let mut tags: Vec<String> = Vec::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for sub in &subs {
-            for tag in &sub.tags {
-                if seen.insert(tag.clone()) {
-                    tags.push(tag.clone());
-                }
-            }
-        }
-        tags.sort();
-        Ok(tags)
-    }
-
-    /// 更新指定订阅的标签
-    pub fn update_subscription_tags(
-        data_dir: &Path,
-        subscription_id: &str,
-        tags: Vec<String>,
-    ) -> Result<(), AppError> {
-        let mut subs = Self::load_subscriptions(data_dir)?;
-        let sub = subs
-            .iter_mut()
-            .find(|s| s.id == subscription_id)
-            .ok_or_else(|| AppError::NotFound(format!(
-                "未找到订阅: {}",
-                subscription_id
-            )))?;
-        sub.tags = tags;
-        Self::save_subscriptions(data_dir, &subs)?;
-        Ok(())
     }
 
     // ── Download Records ───────────────────────────────────────────
@@ -69,8 +151,10 @@ impl StorageService {
         Self::read_json_array(&path)
     }
 
-    /// Saves the full download record list to `download_records.json`.
-    pub fn save_download_records(
+    /// 将完整下载记录列表写入 `download_records.json`。
+    ///
+    /// 私有：生产代码一律走 [`Self::update_download_records`] 事务。
+    fn save_download_records(
         data_dir: &Path,
         records: &[DownloadRecord],
     ) -> Result<(), AppError> {
@@ -127,71 +211,21 @@ impl StorageService {
     /// Records without a video_id are kept as-is.
     /// Returns the number of duplicate records removed.
     pub fn deduplicate_records(data_dir: &Path) -> Result<usize, AppError> {
-        let records = Self::load_download_records(data_dir)?;
-        let original_count = records.len();
-        let deduped = Self::deduplicate_vec(records);
-        let removed = original_count - deduped.len();
-        if removed > 0 {
-            log::info!(
-                "Deduplicated download records: removed {} duplicate(s), {} → {} records",
-                removed,
-                original_count,
-                deduped.len()
-            );
-            Self::save_download_records(data_dir, &deduped)?;
-        }
-
-        Ok(removed)
-    }
-
-    /// Recomputes total_downloads from actual download records and syncs state.json.
-    /// Fixes any discrepancy caused by race conditions or interrupted writes.
-    pub fn recompute_total_downloads(data_dir: &Path) -> Result<u32, AppError> {
-        let records = Self::load_download_records(data_dir)?;
-        let actual = records.iter().filter(|r| r.status == "completed").count() as u32;
-        if let Ok(mut state) = Self::load_state(data_dir) {
-            if state.total_downloads != actual {
+        Self::update_download_records(data_dir, |records| {
+            let original_count = records.len();
+            let deduped = Self::deduplicate_vec(std::mem::take(records));
+            let removed = original_count - deduped.len();
+            if removed > 0 {
                 log::info!(
-                    "Recomputing total_downloads: {} → {} (from {} records, {} completed)",
-                    state.total_downloads,
-                    actual,
-                    records.len(),
-                    actual
+                    "Deduplicated download records: removed {} duplicate(s), {} → {} records",
+                    removed,
+                    original_count,
+                    deduped.len()
                 );
-                state.total_downloads = actual;
-                Self::save_state(data_dir, &state)?;
             }
-        }
-        Ok(actual)
-    }
-
-    /// Recomputes per-subscription download_count from actual completed records.
-    pub fn recompute_subscription_download_counts(data_dir: &Path) -> Result<(), AppError> {
-        let mut subs = Self::load_subscriptions(data_dir)?;
-        let records = Self::load_download_records(data_dir)?;
-        let mut changed = false;
-
-        for sub in subs.iter_mut() {
-            let count = records
-                .iter()
-                .filter(|r| r.subscription_id == sub.id && r.status == "completed")
-                .count() as u32;
-            if sub.download_count != count {
-                log::info!(
-                    "Recomputing download_count for {}: {} → {}",
-                    sub.channel_name,
-                    sub.download_count,
-                    count
-                );
-                sub.download_count = count;
-                changed = true;
-            }
-        }
-
-        if changed {
-            Self::save_subscriptions(data_dir, &subs)?;
-        }
-        Ok(())
+            *records = deduped;
+            Ok(removed)
+        })
     }
 
     // ── Settings ────────────────────────────────────────────────────
@@ -204,9 +238,12 @@ impl StorageService {
     }
 
     /// Saves settings to `settings.json`.
+    ///
+    /// 走全局写锁：settings 是整对象替换，但仍需与并发写者（如托盘菜单切换）
+    /// 串行，且避免两次并发写落到同一个 `settings.tmp`。
     pub fn save_settings(data_dir: &Path, settings: &AppSettings) -> Result<(), AppError> {
         let path = data_dir.join("settings.json");
-        Self::write_json(&path, settings)
+        with_write_lock(|| Self::write_json(&path, settings))
     }
 
     // ── App State ───────────────────────────────────────────────────
@@ -217,8 +254,10 @@ impl StorageService {
         Ok(Self::read_json(&path).unwrap_or_default())
     }
 
-    /// Saves application state to `state.json`.
-    pub fn save_state(data_dir: &Path, state: &AppState) -> Result<(), AppError> {
+    /// 将应用状态写入 `state.json`。
+    ///
+    /// 私有：生产代码一律走 [`Self::update_state`] 事务。
+    fn save_state(data_dir: &Path, state: &AppState) -> Result<(), AppError> {
         let path = data_dir.join("state.json");
         Self::write_json(&path, state)
     }
@@ -242,14 +281,64 @@ impl StorageService {
     }
 
     /// Serializes a value to JSON and writes it to the given path.
+    ///
+    /// 采用「写同目录临时文件 + 原子 rename」而非直接覆写：直接 `std::fs::write`
+    /// 会原地截断，并发读（`load_*`，不加锁）可能读到半个文件而反序列化失败。
+    /// 原子替换后读端只可能看到「旧完整版」或「新完整版」。
     fn write_json<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> Result<(), AppError> {
         let json = serde_json::to_string_pretty(value)?;
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, json)?;
-        Ok(())
+
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, json)?;
+
+        // Windows 上若目标文件正被外部进程以不共享删除的方式打开（杀软、索引器、
+        // 资源管理器预览等），rename 会返回 ERROR_ACCESS_DENIED。做有限退避重试。
+        let mut last_err = None;
+        for attempt in 0..3u8 {
+            match std::fs::rename(&tmp, path) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < 2 {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
+            }
+        }
+
+        let _ = std::fs::remove_file(&tmp);
+        Err(last_err
+            .expect("rename 至少尝试过一次")
+            .into())
+    }
+}
+
+#[cfg(test)]
+impl StorageService {
+    /// 测试专用：整体覆盖订阅集合（`save_subscriptions` 私有化后的播种入口）。
+    pub(crate) fn seed_subscriptions(
+        data_dir: &Path,
+        subs: &[Subscription],
+    ) -> Result<(), AppError> {
+        Self::update_subscriptions(data_dir, |current| {
+            *current = subs.to_vec();
+            Ok(())
+        })
+    }
+
+    /// 测试专用：整体覆盖下载记录集合（`save_download_records` 私有化后的播种入口）。
+    pub(crate) fn seed_download_records(
+        data_dir: &Path,
+        records: &[DownloadRecord],
+    ) -> Result<(), AppError> {
+        Self::update_download_records(data_dir, |current| {
+            *current = records.to_vec();
+            Ok(())
+        })
     }
 }
 
@@ -518,7 +607,6 @@ mod tests {
         let state = StorageService::load_state(tmp.path())
             .expect("should not error on missing file");
         assert_eq!(state.last_check_time, None);
-        assert_eq!(state.total_downloads, 0);
     }
 
     #[test]
@@ -526,7 +614,6 @@ mod tests {
         let tmp = setup_temp_dir();
         let state = AppState {
             last_check_time: Some("2025-05-28T15:00:00Z".to_string()),
-            total_downloads: 123,
         };
 
         StorageService::save_state(tmp.path(), &state)
@@ -535,7 +622,6 @@ mod tests {
         let loaded = StorageService::load_state(tmp.path())
             .expect("load should succeed");
         assert_eq!(loaded.last_check_time, state.last_check_time);
-        assert_eq!(loaded.total_downloads, state.total_downloads);
     }
 
     #[test]
@@ -560,5 +646,129 @@ mod tests {
         StorageService::save_subscriptions(tmp.path(), &[])
             .expect("save should succeed");
         assert!(sub_file.exists(), "file should be created even for empty data");
+    }
+
+    // ── 事务接口不变量测试 ──────────────────────────────────────────
+
+    #[test]
+    fn test_update_transaction_commits_and_returns_value() {
+        let tmp = setup_temp_dir();
+        let dir = tmp.path();
+        let record = make_record("sub-1", "Video");
+
+        let returned = StorageService::update_download_records(dir, |records| {
+            records.push(record.clone());
+            Ok(records.len())
+        })
+        .expect("update should succeed");
+
+        assert_eq!(returned, 1, "应返回闭包的返回值");
+        let records = StorageService::load_download_records(dir).expect("load should succeed");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, record.id);
+    }
+
+    #[test]
+    fn test_update_transaction_rolls_back_on_error() {
+        let tmp = setup_temp_dir();
+        let dir = tmp.path();
+        let original = make_record("sub-1", "Original");
+        StorageService::seed_download_records(dir, &[original.clone()]).expect("seed failed");
+
+        let result: Result<(), AppError> = StorageService::update_download_records(dir, |records| {
+            records.push(make_record("sub-1", "ShouldNotPersist"));
+            Err(AppError::NotFound("模拟失败".to_string()))
+        });
+
+        assert!(result.is_err(), "闭包返回 Err 时事务应失败");
+        let records = StorageService::load_download_records(dir).expect("load should succeed");
+        assert_eq!(records.len(), 1, "闭包 Err 时不应写回内存改动");
+        assert_eq!(records[0].id, original.id);
+    }
+
+    /// 直击原始 bug：并发读改写（load → mutate → save）会丢失更新。
+    #[test]
+    fn test_update_concurrent_writes_do_not_lose_updates() {
+        let tmp = setup_temp_dir();
+        let dir = tmp.path();
+        const N: usize = 16;
+
+        std::thread::scope(|scope| {
+            for i in 0..N {
+                scope.spawn(move || {
+                    let mut record = make_record("sub-1", &format!("Video {}", i));
+                    record.video_id = format!("vid-{}", i);
+                    StorageService::update_download_records(dir, |records| {
+                        records.push(record);
+                        Ok(())
+                    })
+                    .expect("concurrent update should succeed");
+                });
+            }
+        });
+
+        let records = StorageService::load_download_records(dir).expect("load should succeed");
+        assert_eq!(records.len(), N, "并发追加不应丢失任何一条记录");
+    }
+
+    /// 旧格式 state.json（含已删除的 total_downloads 键）应能被事务更新正常处理，
+    /// 且更新后不再写出该键。覆盖「向后兼容」与「事务语义」两点。
+    #[test]
+    fn test_update_state_handles_legacy_state_file() {
+        let tmp = setup_temp_dir();
+        let dir = tmp.path();
+        let path = dir.join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"last_check_time":"2025-01-01T00:00:00Z","total_downloads":47}"#,
+        )
+        .expect("seed legacy state file");
+
+        StorageService::update_state(dir, |state| {
+            state.last_check_time = Some("2026-01-01T00:00:00Z".to_string());
+            Ok(())
+        })
+        .expect("update should succeed on legacy file");
+
+        let state = StorageService::load_state(dir).expect("load should succeed");
+        assert_eq!(state.last_check_time.as_deref(), Some("2026-01-01T00:00:00Z"));
+
+        let raw = std::fs::read_to_string(&path).expect("read state.json");
+        assert!(
+            !raw.contains("total_downloads"),
+            "已删除的字段不应再被写出，实际内容: {}",
+            raw
+        );
+    }
+
+    #[test]
+    fn test_atomic_write_leaves_no_tmp_file() {
+        let tmp = setup_temp_dir();
+        let dir = tmp.path();
+
+        StorageService::update_download_records(dir, |records| {
+            records.push(make_record("sub-1", "Video"));
+            Ok(())
+        })
+        .expect("update should succeed");
+
+        assert!(dir.join("download_records.json").exists());
+        assert!(
+            !dir.join("download_records.tmp").exists(),
+            "临时文件应已被 rename 消耗，不应残留"
+        );
+    }
+
+    /// 事务内再开事务会死锁；debug 构建下应直接 panic 提示。
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "嵌套写事务")]
+    fn test_nested_write_transaction_panics_in_debug() {
+        let tmp = setup_temp_dir();
+        let dir = tmp.path();
+
+        let _ = StorageService::update_state(dir, |_| {
+            StorageService::update_subscriptions(dir, |_| Ok(()))
+        });
     }
 }

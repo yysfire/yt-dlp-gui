@@ -10,214 +10,17 @@ import {
   Downloading as DownloadingIcon,
   Replay as ReplayIcon,
   HourglassEmpty as WaitingIcon,
+  DeleteOutline as DeletedIcon,
 } from "@mui/icons-material";
-import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask, ChannelInfo, VideoInfo, UnifiedVideoItem, VideoStatus } from "@/types";
+import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask, ChannelInfo, VideoInfo } from "@/types";
 import { getChannelInfo, getChannelVideos } from "@/lib/tauri";
-
-function formatTime(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleString("zh-CN");
-  } catch {
-    return iso;
-  }
-}
-
-/** 将秒数格式化为人类可读的时长字符串（如 "12:34", "0:30"） */
-function formatDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) return "";
-  const totalSeconds = Math.round(seconds);
-  const h = Math.floor(totalSeconds / 3600);
-  const m = Math.floor((totalSeconds % 3600) / 60);
-  const s = totalSeconds % 60;
-  if (h > 0) {
-    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  }
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-/** 格式化文件大小 */
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return "";
-  const units = ["B", "KB", "MB", "GB"];
-  let size = bytes;
-  let unitIndex = 0;
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex++;
-  }
-  return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
-}
-
-/** 从 yt-dlp epoch 字段或 upload_date (YYYYMMDD) 转为 YYYY-MM-DD 字符串 */
-function formatUploadDate(uploadDate: string | null | undefined, epoch: number | null | undefined): string {
-  if (uploadDate && /^\d{8}$/.test(uploadDate)) {
-    return `${uploadDate.slice(0, 4)}-${uploadDate.slice(4, 6)}-${uploadDate.slice(6, 8)}`;
-  }
-  if (epoch != null && epoch > 0) {
-    const d = new Date(epoch * 1000);
-    return d.toISOString().slice(0, 10);
-  }
-  return "";
-}
-
-/** 按状态排序优先级 (越小越靠前) */
-function statusPriority(status: VideoStatus): number {
-  switch (status) {
-    case "downloading": return 0;
-    case "waiting": return 1;
-    case "paused": return 2;
-    case "completed": return 3;
-    case "new": return 4;
-    case "cancelled": return 5;
-    case "failed": return 6;
-    default: return 9;
-  }
-}
-
-/** 合并频道视频与下载记录为统一列表 */
-function mergeToUnifiedItems(
-  videoList: VideoInfo[],
-  records: DownloadRecord[],
-  queueTasks: DownloadTask[],
-): UnifiedVideoItem[] {
-  const map = new Map<string, UnifiedVideoItem>();
-
-  // 辅助：生成 key（优先 video_id，回退 url）
-  const makeKey = (id: string, url: string): string => {
-    return id || url;
-  };
-
-  // 辅助：获取派生状态
-  const deriveStatus = (item: UnifiedVideoItem): VideoStatus => {
-    const qt = item.queueTask;
-    const di = item.downloadInfo;
-    // queue task 优先级最高
-    if (qt) {
-      if (qt.status === "running") return "downloading";
-      if (qt.status === "paused") return "paused";
-      if (qt.status === "waiting") return "waiting";
-      if (qt.status === "cancelled") return "cancelled";
-      if (qt.status === "failed") return "failed";
-      if (qt.status === "completed") return "completed";
-    }
-    // 回退到 download record 状态
-    if (di) {
-      return di.status as VideoStatus;
-    }
-    return "new";
-  };
-
-  // 第一轮：遍历下载记录
-  for (const r of records) {
-    const key = makeKey(r.video_id, r.video_url);
-    const existing = map.get(key);
-    if (existing) {
-      // 已存在：仅当没有 downloadInfo 时设置
-      if (!existing.downloadInfo) {
-        existing.downloadInfo = r;
-        (existing as { status: VideoStatus }).status = deriveStatus(existing);
-      }
-    } else {
-      const item: UnifiedVideoItem = {
-        downloadInfo: r,
-        channelInfo: undefined,
-        queueTask: undefined,
-        id: key,
-        title: r.video_title,
-        url: r.video_url,
-        status: r.status as VideoStatus,
-      };
-      map.set(key, item);
-    }
-  }
-
-  // 第二轮：遍历队列任务
-  for (const t of queueTasks) {
-    const key = makeKey(t.video_id, t.video_url);
-    const existing = map.get(key);
-    if (existing) {
-      existing.queueTask = t;
-      (existing as { status: VideoStatus }).status = deriveStatus(existing);
-      // 用队列任务的最新标题更新
-      if (t.video_title) {
-        (existing as { title: string }).title = t.video_title;
-      }
-    } else {
-      const item: UnifiedVideoItem = {
-        downloadInfo: undefined,
-        channelInfo: undefined,
-        queueTask: t,
-        id: key,
-        title: t.video_title,
-        url: t.video_url,
-        status: t.status === "running" ? "downloading"
-          : t.status === "paused" ? "paused"
-          : t.status === "waiting" ? "waiting"
-          : (t.status as VideoStatus),
-      };
-      map.set(key, item);
-    }
-  }
-
-  // 第三轮：遍历频道视频
-  for (const v of videoList) {
-    const key = makeKey(v.id, v.url);
-    const existing = map.get(key);
-    if (existing) {
-      existing.channelInfo = v;
-      // 频道视频的标题通常更新
-      (existing as { title: string }).title = v.title;
-      // 如有频道视频 ID，用它
-      if (v.id) {
-        (existing as { id: string }).id = v.id;
-      }
-      // 重新派生状态
-      (existing as { status: VideoStatus }).status = deriveStatus(existing);
-    } else {
-      const item: UnifiedVideoItem = {
-        downloadInfo: undefined,
-        channelInfo: v,
-        queueTask: undefined,
-        id: key,
-        title: v.title,
-        url: v.url,
-        status: "new",
-      };
-      map.set(key, item);
-    }
-  }
-
-  // 排序
-  const items = Array.from(map.values());
-  items.sort((a, b) => {
-    const pa = statusPriority(a.status);
-    const pb = statusPriority(b.status);
-    if (pa !== pb) return pa - pb;
-    // 同状态下按时间倒序
-    const getTime = (item: UnifiedVideoItem): number => {
-      if (item.downloadInfo?.downloaded_at) {
-        return new Date(item.downloadInfo.downloaded_at).getTime();
-      }
-      if (item.queueTask?.created_at) {
-        return new Date(item.queueTask.created_at).getTime();
-      }
-      // 频道视频按 upload_date
-      if (item.channelInfo?.upload_date) {
-        // YYYYMMDD → 转为可比较的时间
-        return new Date(
-          item.channelInfo.upload_date.slice(0, 4) + "-" +
-          item.channelInfo.upload_date.slice(4, 6) + "-" +
-          item.channelInfo.upload_date.slice(6, 8)
-        ).getTime();
-      }
-      return 0;
-    };
-    return getTime(b) - getTime(a);
-  });
-
-  return items;
-}
+import {
+  buildUnifiedVideoList,
+  formatDuration,
+  formatFileSize,
+  formatTime,
+  formatUploadDate,
+} from "@/lib/unifiedVideoList";
 
 interface DetailPanelProps {
   subscription: Subscription | null;
@@ -325,7 +128,11 @@ export default function DetailPanel({
             setTotalVideos(res.total);
             if (!res.has_more) break;
             page++;
-          } catch {
+          } catch (e) {
+            // 不能静默中断：后端解析失败时只会表现为「列表少了一截」，
+            // 而后端早已改成解析失败即报错，这里吞掉就等于让那个改动失效。
+            // 已加载的条目保留，同时把错误显示出来。
+            if (currentRequestId === requestIdRef.current) setLoadError(String(e));
             break;
           }
         }
@@ -340,12 +147,19 @@ export default function DetailPanel({
   // 合并频道视频、下载记录、队列任务为统一列表
   const unifiedItems = useMemo(() => {
     try {
-      return mergeToUnifiedItems(videoList, records, queueTasks);
+      return buildUnifiedVideoList({ videos: videoList, records, tasks: queueTasks });
     } catch (e) {
-      console.error("[DetailPanel] mergeToUnifiedItems failed:", e);
+      console.error("[DetailPanel] buildUnifiedVideoList failed:", e);
       return [];
     }
   }, [videoList, records, queueTasks]);
+
+  // 已完成数从 records 派生（唯一真相源是下载记录，不再由后端维护计数字段）。
+  // 口径：当前仍处于 completed 的记录条数。必须放在下方提前返回之前。
+  const completedCount = useMemo(
+    () => records.filter((r) => r.status === "completed").length,
+    [records],
+  );
 
   if (!subscription) {
     return (
@@ -432,7 +246,7 @@ export default function DetailPanel({
           {/* Per-subscription stats */}
           <div className="flex items-center gap-2 mt-1">
             <Typography variant="caption" color="text.secondary">
-              已下载: {subscription.download_count} 个
+              已完成: {completedCount} 个
             </Typography>
             {channelInfo?.subscriber_count && (
               <Typography variant="caption" color="text.secondary">
@@ -537,6 +351,7 @@ export default function DetailPanel({
                             px: 2,
                             borderBottom: 1,
                             borderColor: "divider",
+                            opacity: item.status === "deleted" ? 0.5 : 1,
                           }}
                         >
                           {/* 第 1 列：状态图标（垂直居中） */}
@@ -548,6 +363,7 @@ export default function DetailPanel({
                             {item.status === "completed" && <SuccessIcon sx={{ fontSize: 18, color: "success.main" }} />}
                             {item.status === "failed" && <ErrorIcon sx={{ fontSize: 18, color: "error.main" }} />}
                             {item.status === "cancelled" && <CancelIcon sx={{ fontSize: 18, color: "text.disabled" }} />}
+                            {item.status === "deleted" && <DeletedIcon sx={{ fontSize: 18, color: "text.disabled" }} />}
                           </Box>
 
                           {/* 第 2 列：三行内容 */}
@@ -562,7 +378,11 @@ export default function DetailPanel({
                               rel="noopener noreferrer"
                               underline="hover"
                               color="inherit"
-                              sx={{ fontSize: "0.8rem", lineHeight: 1.3 }}
+                              sx={{
+                                fontSize: "0.8rem",
+                                lineHeight: 1.3,
+                                ...(item.status === "deleted" && { textDecoration: "line-through" }),
+                              }}
                             >
                               {item.title}
                             </Typography>
@@ -602,6 +422,14 @@ export default function DetailPanel({
                                         </>
                                       )}
                                       {item.status === "cancelled" && `已取消${date ? ` · ${date}` : ""}`}
+                                      {item.status === "deleted" && (
+                                        <>
+                                          <Box component="span" sx={{ color: "text.disabled", fontWeight: 500 }}>已删除</Box>
+                                          {date && ` · ${date}`}
+                                          {!item.channelInfo && item.downloadInfo &&
+                                            ` · ${new Date(item.downloadInfo.downloaded_at).toLocaleDateString("zh-CN")}`}
+                                        </>
+                                      )}
                                     </>
                                   );
                                 })()}
@@ -618,6 +446,7 @@ export default function DetailPanel({
                             {item.status === "downloading" && item.downloadInfo && (
                               <Box sx={{ height: 4, bgcolor: "grey.200", borderRadius: 2, mt: 0.5 }}>
                                 <Box
+                                  data-testid="download-progress-fill"
                                   sx={{
                                     height: "100%",
                                     bgcolor: "info.main",

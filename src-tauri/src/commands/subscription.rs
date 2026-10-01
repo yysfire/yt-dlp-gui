@@ -13,40 +13,53 @@ pub async fn add_subscription(
     url: String,
     state: State<'_, AppContext>,
 ) -> Result<Subscription, String> {
-    // Load current subscriptions to check for duplicates
-    let mut subs = StorageService::load_subscriptions(&state.data_dir)
-        .map_err(|e| e.to_string())?;
-
-    // Check for duplicate URL
-    if subs.iter().any(|s| s.url == url) {
-        return Err(AppError::Duplicate(format!(
-            "Already subscribed to: {}",
-            url
-        ))
-        .to_string());
+    // 只读预检：URL 已存在时直接失败，省掉一次白跑的 yt-dlp 调用
+    {
+        let subs = StorageService::load_subscriptions(&state.data_dir)
+            .map_err(|e| e.to_string())?;
+        if subs.iter().any(|s| s.url == url) {
+            return Err(AppError::Duplicate(format!(
+                "Already subscribed to: {}",
+                url
+            ))
+            .to_string());
+        }
     }
 
-    // Get yt-dlp path, proxy, and cookie_file from settings
-    let settings = state.settings.lock().map_err(|e| e.to_string())?;
-    let yt_dlp_path = settings.yt_dlp_path.clone();
-    let proxy = Some(settings.proxy_url.clone());
-    let cookie_file = Some(settings.cookie_file.clone());
+    // 克隆 yt-dlp 所需设置后立即释放锁：parse_channel_info 是阻塞式子进程调用，
+    // 可能耗时数秒，不能持锁跨越它（否则并发 settings/check 访问会被一起卡住）。
+    let (yt_dlp_path, proxy, cookie_file) = {
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        (
+            settings.yt_dlp_path.clone(),
+            Some(settings.proxy_url.clone()),
+            Some(settings.cookie_file.clone()),
+        )
+    };
 
     // Parse channel info via yt-dlp
     let channel_info = YtDlpService::parse_channel_info(&yt_dlp_path, &proxy, &cookie_file, &url)
         .map_err(|e| e.to_string())?;
 
     let subscription = Subscription::new(
-        url,
+        url.clone(),
         channel_info.platform,
         channel_info.channel_name,
         channel_info.channel_avatar_url,
     );
 
-    subs.push(subscription.clone());
-
-    StorageService::save_subscriptions(&state.data_dir, &subs)
-        .map_err(|e| e.to_string())?;
+    // 事务内复查重复：上面的只读预检与这次写入之间可能有并发的添加
+    StorageService::update_subscriptions(&state.data_dir, |subs| {
+        if subs.iter().any(|s| s.url == url) {
+            return Err(AppError::Duplicate(format!(
+                "Already subscribed to: {}",
+                url
+            )));
+        }
+        subs.push(subscription.clone());
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     log::info!("Added subscription: {}", subscription.channel_name);
     Ok(subscription)
@@ -58,26 +71,21 @@ pub async fn delete_subscription(
     id: String,
     state: State<'_, AppContext>,
 ) -> Result<(), String> {
-    let mut subs = StorageService::load_subscriptions(&state.data_dir)
-        .map_err(|e| e.to_string())?;
-
-    let index = subs
-        .iter()
-        .position(|s| s.id == id)
-        .ok_or_else(|| AppError::NotFound(format!("Subscription not found: {}", id)))
-        .map_err(|e| e.to_string())?;
-
-    let removed = subs.remove(index);
-
-    StorageService::save_subscriptions(&state.data_dir, &subs)
-        .map_err(|e| e.to_string())?;
+    let removed = StorageService::update_subscriptions(&state.data_dir, |subs| {
+        let index = subs
+            .iter()
+            .position(|s| s.id == id)
+            .ok_or_else(|| AppError::NotFound(format!("Subscription not found: {}", id)))?;
+        Ok(subs.remove(index))
+    })
+    .map_err(|e| e.to_string())?;
 
     // Cascade delete download records for this subscription
-    let mut records = StorageService::load_download_records(&state.data_dir)
-        .map_err(|e| e.to_string())?;
-    records.retain(|r| r.subscription_id != id);
-    StorageService::save_download_records(&state.data_dir, &records)
-        .map_err(|e| e.to_string())?;
+    StorageService::update_download_records(&state.data_dir, |records| {
+        records.retain(|r| r.subscription_id != id);
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     log::info!("Deleted subscription: {}", removed.channel_name);
     Ok(())
@@ -97,20 +105,15 @@ pub async fn toggle_subscription_pause(
     id: String,
     state: State<'_, AppContext>,
 ) -> Result<Subscription, String> {
-    let mut subs = StorageService::load_subscriptions(&state.data_dir)
-        .map_err(|e| e.to_string())?;
-
-    let sub = subs
-        .iter_mut()
-        .find(|s| s.id == id)
-        .ok_or_else(|| AppError::NotFound(format!("Subscription not found: {}", id)))
-        .map_err(|e| e.to_string())?;
-
-    sub.paused = !sub.paused;
-    let updated = sub.clone();
-
-    StorageService::save_subscriptions(&state.data_dir, &subs)
-        .map_err(|e| e.to_string())?;
+    let updated = StorageService::update_subscriptions(&state.data_dir, |subs| {
+        let sub = subs
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or_else(|| AppError::NotFound(format!("Subscription not found: {}", id)))?;
+        sub.paused = !sub.paused;
+        Ok(sub.clone())
+    })
+    .map_err(|e| e.to_string())?;
 
     log::info!(
         "Toggled subscription pause: {} -> {}",
@@ -127,20 +130,15 @@ pub async fn update_subscription_quality(
     quality_preset: String,
     state: State<'_, AppContext>,
 ) -> Result<Subscription, String> {
-    let mut subs = StorageService::load_subscriptions(&state.data_dir)
-        .map_err(|e| e.to_string())?;
-
-    let sub = subs
-        .iter_mut()
-        .find(|s| s.id == id)
-        .ok_or_else(|| AppError::NotFound(format!("Subscription not found: {}", id)))
-        .map_err(|e| e.to_string())?;
-
-    sub.quality_preset = quality_preset;
-    let updated = sub.clone();
-
-    StorageService::save_subscriptions(&state.data_dir, &subs)
-        .map_err(|e| e.to_string())?;
+    let updated = StorageService::update_subscriptions(&state.data_dir, |subs| {
+        let sub = subs
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or_else(|| AppError::NotFound(format!("Subscription not found: {}", id)))?;
+        sub.quality_preset = quality_preset;
+        Ok(sub.clone())
+    })
+    .map_err(|e| e.to_string())?;
 
     log::info!(
         "Updated quality for {}: {}",
@@ -166,17 +164,20 @@ pub async fn update_subscription_group(
             valid_groups.join("、")
         ));
     }
-    let mut subs = StorageService::load_subscriptions(&state.data_dir)
-        .map_err(|e| e.to_string())?;
-    let sub = subs
-        .iter_mut()
-        .find(|s| s.id == id)
-        .ok_or_else(|| format!("订阅不存在: {}", id))?;
-    sub.group_name = group_name.clone();
-    let updated = sub.clone();
-    StorageService::save_subscriptions(&state.data_dir, &subs)
-        .map_err(|e| e.to_string())?;
-    Ok(updated)
+
+    // 「未找到」用返回值表达而非 AppError，以保留原先面向用户的错误文案
+    let updated = StorageService::update_subscriptions(&state.data_dir, |subs| {
+        match subs.iter_mut().find(|s| s.id == id) {
+            Some(sub) => {
+                sub.group_name = group_name.clone();
+                Ok(Some(sub.clone()))
+            }
+            None => Ok(None),
+        }
+    })
+    .map_err(|e| e.to_string())?;
+
+    updated.ok_or_else(|| format!("订阅不存在: {}", id))
 }
 
 /// Batch deletes subscriptions by IDs and removes associated download records.
@@ -185,22 +186,19 @@ pub async fn batch_delete_subscriptions(
     ids: Vec<String>,
     state: tauri::State<'_, AppContext>,
 ) -> Result<serde_json::Value, String> {
-    let mut subs = StorageService::load_subscriptions(&state.data_dir)
-        .map_err(|e| e.to_string())?;
-
-    let initial_len = subs.len();
-    subs.retain(|s| !ids.contains(&s.id));
-    let deleted_count = initial_len - subs.len();
-
-    StorageService::save_subscriptions(&state.data_dir, &subs)
-        .map_err(|e| e.to_string())?;
+    let deleted_count = StorageService::update_subscriptions(&state.data_dir, |subs| {
+        let initial_len = subs.len();
+        subs.retain(|s| !ids.contains(&s.id));
+        Ok(initial_len - subs.len())
+    })
+    .map_err(|e| e.to_string())?;
 
     // Cascade delete download records for deleted subscriptions
-    let mut records = StorageService::load_download_records(&state.data_dir)
-        .map_err(|e| e.to_string())?;
-    records.retain(|r| !ids.contains(&r.subscription_id));
-    StorageService::save_download_records(&state.data_dir, &records)
-        .map_err(|e| e.to_string())?;
+    StorageService::update_download_records(&state.data_dir, |records| {
+        records.retain(|r| !ids.contains(&r.subscription_id));
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     log::info!("Batch deleted {} subscriptions", deleted_count);
 
@@ -288,7 +286,7 @@ mod tests {
         );
         let sub_id = sub.id.clone();
         let subs = vec![sub];
-        StorageService::save_subscriptions(&data_dir, &subs)
+        StorageService::seed_subscriptions(&data_dir, &subs)
             .expect("failed to save subscriptions");
 
         // Load and update group_name
@@ -299,7 +297,7 @@ mod tests {
         assert_eq!(sub.group_name, "未分组");
 
         sub.group_name = "学习".to_string();
-        StorageService::save_subscriptions(&data_dir, &loaded)
+        StorageService::seed_subscriptions(&data_dir, &loaded)
             .expect("failed to save updated subscriptions");
 
         // Reload and verify
