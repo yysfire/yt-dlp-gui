@@ -1,6 +1,5 @@
 ---
-description: Guard Spec Kit and Superpowers commands from crossing bridge ownership
-  boundaries
+description: Guard Spec Kit and Superpowers commands from crossing bridge ownership boundaries
 ---
 
 
@@ -10,7 +9,7 @@ description: Guard Spec Kit and Superpowers commands from crossing bridge owners
 
 Block commands that would overlap Spec Kit / Superpowers responsibilities. The guard reads `.specify/superpowers-handoff.json` and (when needed) the active feature directory, then evaluates a small fixed rule set.
 
-## Rules (hardcoded; see `.specify/scripts/powershell/guard-command.ps1` and `.specify/scripts/bash/guard-command.sh`)
+## Rules (hardcoded; see `.specify/extensions/speckit-superpowers-bridge/scripts/powershell/guard-command.ps1` and `.specify/extensions/speckit-superpowers-bridge/scripts/bash/guard-command.sh`)
 
 The guard evaluates these 5 rules in order; the first match wins:
 
