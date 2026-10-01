@@ -14,7 +14,8 @@ import {
   FileUpload as ImportIcon,
   MonitorHeart as HealthCheckIcon,
 } from "@mui/icons-material";
-import type { Subscription, FilterState, SortState } from "@/types";
+import type { Subscription } from "@/types";
+import { useFilter } from "@/hooks/useFilter";
 import SubscriptionItem from "./SubscriptionItem";
 import FilterBar from "./FilterBar";
 
@@ -33,13 +34,6 @@ interface SubscriptionListProps {
   onOpenImport: () => void;
   onOpenHealthCheck: () => void;
   onUpdateGroup: (id: string, groupName: string) => Promise<void>;
-  /** 筛选和排序状态（从 useFilter hook 输出） */
-  filter: FilterState;
-  onFilterChange: (partial: Partial<FilterState>) => void;
-  sort: SortState;
-  onSortChange: (sort: SortState) => void;
-  filteredSubscriptions: Subscription[];
-  filteredCount: number;
 }
 
 /** Sidebar container rendering the subscription list with toolbar and filter bar. */
@@ -58,13 +52,13 @@ export default function SubscriptionList({
   onOpenImport,
   onOpenHealthCheck,
   onUpdateGroup,
-  filter,
-  onFilterChange,
-  sort,
-  onSortChange,
-  filteredSubscriptions,
-  filteredCount,
 }: SubscriptionListProps) {
+  // 筛选/排序状态由本组件内部持有，而不是提升到 App。
+  // 依赖：本组件在侧边栏折叠时只是被 CSS 隐藏、始终保持挂载，故状态不会被重置。
+  // 若将来改为条件渲染，需先把筛选状态提升回上层。
+  const { filter, setFilter, sort, setSort, filtered, count } =
+    useFilter(subscriptions);
+
   return (
     <div className="flex flex-col h-full bg-white dark:bg-gray-800">
       {/* Title row */}
@@ -112,11 +106,10 @@ export default function SubscriptionList({
       {/* Filter bar */}
       <FilterBar
         filter={filter}
-        onFilterChange={onFilterChange}
+        onFilterChange={setFilter}
         sort={sort}
-        onSortChange={onSortChange}
-        subscriptions={subscriptions}
-        count={filteredCount}
+        onSortChange={setSort}
+        count={count}
       />
 
       {/* Content */}
@@ -133,7 +126,7 @@ export default function SubscriptionList({
           </Alert>
         )}
 
-        {!loading && !error && filteredSubscriptions.length === 0 && (
+        {!loading && !error && filtered.length === 0 && (
           <Box sx={{ p: 3, textAlign: "center" }}>
             <Typography variant="body2" color="text.secondary">
               {subscriptions.length === 0 ? "暂无订阅" : "无匹配结果"}
@@ -144,9 +137,9 @@ export default function SubscriptionList({
           </Box>
         )}
 
-        {!loading && filteredSubscriptions.length > 0 && (
+        {!loading && filtered.length > 0 && (
           <List disablePadding dense>
-            {filteredSubscriptions.map((sub) => (
+            {filtered.map((sub) => (
               <SubscriptionItem
                 key={sub.id}
                 subscription={sub}

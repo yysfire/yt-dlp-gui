@@ -24,7 +24,12 @@ import {
   Error as FailedIcon,
   DeleteOutline as DeletedIcon,
   Warning as MissingIcon,
+  Downloading as DownloadingIcon,
+  Pause as PausedIcon,
+  HourglassEmpty as WaitingIcon,
+  Cancel as CancelledIcon,
 } from "@mui/icons-material";
+import type { SvgIconComponent } from "@mui/icons-material";
 import type { DownloadRecord } from "@/types";
 import * as api from "@/lib/tauri";
 
@@ -62,6 +67,43 @@ function formatDate(iso: string): string {
 }
 
 /**
+ * 把记录状态映射为「图标 + 颜色」。
+ *
+ * 用 `switch` 并让每个 case 都 return、不写 `default`，以借助 TypeScript 的
+ * 穷尽性检查：将来 `DownloadRecord["status"]` 新增成员时，此处会编译报错，
+ * 强制作者决定它该显示什么，而不是悄悄落进兜底分支。
+ *
+ * `fileMissing` 只在 `completed` 分支生效 —— 其余状态下文件本就不该存在，
+ * 且后端同步只检查 `completed && file_path 非空` 的记录。
+ *
+ * 导出该函数是为了让视觉映射规则可在纯函数层被直接测试：`color` 返回的是
+ * 语义键字面量而非主题解析值，直接断言它不涉及主题解析，因此不脆。
+ */
+export function resolveStatusVisual(
+  status: DownloadRecord["status"],
+  fileMissing: boolean,
+): { Icon: SvgIconComponent; color: string } {
+  switch (status) {
+    case "deleted":
+      return { Icon: DeletedIcon, color: "text.disabled" };
+    case "completed":
+      return fileMissing
+        ? { Icon: MissingIcon, color: "warning.main" }
+        : { Icon: CompletedIcon, color: "success.main" };
+    case "failed":
+      return { Icon: FailedIcon, color: "error.main" };
+    case "downloading":
+      return { Icon: DownloadingIcon, color: "info.main" };
+    case "paused":
+      return { Icon: PausedIcon, color: "warning.main" };
+    case "waiting":
+      return { Icon: WaitingIcon, color: "text.disabled" };
+    case "cancelled":
+      return { Icon: CancelledIcon, color: "text.disabled" };
+  }
+}
+
+/**
  * A single download record row in the downloaded videos list.
  * Shows title, status, file size, download time, and action buttons.
  */
@@ -90,23 +132,10 @@ export default function DownloadedItem({
       .catch((e) => setToast(String(e)));
   };
 
-  const statusColor = isDeleted
-    ? "text.disabled"
-    : record.status === "completed"
-      ? "success.main"
-      : record.status === "failed"
-        ? "error.main"
-        : fileMissing
-          ? "warning.main"
-          : "text.secondary";
-
-  const StatusIcon = isDeleted
-    ? DeletedIcon
-    : record.status === "completed"
-      ? (fileMissing ? MissingIcon : CompletedIcon)
-      : record.status === "failed"
-        ? FailedIcon
-        : CompletedIcon;
+  const { Icon: StatusIcon, color: statusColor } = resolveStatusVisual(
+    record.status,
+    fileMissing,
+  );
 
   return (
     <>

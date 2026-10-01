@@ -1,8 +1,13 @@
 import { describe, it, expect } from "vitest";
-import type { Subscription, FilterState, SortState } from "../../types";
-
-// useFilter will be imported from the actual file once created
-// For now, we define the test expectations and will implement later
+import { renderHook, act } from "@testing-library/react";
+import type { Subscription, FilterState } from "../../types";
+import {
+  applyFilter,
+  applySort,
+  useFilter,
+  DEFAULT_FILTER,
+  DEFAULT_SORT,
+} from "../useFilter";
 
 // Mock subscriptions for testing
 const makeSub = (overrides: Partial<Subscription> = {}): Subscription => ({
@@ -16,7 +21,7 @@ const makeSub = (overrides: Partial<Subscription> = {}): Subscription => ({
   group_name: "未分组",
   created_at: "2025-01-01T00:00:00Z",
   last_checked_at: null,
-  download_count: 0,
+  last_successful_check_at: null,
   last_check_status: null,
   last_check_error: null,
   tags: [],
@@ -35,54 +40,6 @@ const testSubscriptions: Subscription[] = [
   makeSub({ id: "7", channel_name: "YouTube Tech", platform: "youtube", group_name: "科技", paused: false, health_status: "dead", url: "https://youtube.com/@techreviews" }),
   makeSub({ id: "8", channel_name: "B站 音乐台", platform: "bilibili", group_name: "音乐", paused: false, health_status: null, url: "https://bilibili.com/music" }),
 ];
-
-// Since useFilter hasn't been created yet, we test the pure filter logic
-// We'll extract the logic into a testable pure function
-
-function applyFilter(subscriptions: Subscription[], filter: FilterState): Subscription[] {
-  return subscriptions.filter((sub) => {
-    if (filter.platform !== "all" && sub.platform !== filter.platform) return false;
-    if (filter.status === "active" && sub.paused) return false;
-    if (filter.status === "paused" && !sub.paused) return false;
-    if (filter.group !== "全部") {
-      if (filter.group === "未分组" && sub.group_name !== "未分组") return false;
-      if (filter.group !== "未分组" && sub.group_name !== filter.group) return false;
-    }
-    if (filter.health !== "all") {
-      if (filter.health === "unchecked" && sub.health_status !== null) return false;
-      if (filter.health === "ok" && sub.health_status !== "ok") return false;
-      if (filter.health === "warning" && sub.health_status !== "warning") return false;
-      if (filter.health === "dead" && sub.health_status !== "dead") return false;
-    }
-    if (filter.keyword) {
-      const kw = filter.keyword.toLowerCase();
-      if (!sub.channel_name.toLowerCase().includes(kw) && !sub.url.toLowerCase().includes(kw)) return false;
-    }
-    return true;
-  });
-}
-
-function applySort(subscriptions: Subscription[], sort: SortState): Subscription[] {
-  const list = [...subscriptions];
-  const dir = sort.direction === "asc" ? 1 : -1;
-  list.sort((a, b) => {
-    switch (sort.field) {
-      case "name":
-        return dir * a.channel_name.localeCompare(b.channel_name, "zh-CN", { sensitivity: "base" });
-      case "created_at":
-        return dir * a.created_at.localeCompare(b.created_at);
-      case "last_health_check": {
-        if (!a.last_health_check && !b.last_health_check) return 0;
-        if (!a.last_health_check) return 1;
-        if (!b.last_health_check) return -1;
-        return dir * a.last_health_check.localeCompare(b.last_health_check);
-      }
-      default:
-        return 0;
-    }
-  });
-  return list;
-}
 
 describe("useFilter - 筛选逻辑", () => {
   const defaultFilter: FilterState = {
@@ -393,8 +350,43 @@ describe("useFilter - 筛选逻辑", () => {
   });
 });
 
-describe("useFilter Hook", () => {
-  it("待 useFilter 实现后再添加 Hook 集成测试", () => {
-    expect(true).toBe(true);
+describe("useFilter Hook 集成", () => {
+  it("初始 filter/sort 为默认值，count 为全部订阅数", () => {
+    const { result } = renderHook(() => useFilter(testSubscriptions));
+
+    expect(result.current.filter).toEqual(DEFAULT_FILTER);
+    expect(result.current.sort).toEqual(DEFAULT_SORT);
+    expect(result.current.count).toBe(8);
+    expect(result.current.filtered).toHaveLength(8);
+  });
+
+  it("setFilter 后 filtered 与 count 联动更新", () => {
+    const { result } = renderHook(() => useFilter(testSubscriptions));
+
+    act(() => {
+      result.current.setFilter({ platform: "youtube" });
+    });
+
+    expect(result.current.count).toBe(4);
+    expect(result.current.filtered).toHaveLength(4);
+    result.current.filtered.forEach((s) => expect(s.platform).toBe("youtube"));
+  });
+
+  it("filtered 等价于 applySort(applyFilter(...)) —— 先筛后排", () => {
+    const { result } = renderHook(() => useFilter(testSubscriptions));
+
+    act(() => {
+      result.current.setFilter({ platform: "youtube" });
+      result.current.setSort({ field: "name", direction: "desc" });
+    });
+
+    const expected = applySort(
+      applyFilter(testSubscriptions, result.current.filter),
+      result.current.sort,
+    );
+
+    expect(result.current.filtered.map((s) => s.id)).toEqual(
+      expected.map((s) => s.id),
+    );
   });
 });

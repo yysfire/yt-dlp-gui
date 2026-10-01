@@ -1,11 +1,9 @@
 //! System tray icon service.
 //!
-//! Manages the lifecycle of the system tray icon: creation, menu events,
-//! state updates (idle/downloading/checking), and cleanup.
+//! Manages the lifecycle of the system tray icon: creation and menu events.
 //!
 //! See `specs/005-system-tray-icon/spec.md` for full feature specification.
 
-use serde::Serialize;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::menu::{
     Menu, MenuBuilder, MenuEvent, MenuItem, MenuItemBuilder, PredefinedMenuItem,
@@ -15,80 +13,24 @@ use std::sync::Mutex;
 
 use crate::services::StorageService;
 use crate::utils::error::AppError;
+use crate::AppContext;
 use std::path::PathBuf;
 
-macro_rules! include_icon {
-    ($path:literal) => {
-        include_bytes!(concat!("../../icons/", $path))
-    };
-}
-
-/// Tray icon runtime status.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub enum TrayStatus {
-    Idle,
-    Downloading { active_count: u32 },
-    Checking,
-}
-
 /// Runtime state of the system tray icon.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct TrayState {
-    pub status: TrayStatus,
     pub window_visible: bool,
-    pub tray_supported: bool,
-    pub active_downloads: u32,
 }
 
 impl Default for TrayState {
     fn default() -> Self {
         Self {
-            status: TrayStatus::Idle,
             window_visible: true,
-            tray_supported: true,
-            active_downloads: 0,
         }
     }
 }
 
 impl TrayState {
-    pub fn set_status(&mut self, new_status: TrayStatus) -> Result<(), String> {
-        match (&self.status, &new_status) {
-            (_, TrayStatus::Idle) => {}
-            (TrayStatus::Idle, TrayStatus::Downloading { .. }) => {}
-            (TrayStatus::Idle, TrayStatus::Checking) => {}
-            (TrayStatus::Downloading { .. }, TrayStatus::Checking) => {
-                return Err("Cannot transition from Downloading to Checking".into());
-            }
-            (TrayStatus::Checking, TrayStatus::Downloading { .. }) => {
-                return Err("Cannot transition from Checking to Downloading".into());
-            }
-            (TrayStatus::Downloading { .. }, TrayStatus::Downloading { active_count }) => {
-                self.active_downloads = *active_count;
-                self.status = new_status;
-                return Ok(());
-            }
-            _ => {}
-        }
-        if let TrayStatus::Downloading { active_count } = &new_status {
-            self.active_downloads = *active_count;
-        } else {
-            self.active_downloads = 0;
-        }
-        self.status = new_status;
-        Ok(())
-    }
-
-    pub fn tooltip_text(&self) -> String {
-        match &self.status {
-            TrayStatus::Idle => "yt-dlp 订阅管理器 - 空闲".to_string(),
-            TrayStatus::Downloading { active_count } => {
-                format!("正在下载 {} 个视频", active_count)
-            }
-            TrayStatus::Checking => "正在检查订阅更新...".to_string(),
-        }
-    }
-
     pub fn window_menu_text(&self) -> &str {
         if self.window_visible {
             "隐藏主窗口"
@@ -199,10 +141,7 @@ impl TrayService {
                 );
                 Ok(TrayService {
                     tray_icon: None,
-                    state: Mutex::new(TrayState {
-                        tray_supported: false,
-                        ..Default::default()
-                    }),
+                    state: Mutex::new(TrayState::default()),
                     menu_show_item: show_item,
                     menu_scheduler_item: scheduler_item,
                     data_dir,
@@ -219,7 +158,7 @@ impl TrayService {
         match id {
             "tray_show" => self.toggle_window(app),
             "tray_check_all" => self.handle_check_all(app),
-            "tray_toggle_scheduler" => self.handle_toggle_scheduler(),
+            "tray_toggle_scheduler" => self.handle_toggle_scheduler(app),
             "tray_quit" => self.handle_quit(app),
             _ => log::warn!("Unknown tray menu event: {}", id),
         }
@@ -246,45 +185,41 @@ impl TrayService {
         let app_handle = app.clone();
         let data_dir = self.data_dir.clone();
         tauri::async_runtime::spawn(async move {
-            let subs =
-                StorageService::load_subscriptions(&data_dir).unwrap_or_default();
-            let subs: Vec<_> = subs.into_iter().filter(|s| !s.paused).collect();
-            if subs.is_empty() {
-                return;
+            // 与自动调度共用同一轮检查逻辑：会写回 last_checked_at 等字段并 emit 事件
+            if let Err(e) = crate::commands::download::run_check_round(&data_dir, &app_handle).await {
+                log::error!("tray: check round failed: {}", e);
             }
-            let records =
-                StorageService::load_download_records(&data_dir).unwrap_or_default();
-            let settings = StorageService::load_settings(&data_dir);
-            let yt_dlp_path = settings.yt_dlp_path.clone();
-            let proxy = Some(settings.proxy_url.clone());
-            let cookie_file = Some(settings.cookie_file.clone());
-            let download_dir = std::path::PathBuf::from(&settings.download_dir);
-
-            for sub in &subs {
-                let _ = crate::commands::download::check_and_download(
-                    sub,
-                    &yt_dlp_path,
-                    &proxy,
-                    &cookie_file,
-                    &download_dir,
-                    &data_dir,
-                    &None,
-                    &records,
-                    &app_handle,
-                )
-                .await;
-            }
-            let _ = app_handle.emit("scheduler-check-complete", ());
         });
     }
 
-    fn handle_toggle_scheduler(&self) {
-        let settings = StorageService::load_settings(&self.data_dir);
-        let new_paused = !settings.scheduler_paused;
-        let mut updated = settings;
-        updated.scheduler_paused = new_paused;
-        let _ = StorageService::save_settings(&self.data_dir, &updated);
+    fn handle_toggle_scheduler(&self, app: &AppHandle) {
+        let ctx = app.state::<AppContext>();
 
+        // 1) 读盘取反（不持任何应用级锁）
+        let mut updated = StorageService::load_settings(&self.data_dir);
+        let new_paused = !updated.scheduler_paused;
+        updated.scheduler_paused = new_paused;
+
+        // 2) 先落盘：save_settings 内部只拿全局写锁，并在返回前释放
+        if let Err(e) = StorageService::save_settings(&self.data_dir, &updated) {
+            log::error!("Tray: persist scheduler_paused failed: {}", e);
+            // 写盘失败就不动缓存与菜单，避免内存与磁盘分叉
+            return;
+        }
+
+        // 3) 再同步运行时缓存（独立 Mutex，用完即释放）
+        if let Ok(mut cached) = ctx.settings.lock() {
+            cached.scheduler_paused = new_paused;
+        }
+
+        // 广播设置变更（契约：凡写 settings 的路径都必须 emit 本事件）。
+        // 此刻磁盘与缓存都已生效，且不持任何应用级锁。
+        let _ = app.emit("settings-changed", &updated);
+
+        // 4) 唤醒调度循环，使「恢复定时检查」立即生效而不是等下一个间隔
+        let _ = ctx.scheduler_notify.send(());
+
+        // 5) 更新菜单文案
         let text = TrayState::scheduler_menu_text(new_paused);
         let _ = self.menu_scheduler_item.set_text(text);
 
@@ -292,14 +227,8 @@ impl TrayService {
     }
 
     fn handle_quit(&self, app: &AppHandle) {
-        let has_active = if let Ok(state) = self.state.lock() {
-            matches!(state.status, TrayStatus::Downloading { .. })
-        } else {
-            false
-        };
-        if has_active {
-            log::info!("Active downloads detected during tray quit, exiting per user request");
-        }
+        // 托盘状态更新从未实现（set_status/update_status 无调用方），故原先「有活跃下载时
+        // 再退出」的判断恒为 false、从未生效，已移除。
         log::info!("Tray quit: exiting application");
         app.exit(0);
     }
@@ -316,63 +245,8 @@ impl TrayService {
         }
     }
 
-    /// Show the main window.
-    pub fn show_window(&self, app: &AppHandle) {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.set_focus();
-            if let Ok(mut state) = self.state.lock() {
-                state.window_visible = true;
-                let text = state.window_menu_text();
-                let _ = self.menu_show_item.set_text(text);
-            }
-        }
-    }
-
-    /// Update tray visual status (icon + tooltip).
-    pub fn update_status(
-        &self,
-        app: &AppHandle,
-        new_status: TrayStatus,
-    ) -> Result<(), String> {
-        let mut state = self.state.lock().map_err(|e| e.to_string())?;
-        state.set_status(new_status)?;
-
-        if let Some(ref tray) = self.tray_icon {
-            let tooltip = state.tooltip_text();
-            let _ = tray.set_tooltip(Some(&tooltip));
-
-            let icon_bytes: &[u8] = match &state.status {
-                TrayStatus::Idle => include_icon!("tray-idle.png"),
-                TrayStatus::Downloading { .. } => include_icon!("tray-downloading.png"),
-                TrayStatus::Checking => include_icon!("tray-checking.png"),
-            };
-            match tauri::image::Image::from_bytes(icon_bytes) {
-                Ok(image) => {
-                    let _ = tray.set_icon(Some(image));
-                }
-                Err(e) => {
-                    log::error!("Failed to load tray icon image: {}", e);
-                }
-            }
-        }
-
-        let _ = app.emit("tray-state-changed", &*state);
-        log::info!("Tray status updated: tooltip={}", state.tooltip_text());
-        Ok(())
-    }
-
     pub fn is_supported(&self) -> bool {
         self.tray_icon.is_some()
-    }
-
-    pub fn update_scheduler_menu_text(&self, paused: bool) {
-        let text = TrayState::scheduler_menu_text(paused);
-        let _ = self.menu_scheduler_item.set_text(text);
-    }
-
-    pub fn cleanup(&self) {
-        log::info!("Tray service cleanup");
     }
 }
 
@@ -383,52 +257,7 @@ mod tests {
     #[test]
     fn test_default_tray_state() {
         let state = TrayState::default();
-        assert_eq!(state.status, TrayStatus::Idle);
         assert!(state.window_visible);
-        assert!(state.tray_supported);
-        assert_eq!(state.active_downloads, 0);
-    }
-
-    #[test]
-    fn test_status_transition_idle_to_downloading() {
-        let mut state = TrayState::default();
-        assert!(state.set_status(TrayStatus::Downloading { active_count: 3 }).is_ok());
-        assert_eq!(state.status, TrayStatus::Downloading { active_count: 3 });
-        assert_eq!(state.active_downloads, 3);
-    }
-
-    #[test]
-    fn test_status_transition_downloading_to_idle() {
-        let mut state = TrayState::default();
-        state.set_status(TrayStatus::Downloading { active_count: 2 }).unwrap();
-        assert!(state.set_status(TrayStatus::Idle).is_ok());
-        assert_eq!(state.status, TrayStatus::Idle);
-    }
-
-    #[test]
-    fn test_status_transition_downloading_to_checking_invalid() {
-        let mut state = TrayState::default();
-        state.set_status(TrayStatus::Downloading { active_count: 1 }).unwrap();
-        assert!(state.set_status(TrayStatus::Checking).is_err());
-    }
-
-    #[test]
-    fn test_tooltip_idle() {
-        assert_eq!(TrayState::default().tooltip_text(), "yt-dlp 订阅管理器 - 空闲");
-    }
-
-    #[test]
-    fn test_tooltip_downloading() {
-        let mut state = TrayState::default();
-        state.set_status(TrayStatus::Downloading { active_count: 3 }).unwrap();
-        assert_eq!(state.tooltip_text(), "正在下载 3 个视频");
-    }
-
-    #[test]
-    fn test_tooltip_checking() {
-        let mut state = TrayState::default();
-        state.set_status(TrayStatus::Checking).unwrap();
-        assert_eq!(state.tooltip_text(), "正在检查订阅更新...");
     }
 
     #[test]

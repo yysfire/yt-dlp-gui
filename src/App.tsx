@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   ThemeProvider,
   createTheme,
@@ -9,7 +9,6 @@ import { useSubscriptions } from "@/hooks/useSubscriptions";
 import { useDownloadRecords } from "@/hooks/useDownloadRecords";
 import { useDownloadProgress } from "@/hooks/useDownloadProgress";
 import { useHealthCheck } from "@/hooks/useHealthCheck";
-import { useFilter } from "@/hooks/useFilter";
 import AppShell from "@/components/AppShell";
 import * as api from "@/lib/tauri";
 import type { AppSettings } from "@/types";
@@ -72,7 +71,6 @@ const darkTheme = createTheme({
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const {
     subscriptions,
@@ -104,7 +102,28 @@ export default function App() {
     clearResults: clearHealthResults,
   } = useHealthCheck(refreshSubs);
 
-  const { filter, setFilter, sort, setSort, filtered, count: filteredCount } = useFilter(subscriptions);
+  // 唯一的事件合并点：同一批后端事件只触发一次 records + subs 全量拉取。
+  //
+  // 用「窗口内只排一次」而不是 debounce —— debounce 在连续入队（背靠背的同步循环）时
+  // 会被不断推迟，永远不会刷新。150ms 足以把一批事件吞进同一窗口，又远低于人眼可感的
+  // 阈值；交互反馈（暂停/取消/恢复）走 queue-changed 到 AppShell，不经过这里。
+  const refreshTimerRef = useRef<number | null>(null);
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current !== null) return; // 本窗口已排定 → 合并
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      void refreshRecords();
+      void refreshSubs();
+    }, 150);
+  }, [refreshRecords, refreshSubs]);
+
+  // StrictMode 双挂载下清理挂起的 timer，避免卸载后仍触发刷新
+  useEffect(() => () => {
+    if (refreshTimerRef.current !== null) {
+      window.clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = null;
+    }
+  }, []);
 
   // Load dark mode preference from settings on mount
   useEffect(() => {
@@ -112,11 +131,6 @@ export default function App() {
       try {
         const settings: AppSettings = await api.getSettings();
         setDarkMode(settings.dark_mode);
-        // Apply dark class to html element for Tailwind
-        document.documentElement.classList.toggle(
-          "dark",
-          settings.dark_mode,
-        );
       } catch {
         // Default to light mode
       }
@@ -124,82 +138,51 @@ export default function App() {
     loadSettings();
   }, []);
 
-  // Start the scheduler on mount
+  // <html> 上的 dark class 是 darkMode 的唯一投影（Tailwind darkMode: "class" 依赖它）。
+  // 不要在其他地方手写 classList.toggle。
   useEffect(() => {
-    const initScheduler = async () => {
-      try {
-        await api.startScheduler();
-      } catch {
-        // Scheduler start is best-effort
-      }
-    };
-    initScheduler();
-  }, []);
-
-  // Listen for download-complete events from the Rust backend
-  useEffect(() => {
-    const unlistenPromise = listen<{ title: string; channel: string }>(
-      "download-complete",
-      (_event) => {
-        refreshRecords();
-      },
-    );
-    return () => {
-      unlistenPromise.then((fn) => fn());
-    };
-  }, [refreshRecords]);
+    document.documentElement.classList.toggle("dark", darkMode);
+  }, [darkMode]);
 
   // Listen for records-changed events (real-time status updates during check)
   useEffect(() => {
     const unlistenPromise = listen("records-changed", () => {
-      refreshRecords();
+      scheduleRefresh();
     });
     return () => {
       unlistenPromise.then((fn) => fn());
     };
-  }, [refreshRecords]);
+  }, [scheduleRefresh]);
 
-  // Listen for scheduler-check-complete (background check finished)
+  // Listen for scheduler-check-complete (a check round finished — auto, tray, or manual)
   useEffect(() => {
     const unlistenPromise = listen("scheduler-check-complete", () => {
-      refreshRecords();
-      refreshSubs();
+      scheduleRefresh();
     });
     return () => {
       unlistenPromise.then((fn) => fn());
     };
-  }, [refreshRecords, refreshSubs]);
+  }, [scheduleRefresh]);
 
   // Listen for subscriptions-updated (batch import / batch delete completed)
   useEffect(() => {
     const unlistenPromise = listen("subscriptions-updated", () => {
-      refreshSubs();
+      scheduleRefresh();
     });
     return () => {
       unlistenPromise.then((fn) => fn());
     };
-  }, [refreshSubs]);
+  }, [scheduleRefresh]);
 
-  // Handle dark mode toggle (called when settings are updated externally)
-  const handleDarkModeChange = useCallback((isDark: boolean) => {
-    setDarkMode(isDark);
-    document.documentElement.classList.toggle("dark", isDark);
-  }, []);
-
-  // After settings are saved, re-check dark mode
+  // Listen for settings-changed (settings were saved to disk and cache was synced)
   useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        const settings = await api.getSettings();
-        if (settings.dark_mode !== darkMode) {
-          handleDarkModeChange(settings.dark_mode);
-        }
-      } catch {
-        // Ignore poll errors
-      }
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [darkMode, handleDarkModeChange]);
+    const unlistenPromise = listen<AppSettings>("settings-changed", (event) => {
+      setDarkMode(event.payload.dark_mode);
+    });
+    return () => {
+      unlistenPromise.then((fn) => fn());
+    };
+  }, []);
 
   const theme = darkMode ? darkTheme : lightTheme;
 
@@ -210,8 +193,6 @@ export default function App() {
         subscriptions={subscriptions}
         subscriptionsLoading={subsLoading}
         subscriptionsError={subsError}
-        selectedId={selectedId}
-        onSelectSubscription={setSelectedId}
         onAddSubscription={addSubscription}
         onDeleteSubscription={deleteSubscription}
         onTogglePause={togglePause}
@@ -236,12 +217,6 @@ export default function App() {
         onHealthCheckAll={startHealthCheckAll}
         onHealthCheckSelected={startHealthCheckSelected}
         onHealthClearResults={clearHealthResults}
-        filter={filter}
-        onFilterChange={setFilter}
-        sort={sort}
-        onSortChange={setSort}
-        filteredSubscriptions={filtered}
-        filteredCount={filteredCount}
       />
     </ThemeProvider>
   );

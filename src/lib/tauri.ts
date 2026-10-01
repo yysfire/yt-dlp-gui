@@ -3,7 +3,6 @@ import type {
   Subscription,
   DownloadRecord,
   DownloadTask,
-  QueueState,
   AppSettings,
   AppState,
   ImportPreview,
@@ -89,11 +88,6 @@ export async function getAllDownloadRecords(): Promise<DownloadRecord[]> {
   return invoke<DownloadRecord[]>("get_all_download_records");
 }
 
-/** Manually triggers a full check of all subscriptions. */
-export async function manualCheckAll(): Promise<DownloadRecord[]> {
-  return invoke<DownloadRecord[]>("manual_check_all");
-}
-
 /** Pauses an active download task. */
 export async function pauseDownload(id: string): Promise<void> {
   return invoke<void>("pause_download", { id });
@@ -124,11 +118,6 @@ export async function getDownloadQueue(): Promise<DownloadTask[]> {
   return invoke<DownloadTask[]>("get_download_queue");
 }
 
-/** Returns the runtime download queue state. */
-export async function getQueueState(): Promise<QueueState> {
-  return invoke<QueueState>("get_queue_state");
-}
-
 // ── Settings commands ──────────────────────────────────────────────
 
 /** Returns the current application settings. */
@@ -146,16 +135,6 @@ export async function updateSettings(
 /** Returns the current application state. */
 export async function getAppState(): Promise<AppState> {
   return invoke<AppState>("get_app_state");
-}
-
-/** Starts the background scheduler. */
-export async function startScheduler(): Promise<void> {
-  return invoke<void>("start_scheduler");
-}
-
-/** Stops the background scheduler. */
-export async function stopScheduler(): Promise<void> {
-  return invoke<void>("stop_scheduler");
 }
 
 /** Validates a download directory path for existence and writability. */
@@ -211,11 +190,6 @@ export async function exportSubscriptionsJson(path: string): Promise<void> {
 export async function exportSubscriptionsOpml(path: string): Promise<void> {
   return invoke<void>("export_subscriptions_opml", { path });
 }
-
-// ── Tray state ──────────────────────────────────────────────────
-
-/** Re-export TrayState for frontend event listeners. */
-export type { TrayState } from "@/types";
 
 /**
  * Batch imports subscriptions from URLs and/or a file path.

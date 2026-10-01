@@ -1,8 +1,8 @@
 {
-  "ai": "codebuddy",
+  "ai": "opencode",
   "branch_numbering": "sequential",
   "here": true,
-  "integration": "codebuddy",
+  "integration": "opencode",
   "script": "sh",
   "speckit_version": "0.11.0"
 }

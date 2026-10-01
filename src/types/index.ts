@@ -32,8 +32,13 @@ export interface Subscription {
   quality_preset: string;
   group_name: string;
   created_at: string; // ISO 8601
+  /** 最近一次检查**尝试**的时间（无论成败），仅供「上次检查」显示 */
   last_checked_at: string | null;
-  download_count: number;
+  /**
+   * 该订阅的**检查游标**：最近一次成功检查时间（ISO 8601）。
+   * 后端用它换算 `--dateafter` 下界；前端不消费，仅为与 Rust 侧 serde 结构保持一致。
+   */
+  last_successful_check_at: string | null;
   last_check_status: "success" | "failed" | null;
   last_check_error: string | null;
   /** 分组标签名数组（如 ["学习", "音乐"]） */
@@ -119,14 +124,6 @@ export interface AppSettings {
   start_in_tray: boolean;
   /** When true, the background scheduler is paused (default: false) */
   scheduler_paused: boolean;
-}
-
-/** Runtime system tray state. */
-export interface TrayState {
-  status: "idle" | "downloading" | "checking";
-  window_visible: boolean;
-  tray_supported: boolean;
-  active_downloads: number;
 }
 
 /** Result of download path validation. */
@@ -235,6 +232,9 @@ export type VideoStatus =
   | "failed"
   | "cancelled";
 
+/** 统一视频条目的展示状态：VideoStatus 再并入「记录专属」的 deleted */
+export type UnifiedVideoStatus = VideoStatus | "deleted";
+
 /** 统一视频列表条目：合并频道视频与下载记录 */
 export interface UnifiedVideoItem {
   /** 频道视频信息（仅当该视频来自频道播放列表时有值） */
@@ -250,7 +250,7 @@ export interface UnifiedVideoItem {
   /** 视频链接 */
   readonly url: string;
   /** 视频当前状态 */
-  readonly status: VideoStatus;
+  readonly status: UnifiedVideoStatus;
 }
 
 /** 视频列表分页结果 */
@@ -265,7 +265,6 @@ export interface VideoListResult {
 /** Runtime application state. */
 export interface AppState {
   last_check_time: string | null;
-  total_downloads: number;
 }
 
 /** Predefined subscription groups. */

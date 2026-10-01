@@ -1,14 +1,186 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use tauri::{Emitter, Manager, State};
 
 use crate::models::{DownloadRecord, Subscription};
 use crate::services::{StorageService, YtDlpService};
-use crate::services::download_queue::{DownloadQueue, QueueState};
+use crate::services::download_queue::notify_records_changed;
 use crate::utils::AppError;
 use crate::AppContext;
 use crate::QueueContext;
+
+/// 一轮检查的结果。用枚举而非 `&'static str`，是为了让「只有成功才推进游标」
+/// 这个判断由编译器兜底 —— 写成魔法字符串的话，拼错会静默反转行为。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckStatus {
+    Success,
+    Failed,
+}
+
+impl CheckStatus {
+    /// 持久化到 `Subscription::last_check_status` 的取值。
+    fn as_str(self) -> &'static str {
+        match self {
+            CheckStatus::Success => "success",
+            CheckStatus::Failed => "failed",
+        }
+    }
+}
+
+/// 单个订阅一轮检查完成后需要落库的结果。
+///
+/// 只携带订阅 id 与要更新的字段，不携带订阅快照 —— 收尾时按 id 在事务内增量应用，
+/// 因此不会覆盖并发写者（健康检查、批量导入、单个订阅命令）对同一订阅其它字段的修改。
+pub(crate) struct SubCheckOutcome {
+    pub sub_id: String,
+    pub checked_at: String,
+    pub status: CheckStatus,
+    pub error: Option<String>,
+}
+
+/// 按 id 增量应用检查结果到 `subscriptions.json`。
+///
+/// 「边跑边收集、收尾一次写入」模式的关键一步：长耗时阶段不持任何 storage 锁，
+/// 收尾时也只按 id 改字段，而不是用陈旧快照整表覆盖。
+///
+/// 时间字段的写回规则不同，不要合并：`last_checked_at` 每次尝试都写（供显示），
+/// `last_successful_check_at`（日期游标）**只在成功时**推进 —— 失败时若也推进，
+/// 失败窗口内上传的视频会被 `--dateafter` 永久排除。
+pub(crate) fn apply_check_outcomes(
+    data_dir: &Path,
+    outcomes: &[SubCheckOutcome],
+) -> Result<(), AppError> {
+    StorageService::update_subscriptions(data_dir, |subs| {
+        for outcome in outcomes {
+            if let Some(sub) = subs.iter_mut().find(|s| s.id == outcome.sub_id) {
+                sub.last_checked_at = Some(outcome.checked_at.clone());
+                if outcome.status == CheckStatus::Success {
+                    sub.last_successful_check_at = Some(outcome.checked_at.clone());
+                }
+                sub.last_check_status = Some(outcome.status.as_str().to_string());
+                sub.last_check_error = outcome.error.clone();
+            }
+        }
+        Ok(())
+    })
+}
+
+/// 对所有非暂停订阅执行一轮检查并落库，返回本轮新产生的下载记录。
+///
+/// - 每轮自行从磁盘重读 `AppSettings`：yt-dlp 路径 / 代理 / Cookie / 下载目录的改动
+///   下一轮即生效，调用方不需要（也不应该）传设置快照。
+/// - 基础设施错误（快照读取、收尾写回）向上传播，由调用方决定处置：周期任务（scheduler）
+///   与托盘吞掉并记日志，命令层（`check_all_subscriptions`）转成前端契约的 `String`。
+///   单订阅失败仍只记日志并记入 `failed` outcome，不中断整轮。
+/// - 不判断 `scheduler_paused`：暂停是「自动调度」的策略，托盘手动触发的检查不应被它拦下。
+///
+/// 由 `services::scheduler` 的自动检查、`services::tray` 的「检查全部」以及
+/// 命令层 `check_all_subscriptions`（薄委托）共同调用。
+pub(crate) async fn run_check_round(
+    data_dir: &Path,
+    app_handle: &tauri::AppHandle,
+) -> Result<Vec<DownloadRecord>, AppError> {
+    let settings = StorageService::load_settings(data_dir);
+    let yt_dlp_path = settings.yt_dlp_path.clone();
+    let proxy = Some(settings.proxy_url.clone());
+    let cookie_file = Some(settings.cookie_file.clone());
+    let download_dir = PathBuf::from(&settings.download_dir);
+
+    // 只读快照（长耗时阶段不持任何 storage 锁）
+    let subs = StorageService::load_subscriptions(data_dir)?;
+    let records = StorageService::load_download_records(data_dir)?;
+    let data_dir_buf = data_dir.to_path_buf();
+
+    log::info!(
+        "check_round: {} subscriptions, cookie={}, proxy={}, ytdlp={}",
+        subs.len(),
+        cookie_file.as_deref().unwrap_or("none"),
+        proxy.as_deref().unwrap_or("none"),
+        yt_dlp_path,
+    );
+
+    let mut all_new: Vec<DownloadRecord> = Vec::new();
+    let mut outcomes: Vec<SubCheckOutcome> = Vec::new();
+
+    for sub in subs.iter().filter(|s| !s.paused) {
+        let checked_at = Utc::now().to_rfc3339();
+        match check_and_download(
+            sub,
+            &yt_dlp_path,
+            &proxy,
+            &cookie_file,
+            &download_dir,
+            &data_dir_buf,
+            &records,
+            app_handle,
+        )
+        .await
+        {
+            Ok(new_records) => {
+                all_new.extend(new_records);
+                outcomes.push(SubCheckOutcome {
+                    sub_id: sub.id.clone(),
+                    checked_at,
+                    status: CheckStatus::Success,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                log::error!("check_round: error checking {}: {}", sub.channel_name, e);
+                outcomes.push(SubCheckOutcome {
+                    sub_id: sub.id.clone(),
+                    checked_at,
+                    status: CheckStatus::Failed,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    // 收尾：按 id 增量写回，不再整表覆盖（否则会 clobber
+    // 并发写者对同一订阅其它字段的修改）
+    if !outcomes.is_empty() {
+        apply_check_outcomes(data_dir, &outcomes)?;
+    }
+
+    // 只更新 last_check_time
+    StorageService::update_state(data_dir, |state| {
+        state.last_check_time = Some(Utc::now().to_rfc3339());
+        Ok(())
+    })?;
+
+    // 通知前端刷新
+    let _ = app_handle.emit("scheduler-check-complete", ());
+
+    Ok(all_new)
+}
+
+/// 把订阅的**检查游标**（`last_successful_check_at`，ISO 8601）换算成 yt-dlp
+/// `--dateafter` 的下界（`YYYYMMDD`）。
+///
+/// 返回 `None` 表示**不设日期下界**，即该订阅从未成功检查过（含刚加入订阅）。
+/// 这是有意为之：新订阅应当能抓到「加入之前就已上传」的视频（典型场景是订阅
+/// 单个视频 URL）。因此下界必须取自**订阅自己的**游标，不能用全局的
+/// `state.last_check_time`：全局游标会被其它订阅的检查推进，导致新订阅一加入
+/// 就带着一个晚于目标视频的日期下界，从而永远抓不到它。
+///
+/// 也**不能**用 `last_checked_at`（每次尝试都写）—— 检查失败时它会早于真实进度，
+/// 于是失败窗口内上传的视频会被静默跳过。游标只在成功时推进，见
+/// [`apply_check_outcomes`]。
+///
+/// 无法解析的时间戳按「不设下界」处理（宁可多抓，不可漏抓）。
+fn date_lower_bound(cursor: &Option<String>) -> Option<String> {
+    let t = cursor.as_deref()?;
+    // 前 10 个字符即 `YYYY-MM-DD`。应用自己写的格式是
+    // `Utc::now().to_rfc3339()` → `2026-09-30T13:12:37.659045467+00:00`，
+    // 尾部的 `+00:00` / `Z` 与时间部分对 `--dateafter` 都无意义，故只取日期部分。
+    // 必须用 get 而不是切片：该字符串来自磁盘上的 subscriptions.json，
+    // 短串或非 ASCII 内容用 &t[..10] 会直接 panic（旧实现在此处就会崩）。
+    let date = t.get(..10)?;
+    let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    Some(parsed.format("%Y%m%d").to_string())
+}
 
 /// Core logic for checking a single subscription for new videos and downloading them.
 /// Used by both the command layer and the scheduler.
@@ -19,27 +191,11 @@ pub(crate) async fn check_and_download(
     cookie_file: &Option<String>,
     download_dir: &PathBuf,
     data_dir: &PathBuf,
-    last_check_time: &Option<String>,
     existing_records: &[DownloadRecord],
     app_handle: &tauri::AppHandle,
 ) -> Result<Vec<DownloadRecord>, AppError> {
-    // Determine the date cutoff for checking
-    let since = match last_check_time {
-        Some(t) => {
-            // Convert ISO 8601 to YYYYMMDD
-            let parsed = chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.fZ")
-                .or_else(|_| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%SZ"))
-                .or_else(|_| {
-                    chrono::NaiveDate::parse_from_str(&t[..10], "%Y-%m-%d")
-                        .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
-                });
-            match parsed {
-                Ok(dt) => Some(dt.format("%Y%m%d").to_string()),
-                Err(_) => None,
-            }
-        }
-        None => None,
-    };
+    // 日期下界取自本条订阅自己的游标（只在成功时推进）：从未成功过时为 None（不过滤日期）
+    let since = date_lower_bound(&sub.last_successful_check_at);
 
     // Check for new videos
     log::info!("check_and_download: since={:?}, url={}", since, sub.url);
@@ -107,10 +263,11 @@ pub(crate) async fn check_and_download(
             DownloadRecord::new(sub.id.clone(), video.title.clone(), video.url.clone(), vid.clone());
 
         // Save the record immediately so the frontend sees "downloading"
-        let mut all_records = StorageService::load_download_records(data_dir)?;
-        all_records.push(record.clone());
-        StorageService::save_download_records(data_dir, &all_records)?;
-        let _ = app_handle.emit("records-changed", ());
+        StorageService::update_download_records(data_dir, |all_records| {
+            all_records.push(record.clone());
+            Ok(())
+        })?;
+        notify_records_changed(app_handle);
 
         new_records.push(record);
     }
@@ -125,19 +282,21 @@ pub async fn check_subscription(
     state: State<'_, AppContext>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<DownloadRecord>, String> {
-    let mut subs = StorageService::load_subscriptions(&state.data_dir)
-        .map_err(|e| e.to_string())?;
-    let sub_idx = subs
-        .iter()
-        .position(|s| s.id == id)
-        .ok_or_else(|| AppError::NotFound(format!("Subscription not found: {}", id)))
-        .map_err(|e| e.to_string())?;
-
-    if subs[sub_idx].paused {
-        return Ok(Vec::new());
-    }
-
-    let sub = &subs[sub_idx];
+    // 只读快照：定位并克隆订阅，之后不再持有整表快照
+    let sub = {
+        let subs = StorageService::load_subscriptions(&state.data_dir)
+            .map_err(|e| e.to_string())?;
+        let sub = subs
+            .iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| AppError::NotFound(format!("Subscription not found: {}", id)))
+            .map_err(|e| e.to_string())?
+            .clone();
+        if sub.paused {
+            return Ok(Vec::new());
+        }
+        sub
+    };
 
     // Clone settings values and drop the MutexGuard before awaiting
     let (yt_dlp_path, proxy, cookie_file, download_dir) = {
@@ -150,130 +309,67 @@ pub async fn check_subscription(
         )
     };
 
-    let app_state = StorageService::load_state(&state.data_dir).map_err(|e| e.to_string())?;
     let records =
         StorageService::load_download_records(&state.data_dir).map_err(|e| e.to_string())?;
 
+    // 长耗时阶段：不持任何 storage 锁
     let new_records = check_and_download(
-        sub,
+        &sub,
         &yt_dlp_path,
         &proxy,
         &cookie_file,
         &download_dir,
         &state.data_dir,
-        &app_state.last_check_time,
         &records,
         &app_handle,
     )
     .await
     .map_err(|e| e.to_string())?;
 
-    // Update per-subscription data — download_count is managed by queue callback
-    let sub = &mut subs[sub_idx];
-    sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
-    sub.last_check_status = Some("success".to_string());
-    sub.last_check_error = None;
-    StorageService::save_subscriptions(&state.data_dir, &subs).map_err(|e| e.to_string())?;
+    // 收尾：按 id 增量写回。保持原语义 —— 上面失败时 `?` 已提前返回，
+    // 既不写 last_check_status 也不写 last_check_time。
+    apply_check_outcomes(
+        &state.data_dir,
+        &[SubCheckOutcome {
+            sub_id: sub.id.clone(),
+            checked_at: chrono::Utc::now().to_rfc3339(),
+            status: CheckStatus::Success,
+            error: None,
+        }],
+    )
+    .map_err(|e| e.to_string())?;
 
-    // Also update global last_check_time
-    if let Ok(mut app_state) = StorageService::load_state(&state.data_dir) {
+    // 只更新 last_check_time
+    StorageService::update_state(&state.data_dir, |app_state| {
         app_state.last_check_time = Some(chrono::Utc::now().to_rfc3339());
-        let _ = StorageService::save_state(&state.data_dir, &app_state);
-    }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
+
+    // 一次检查完成（与 run_check_round / check_all_subscriptions 同一语义：检查已完成、
+    // last_check_time 已落盘）。语义是「一次检查完成」，不是「调度器轮次」。
+    let _ = app_handle.emit("scheduler-check-complete", ());
 
     Ok(new_records)
 }
 
 /// Checks all non-paused subscriptions for new videos and downloads them.
+///
+/// 与后台自动调度（`services::scheduler`）、托盘「检查全部」（`services::tray`）共用
+/// [`run_check_round`]（含设置来源与收尾逻辑），此处只负责把错误转成前端契约要求的
+/// `String`。
+///
+/// 注意：设置来源由 `run_check_round` 从磁盘 `settings.json` 读取（而非
+/// `AppContext.settings` 内存缓存）。这修掉了「外部修改 `settings.json` 后本命令仍看到旧值」
+/// 的偏差；正常路径下两条写路径都是「先落盘、再更新缓存」，因此两者一致。
 #[tauri::command]
 pub async fn check_all_subscriptions(
     state: State<'_, AppContext>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<DownloadRecord>, String> {
-    let mut subs = StorageService::load_subscriptions(&state.data_dir)
-        .map_err(|e| e.to_string())?;
-
-    // Clone settings values and drop the MutexGuard before awaiting
-    let (yt_dlp_path, proxy, cookie_file, download_dir) = {
-        let settings = state.settings.lock().map_err(|e| e.to_string())?;
-        (
-            settings.yt_dlp_path.clone(),
-            Some(settings.proxy_url.clone()),
-            Some(settings.cookie_file.clone()),
-            PathBuf::from(&settings.download_dir),
-        )
-    };
-
-    let app_state = StorageService::load_state(&state.data_dir).map_err(|e| e.to_string())?;
-    let records =
-        StorageService::load_download_records(&state.data_dir).map_err(|e| e.to_string())?;
-
-    let mut all_new: Vec<DownloadRecord> = Vec::new();
-    let mut subs_changed = false;
-
-    log::info!(
-        "check_all: {} subscriptions, cookie={}, proxy={}, ytdlp={}",
-        subs.len(),
-        cookie_file.as_deref().unwrap_or("none"),
-        proxy.as_deref().unwrap_or("none"),
-        yt_dlp_path,
-    );
-
-    for idx in 0..subs.len() {
-        if subs[idx].paused {
-            continue;
-        }
-
-        let sub = &subs[idx];
-        match check_and_download(
-            sub,
-            &yt_dlp_path,
-            &proxy,
-            &cookie_file,
-            &download_dir,
-            &state.data_dir,
-            &app_state.last_check_time,
-            &records,
-            &app_handle,
-        )
+    run_check_round(&state.data_dir, &app_handle)
         .await
-        {
-            Ok(new_records) => {
-                // download_count is managed by the download queue callback
-                let sub = &mut subs[idx];
-                sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
-                sub.last_check_status = Some("success".to_string());
-                sub.last_check_error = None;
-                subs_changed = true;
-                all_new.extend(new_records);
-            }
-            Err(e) => {
-                let sub = &mut subs[idx];
-                sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
-                sub.last_check_status = Some("failed".to_string());
-                sub.last_check_error = Some(e.to_string());
-                subs_changed = true;
-                log::error!(
-                    "check_all: error checking {}: {}",
-                    sub.channel_name,
-                    sub.last_check_error.as_deref().unwrap_or("")
-                );
-            }
-        }
-    }
-
-    if subs_changed {
-        StorageService::save_subscriptions(&state.data_dir, &subs).map_err(|e| e.to_string())?;
-    }
-
-    // Update application state — only last_check_time.
-    // total_downloads is managed by the download queue completion callback.
-    let mut updated_state = app_state.clone();
-    updated_state.last_check_time = Some(Utc::now().to_rfc3339());
-    StorageService::save_state(&state.data_dir, &updated_state)
-        .map_err(|e| e.to_string())?;
-
-    Ok(all_new)
+        .map_err(|e| e.to_string())
 }
 
 /// Returns download records, optionally filtered by subscription ID.
@@ -304,93 +400,6 @@ pub async fn get_all_download_records(
     Ok(StorageService::deduplicate_vec(records))
 }
 
-/// Returns the current in-memory download queue tasks.
-
-/// Check for new videos and enqueue downloads instead of downloading directly.
-/// Used by the queue-driven flow.
-pub(crate) async fn check_and_enqueue(
-    sub: &Subscription,
-    yt_dlp_path: &str,
-    proxy: &Option<String>,
-    cookie_file: &Option<String>,
-    _download_dir: &PathBuf,
-    data_dir: &PathBuf,
-    last_check_time: &Option<String>,
-    existing_records: &[DownloadRecord],
-    queue: &DownloadQueue,
-) -> Result<usize, AppError> {
-    // Determine the date cutoff for checking
-    let since = match last_check_time {
-        Some(t) => {
-            let parsed = chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.fZ")
-                .or_else(|_| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%SZ"))
-                .or_else(|_| {
-                    chrono::NaiveDate::parse_from_str(&t[..10], "%Y-%m-%d")
-                        .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
-                });
-            match parsed {
-                Ok(dt) => Some(dt.format("%Y%m%d").to_string()),
-                Err(_) => None,
-            }
-        }
-        None => None,
-    };
-
-    let videos = YtDlpService::check_new_videos(yt_dlp_path, proxy, cookie_file, &sub.url, since.as_deref())?;
-
-    // Dedup: prefer video_id, fall back to video_url. Failed records can retry.
-    let mut seen_ids: std::collections::HashSet<String> = existing_records
-        .iter()
-        .filter(|r| r.status != "failed")
-        .filter(|r| !r.video_id.is_empty())
-        .map(|r| r.video_id.clone())
-        .collect();
-    let mut seen_urls: std::collections::HashSet<String> = existing_records
-        .iter()
-        .filter(|r| r.status != "failed")
-        .map(|r| r.video_url.clone())
-        .collect();
-
-    let quality = sub.quality_preset.clone();
-    let mut count = 0;
-
-    for video in videos {
-        let vid = video.id.clone().unwrap_or_default();
-        if !vid.is_empty() {
-            if !seen_ids.insert(vid.clone()) {
-                continue;
-            }
-        } else if !seen_urls.insert(video.url.clone()) {
-            continue;
-        }
-
-        // Create and save a "downloading" record
-        let record = DownloadRecord::new(
-            sub.id.clone(),
-            video.title.clone(),
-            video.url.clone(),
-            vid.clone(),
-        );
-
-        let mut all_records = StorageService::load_download_records(data_dir)?;
-        all_records.push(record);
-        StorageService::save_download_records(data_dir, &all_records)?;
-
-        // Enqueue to download queue
-        queue.enqueue_from_video(
-            sub,
-            video.title.clone(),
-            video.url.clone(),
-            vid.clone(),
-            quality.clone(),
-            data_dir,
-        )?;
-
-        count += 1;
-    }
-
-    Ok(count)
-}
 #[tauri::command]
 pub async fn get_download_queue(
     queue_ctx: State<'_, QueueContext>,
@@ -402,41 +411,29 @@ pub async fn get_download_queue(
     }
 }
 
-/// Returns the runtime queue state (active/waiting counts).
-
 /// Recovers download state on application restart.
 /// Marks "downloading" and "paused" records as "failed" since the download process
 /// was terminated when the application exited.
 pub fn recover_state(data_dir: &PathBuf) -> Result<(), AppError> {
-    let mut records = StorageService::load_download_records(data_dir)?;
-    let mut changed = false;
-    for record in records.iter_mut() {
-        if record.status == "downloading" || record.status == "paused" {
-            record.status = "failed".to_string();
-            record.error_message = Some("Application restarted".to_string());
-            changed = true;
+    let recovered = StorageService::update_download_records(data_dir, |records| {
+        let mut recovered = 0usize;
+        for record in records.iter_mut() {
+            if record.status == "downloading" || record.status == "paused" {
+                record.status = "failed".to_string();
+                record.error_message = Some("Application restarted".to_string());
+                recovered += 1;
+            }
         }
-    }
-    if changed {
-        StorageService::save_download_records(data_dir, &records)?;
-        log::info!("Recovered {} download records to failed state after restart", 
-            records.iter().filter(|r| r.error_message.as_deref() == Some("Application restarted")).count());
+        Ok(recovered)
+    })?;
+
+    if recovered > 0 {
+        log::info!(
+            "Recovered {} download records to failed state after restart",
+            recovered
+        );
     }
     Ok(())
-}
-#[tauri::command]
-pub async fn get_queue_state(
-    queue_ctx: State<'_, QueueContext>,
-) -> Result<QueueState, String> {
-    let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
-    match guard.as_ref() {
-        Some(q) => Ok(q.get_state()),
-        None => Ok(QueueState {
-            active_count: 0,
-            waiting_count: 0,
-            max_concurrent: 1,
-        }),
-    }
 }
 
 /// Pauses a running download task by its task ID.
@@ -527,16 +524,6 @@ pub async fn cancel_download_by_url(
         Some(q) => q.cancel_by_url(&video_url, &ctx).map_err(|e| e.to_string()),
         None => Err("Download queue not initialized".to_string()),
     }
-}
-
-/// Manually triggers a full check of all subscriptions (same as check_all_subscriptions).
-/// This is the user-facing "Check All" action.
-#[tauri::command]
-pub async fn manual_check_all(
-    state: State<'_, AppContext>,
-    app_handle: tauri::AppHandle,
-) -> Result<Vec<DownloadRecord>, String> {
-    check_all_subscriptions(state, app_handle).await
 }
 
 /// 分页获取订阅频道的视频列表。
@@ -642,7 +629,7 @@ mod tests {
             make_record("sub-1", "Video A", "https://youtube.com/watch?v=a", "vid-a", "downloading"),
             make_record("sub-1", "Video B", "https://youtube.com/watch?v=b", "vid-b", "completed"),
         ];
-        StorageService::save_download_records(tmp.path(), &records)
+        StorageService::seed_download_records(tmp.path(), &records)
             .expect("save should succeed");
 
         recover_state(&tmp.path().to_path_buf()).expect("recover should succeed");
@@ -664,7 +651,7 @@ mod tests {
         let records = vec![
             make_record("sub-1", "Video", "https://youtube.com/watch?v=c", "vid-c", "paused"),
         ];
-        StorageService::save_download_records(tmp.path(), &records)
+        StorageService::seed_download_records(tmp.path(), &records)
             .expect("save should succeed");
 
         recover_state(&tmp.path().to_path_buf()).expect("recover should succeed");
@@ -683,7 +670,7 @@ mod tests {
             make_record("sub-1", "Video B", "https://youtube.com/watch?v=b", "vid-b", "failed"),
             make_record("sub-1", "Video C", "https://youtube.com/watch?v=c", "vid-c", "cancelled"),
         ];
-        StorageService::save_download_records(tmp.path(), &records)
+        StorageService::seed_download_records(tmp.path(), &records)
             .expect("save should succeed");
 
         recover_state(&tmp.path().to_path_buf()).expect("recover should succeed");
@@ -702,7 +689,7 @@ mod tests {
         let records = vec![
             make_record("sub-1", "Video", "https://youtube.com/watch?v=a", "vid-a", "completed"),
         ];
-        StorageService::save_download_records(tmp.path(), &records)
+        StorageService::seed_download_records(tmp.path(), &records)
             .expect("save should succeed");
 
         recover_state(&tmp.path().to_path_buf()).expect("recover should succeed");
@@ -710,6 +697,164 @@ mod tests {
         let recovered = StorageService::load_download_records(tmp.path())
             .expect("load should succeed");
         assert_eq!(recovered[0].status, "completed");
+    }
+
+    // ── 日期下界换算 + 游标推进：取自订阅自己的 last_successful_check_at ──
+
+    /// 造一条带指定游标的订阅，用于 apply_check_outcomes 的落库断言。
+    fn make_sub_with_cursor(cursor: Option<&str>) -> Subscription {
+        let mut sub = Subscription::new(
+            "https://youtube.com/@test".to_string(),
+            "youtube".to_string(),
+            "Test Channel".to_string(),
+            String::new(),
+        );
+        sub.last_successful_check_at = cursor.map(str::to_string);
+        sub
+    }
+
+    #[test]
+    fn test_check_status_as_str_matches_persisted_values() {
+        // 这两个字面量是 subscriptions.json 的对外取值，前端据此显示成功/失败
+        assert_eq!(CheckStatus::Success.as_str(), "success");
+        assert_eq!(CheckStatus::Failed.as_str(), "failed");
+    }
+
+    #[test]
+    fn test_apply_check_outcomes_success_advances_cursor() {
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let sub = make_sub_with_cursor(None);
+        StorageService::seed_subscriptions(tmp.path(), std::slice::from_ref(&sub))
+            .expect("seed should succeed");
+
+        apply_check_outcomes(
+            tmp.path(),
+            &[SubCheckOutcome {
+                sub_id: sub.id.clone(),
+                checked_at: "2026-09-30T13:12:37.659045467+00:00".to_string(),
+                status: CheckStatus::Success,
+                error: None,
+            }],
+        )
+        .expect("apply should succeed");
+
+        let applied = StorageService::load_subscriptions(tmp.path())
+            .expect("load should succeed")
+            .remove(0);
+        assert_eq!(
+            applied.last_checked_at.as_deref(),
+            Some("2026-09-30T13:12:37.659045467+00:00")
+        );
+        assert_eq!(
+            applied.last_successful_check_at.as_deref(),
+            Some("2026-09-30T13:12:37.659045467+00:00")
+        );
+        assert_eq!(applied.last_check_status.as_deref(), Some("success"));
+        assert_eq!(applied.last_check_error, None);
+    }
+
+    #[test]
+    fn test_apply_check_outcomes_failure_keeps_cursor() {
+        // 失败只更新「尝试」时间与状态。游标必须留在上次成功的位置，否则
+        // 失败窗口内上传的视频会被 --dateafter 永久排除，且没有任何记录能反映这次遗漏。
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let sub = make_sub_with_cursor(Some("2026-09-01T00:00:00+00:00"));
+        StorageService::seed_subscriptions(tmp.path(), std::slice::from_ref(&sub))
+            .expect("seed should succeed");
+
+        apply_check_outcomes(
+            tmp.path(),
+            &[SubCheckOutcome {
+                sub_id: sub.id.clone(),
+                checked_at: "2026-09-30T13:12:37.659045467+00:00".to_string(),
+                status: CheckStatus::Failed,
+                error: Some("boom".to_string()),
+            }],
+        )
+        .expect("apply should succeed");
+
+        let applied = StorageService::load_subscriptions(tmp.path())
+            .expect("load should succeed")
+            .remove(0);
+        assert_eq!(
+            applied.last_checked_at.as_deref(),
+            Some("2026-09-30T13:12:37.659045467+00:00")
+        );
+        assert_eq!(
+            applied.last_successful_check_at.as_deref(),
+            Some("2026-09-01T00:00:00+00:00")
+        );
+        assert_eq!(applied.last_check_status.as_deref(), Some("failed"));
+        assert_eq!(applied.last_check_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn test_apply_check_outcomes_failure_on_never_succeeded_sub_keeps_cursor_none() {
+        // 从未成功过的订阅连续失败：游标保持 None，下次检查仍不设下界
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let sub = make_sub_with_cursor(None);
+        StorageService::seed_subscriptions(tmp.path(), std::slice::from_ref(&sub))
+            .expect("seed should succeed");
+
+        apply_check_outcomes(
+            tmp.path(),
+            &[SubCheckOutcome {
+                sub_id: sub.id.clone(),
+                checked_at: "2026-09-30T13:12:37.659045467+00:00".to_string(),
+                status: CheckStatus::Failed,
+                error: Some("boom".to_string()),
+            }],
+        )
+        .expect("apply should succeed");
+
+        let applied = StorageService::load_subscriptions(tmp.path())
+            .expect("load should succeed")
+            .remove(0);
+        assert_eq!(applied.last_successful_check_at, None);
+        assert_eq!(date_lower_bound(&applied.last_successful_check_at), None);
+    }
+
+    #[test]
+    fn test_date_lower_bound_none_means_no_filter() {
+        // 没有游标就不设下界 —— 这正是「订阅单个视频 URL」能抓到该视频的前提。
+        // 若改用全局 state.last_check_time，新订阅一加入就会带上下界，永远抓不到。
+        assert_eq!(date_lower_bound(&None), None);
+    }
+
+    #[test]
+    fn test_date_lower_bound_parses_app_rfc3339_format() {
+        // 应用实际写入的格式：Utc::now().to_rfc3339()，尾部是 +00:00 而非 Z
+        assert_eq!(
+            date_lower_bound(&Some("2026-09-30T13:12:37.659045467+00:00".to_string())),
+            Some("20260930".to_string())
+        );
+    }
+
+    #[test]
+    fn test_date_lower_bound_parses_zulu_and_date_only() {
+        assert_eq!(
+            date_lower_bound(&Some("2026-06-02T12:00:00Z".to_string())),
+            Some("20260602".to_string())
+        );
+        assert_eq!(
+            date_lower_bound(&Some("2026-06-02".to_string())),
+            Some("20260602".to_string())
+        );
+    }
+
+    #[test]
+    fn test_date_lower_bound_invalid_falls_back_to_no_filter() {
+        // 宁可多抓，不可漏抓：解析不了就不设下界
+        assert_eq!(date_lower_bound(&Some("not-a-timestamp".to_string())), None);
+        assert_eq!(date_lower_bound(&Some("2026-13-45T00:00:00Z".to_string())), None);
+    }
+
+    #[test]
+    fn test_date_lower_bound_never_panics_on_short_or_non_ascii_input() {
+        // last_checked_at 来自磁盘，可能是被手改过的脏数据。
+        // 旧实现用 &t[..10] 切字节，这两种输入都会 panic。
+        assert_eq!(date_lower_bound(&Some("abc".to_string())), None);
+        assert_eq!(date_lower_bound(&Some("2026年09月30日".to_string())), None);
     }
 
     // ── Dedup logic tests (T014) ───────────────────────────────────
@@ -886,7 +1031,7 @@ mod tests {
 
     #[test]
     fn test_video_list_result_construction_empty_channel() {
-        use crate::models::{VideoInfo, VideoListResult};
+        use crate::models::VideoListResult;
 
         let result = VideoListResult {
             videos: vec![],

@@ -4,11 +4,19 @@ import { listen } from "@tauri-apps/api/event";
 import * as api from "@/lib/tauri";
 import type { AppState } from "@/types";
 
-/** Bottom status bar showing last check time, download count, and scheduler status. */
-export default function StatusBar({ refreshTrigger }: { refreshTrigger?: string | null }) {
+/**
+ * Bottom status bar showing last check time and completed download count.
+ *
+ * 已完成数由父组件从下载记录派生后传入（单一真相源是下载记录，后端不再维护计数字段）；
+ * 本组件只负责从后端取 `last_check_time`。
+ */
+export default function StatusBar({
+  completedCount = 0,
+}: {
+  completedCount?: number;
+}) {
   const [state, setState] = useState<AppState>({
     last_check_time: null,
-    total_downloads: 0,
   });
 
   const refresh = useCallback(async () => {
@@ -21,19 +29,17 @@ export default function StatusBar({ refreshTrigger }: { refreshTrigger?: string 
   }, []);
 
   useEffect(() => {
+    // 挂载时拉取一次初始值；此后的更新全部来自 scheduler-check-complete
     refresh();
-  }, [refresh, refreshTrigger]);
+  }, [refresh]);
 
   useEffect(() => {
-    // Periodic refresh as safety net
-    const interval = setInterval(refresh, 60_000);
-    // Instant refresh on record changes and scheduler completion
-    const unlistenRecordsPromise = listen("records-changed", () => { refresh(); });
-    const unlistenSchedulerPromise = listen("scheduler-check-complete", () => { refresh(); });
+    // 本组件唯一的实时刷新来源：last_check_time 只在两处被写入
+    // （run_check_round 与 check_subscription），两处都会在落盘后 emit 本事件，
+    // 已由后端契约（落盘后必 emit）保证，故不再需要轮询兜底。
+    const unlistenPromise = listen("scheduler-check-complete", () => { refresh(); });
     return () => {
-      clearInterval(interval);
-      unlistenRecordsPromise.then((fn) => fn());
-      unlistenSchedulerPromise.then((fn) => fn());
+      unlistenPromise.then((fn) => fn());
     };
   }, [refresh]);
 
@@ -64,7 +70,7 @@ export default function StatusBar({ refreshTrigger }: { refreshTrigger?: string 
         上次检查: {formatTime(state.last_check_time)}
       </Typography>
       <Typography variant="caption" color="text.secondary">
-        已下载: {state.total_downloads} 个视频
+        已完成: {completedCount} 个视频
       </Typography>
     </Box>
   );

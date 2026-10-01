@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tokio::sync::watch;
 
 mod models;
@@ -55,13 +55,9 @@ pub fn run() {
             let settings = StorageService::load_settings(&data_dir);
 
             // Initialize default state if missing
-            let _ = StorageService::save_state(
-                &data_dir,
-                &StorageService::load_state(&data_dir).unwrap_or_default(),
-            );
+            let _ = StorageService::update_state(&data_dir, |_| Ok(()));
 
             let (scheduler_tx, scheduler_rx) = watch::channel(());
-            let interval_mins = settings.check_interval_minutes;
             let max_concurrent = settings.max_concurrent_downloads;
             let data_dir_clone = data_dir.clone();
             let data_dir_fs_sync = data_dir.clone();
@@ -80,12 +76,6 @@ pub fn run() {
 
             // Deduplicate download records from previous sessions
             let _ = StorageService::deduplicate_records(&data_dir_clone);
-
-            // Recompute total_downloads from actual completed records
-            let _ = StorageService::recompute_total_downloads(&data_dir_clone);
-
-            // Recompute per-subscription download counts from records
-            let _ = StorageService::recompute_subscription_download_counts(&data_dir_clone);
 
             // Initialize the global download queue
             let app_handle = app.handle().clone();
@@ -150,139 +140,16 @@ pub fn run() {
 
             app.manage(tray_service);
 
-            // Start the background scheduler in a tokio task
-            tauri::async_runtime::spawn(async move {
-                let mut interval_mins = interval_mins;
-                let mut rx = scheduler_rx;
+            // ── 后台周期任务（实现见 services::scheduler）────────────────
+            // 自动检查订阅；循环内部每轮从磁盘重读设置，并遵循 scheduler_paused
+            services::scheduler::spawn_scheduler(
+                data_dir_clone,
+                app_handle.clone(),
+                scheduler_rx,
+            );
 
-                // Skip first immediate tick if interval > 0
-                if interval_mins > 0 {
-                    tokio::time::sleep(
-                        tokio::time::Duration::from_secs((interval_mins as u64) * 60),
-                    ).await;
-                }
-
-                loop {
-                    log::info!("Scheduler: checking subscriptions...");
-
-                    let mut subs = StorageService::load_subscriptions(&data_dir_clone)
-                        .unwrap_or_default();
-                    let records = StorageService::load_download_records(&data_dir_clone)
-                        .unwrap_or_default();
-                    let app_state = StorageService::load_state(&data_dir_clone)
-                        .unwrap_or_default();
-
-                    let yt_dlp_path = settings_clone.yt_dlp_path.clone();
-                    let proxy = Some(settings_clone.proxy_url.clone());
-                    let cookie_file = Some(settings_clone.cookie_file.clone());
-                    let download_dir =
-                        std::path::PathBuf::from(&settings_clone.download_dir);
-
-                    let mut subs_changed = false;
-                    for idx in 0..subs.len() {
-                        if subs[idx].paused {
-                            continue;
-                        }
-
-                        let sub = &subs[idx];
-                        match commands::download::check_and_download(
-                            sub,
-                            &yt_dlp_path,
-                            &proxy,
-                            &cookie_file,
-                            &download_dir,
-                            &data_dir_clone,
-                            &app_state.last_check_time,
-                            &records,
-                            &app_handle,
-                        )
-                        .await
-                        {
-                            Ok(new_records) => {
-                                // download_count is managed by the download queue callback
-                                let sub = &mut subs[idx];
-                                sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
-                                sub.last_check_status = Some("success".to_string());
-                                sub.last_check_error = None;
-                                subs_changed = true;
-                                let _ = new_records; // avoid unused warning
-                            }
-                            Err(e) => {
-                                let sub = &mut subs[idx];
-                                sub.last_checked_at = Some(chrono::Utc::now().to_rfc3339());
-                                sub.last_check_status = Some("failed".to_string());
-                                sub.last_check_error = Some(e.to_string());
-                                subs_changed = true;
-                                log::error!(
-                                    "Scheduler: error checking {}: {}",
-                                    sub.channel_name,
-                                    e
-                                );
-                            }
-                        }
-                    }
-
-                    if subs_changed {
-                        let _ = StorageService::save_subscriptions(&data_dir_clone, &subs);
-                    }
-
-                    // Update application state — only last_check_time.
-                    // total_downloads is managed by the download queue completion callback.
-                    let mut updated_state = app_state;
-                    updated_state.last_check_time =
-                        Some(chrono::Utc::now().to_rfc3339());
-                    let _ = StorageService::save_state(
-                        &data_dir_clone,
-                        &updated_state,
-                    );
-
-                    // Emit an event to notify the frontend to refresh
-                    let _ = app_handle.emit("scheduler-check-complete", ());
-
-                    // Wait for interval OR immediate wake on settings change
-                    if interval_mins == 0 {
-                        // Manual mode: only wait for settings change notification
-                        let _ = rx.changed().await;
-                        let settings = StorageService::load_settings(&data_dir_clone);
-                        interval_mins = settings.check_interval_minutes;
-                        log::info!("Scheduler: interval updated to {} minutes (was manual)", interval_mins);
-                    } else {
-                        tokio::select! {
-                            _ = tokio::time::sleep(
-                                tokio::time::Duration::from_secs((interval_mins as u64) * 60),
-                            ) => {},
-                            _ = rx.changed() => {
-                                // Settings changed — reload interval for immediate effect
-                                let settings = StorageService::load_settings(&data_dir_clone);
-                                interval_mins = settings.check_interval_minutes;
-                                log::info!("Scheduler: interval updated to {} minutes", interval_mins);
-                            }
-                        }
-                    }
-                }
-            });
-
-            // Start periodic file sync timer (every 5 minutes)
-            {
-                let app_handle = app.handle().clone();
-                let data_dir_fs = data_dir_fs_sync;
-                tauri::async_runtime::spawn(async move {
-                    let interval = tokio::time::Duration::from_secs(5 * 60);
-                    tokio::time::sleep(interval).await; // skip first immediate tick
-                    loop {
-                        let records = StorageService::load_download_records(&data_dir_fs)
-                            .unwrap_or_default();
-                        let file_paths: Vec<String> = records
-                            .iter()
-                            .filter(|r| r.status == "completed" && !r.file_path.is_empty())
-                            .map(|r| r.file_path.clone())
-                            .collect();
-                        let results = services::file_manager::check_files_exist(&file_paths).await;
-                        let _ = app_handle.emit("file-sync-complete", &results);
-                        tokio::time::sleep(interval).await;
-                    }
-                });
-            }
+            // 周期性文件状态同步（每 5 分钟）
+            services::scheduler::spawn_file_sync(data_dir_fs_sync, app_handle.clone());
 
             log::info!("Application initialized successfully");
             Ok(())
@@ -298,9 +165,7 @@ pub fn run() {
             commands::download::check_all_subscriptions,
             commands::download::get_download_records,
             commands::download::get_all_download_records,
-            commands::download::manual_check_all,
             commands::download::get_download_queue,
-            commands::download::get_queue_state,
             commands::download::pause_download,
             commands::download::resume_download,
             commands::download::cancel_download,
@@ -309,8 +174,6 @@ pub fn run() {
             commands::settings::get_settings,
             commands::settings::update_settings,
             commands::settings::get_app_state,
-            commands::settings::start_scheduler,
-            commands::settings::stop_scheduler,
             commands::settings::validate_download_path,
             commands::settings::validate_proxy_url,
             commands::import_export::export_subscriptions_json,
