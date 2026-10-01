@@ -243,6 +243,20 @@ ModuleNotFoundError: No module named 'encodings'
 `sanitize_python_env()` 清理：仅在环境存在 `APPDIR`（即确实运行在 AppImage 内）时才动手，非 AppImage 环境不碰用户配置。
 新增 yt-dlp 调用点不要直接用 `Command::new`。其它子进程（`gio`、`xdg-open` 等文件管理器）不是 Python 程序，无需处理。
 
+## Agent skills
+
+### Issue tracker
+
+issue 与 spec 以 GitHub issue 形式存在（`yysfire/yt-dlp-gui`，使用 `gh` CLI）。见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+沿用默认的五个规范标签（`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`）。见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+单上下文（single-context）：根目录 `CONTEXT.md` + `docs/adr/`。见 `docs/agents/domain.md`。
+
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
