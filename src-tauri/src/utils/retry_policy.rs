@@ -114,6 +114,10 @@ fn strip_ansi(input: &str) -> String {
 /// 剥 ANSI 转义 + 只保留 `ERROR:` 行，返回**去掉 `ERROR:` 标记**后的正文。
 ///
 /// 同时去掉前导空白与 `[debug]` 前缀。保持原始顺序。
+///
+/// `ERROR:` 必须出现在**行首**（正是指去掉前导空白与 `[debug]` 前缀之后的位置）。
+/// 若在行内任意位置匹配子串，文件名或警告里的 `error:` 会被误当成失败判据，
+/// 污染「只读最后一条 `ERROR:` 行」这一契约。
 pub fn error_lines(stderr: &str) -> Vec<String> {
     let cleaned = strip_ansi(stderr);
     let mut lines = Vec::new();
@@ -122,10 +126,9 @@ pub fn error_lines(stderr: &str) -> Vec<String> {
         if let Some(rest) = line.strip_prefix("[debug]") {
             line = rest.trim_start();
         }
-        // 只认 `ERROR:` 行（yt-dlp 输出固定大写）。大小写不敏感以防包装层改写。
-        if let Some(idx) = find_case_insensitive(line, "error:") {
-            let text = line[idx + "error:".len()..].trim();
-            lines.push(text.to_string());
+        // 只认行首的 `ERROR:`（yt-dlp 输出固定大写）。大小写不敏感以防包装层改写。
+        if let Some(text) = strip_prefix_ascii_ci(line, "error:") {
+            lines.push(text.trim().to_string());
         }
     }
     lines
@@ -153,9 +156,18 @@ fn find_ascii_ci(haystack: &str, needle_lower: &str) -> Option<usize> {
     None
 }
 
-/// 大小写不敏感地查找子串，返回**字节下标**。
-fn find_case_insensitive(haystack: &str, needle_lower: &str) -> Option<usize> {
-    find_ascii_ci(haystack, needle_lower)
+/// 若 `s` 以 `prefix_lower`（ASCII，大小写不敏感）**开头**，返回去掉前缀后的剩余部分。
+///
+/// 与 `find_ascii_ci` 的区别：只认行首，不做行内子串查找。
+fn strip_prefix_ascii_ci<'a>(s: &'a str, prefix_lower: &str) -> Option<&'a str> {
+    let prefix = prefix_lower.as_bytes();
+    let head = s.as_bytes().get(..prefix.len())?;
+    if head.eq_ignore_ascii_case(prefix) {
+        // 前缀全为 ASCII，故 prefix.len() 一定是字符边界
+        Some(&s[prefix.len()..])
+    } else {
+        None
+    }
 }
 
 /// 在文本中查找 `prefix`（大小写不敏感），随后解析一个十进制整数。
@@ -456,6 +468,17 @@ mod tests {
             error_lines(stderr),
             vec!["first problem".to_string(), "second problem".to_string()]
         );
+    }
+
+    #[test]
+    fn error_lines_requires_marker_at_line_start() {
+        // 行内出现 `error:` 的行不算错误行——否则文件名 / WARNING 会被误当成失败判据
+        let stderr = concat!(
+            "[download] Destination: Lecture 3 - Error: Reconstruction.mp4\n",
+            "WARNING: cosmetic: error: not a real failure\n",
+            "ERROR: real failure\n",
+        );
+        assert_eq!(error_lines(stderr), vec!["real failure".to_string()]);
     }
 
     // ── 退避纯函数 ──────────────────────────────────────────────────
