@@ -67,6 +67,26 @@ pub struct SpawnedDownload {
 const PROGRESS_TEMPLATE: &str =
     "%(progress._percent)s|%(progress._speed_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress._eta_str)s";
 
+/// 画质 preset → yt-dlp `-f` 格式字符串。
+///
+/// 除 `best` 外的档位一律走 `bestvideo[height<=N]+bestaudio/best[height<=N]`：
+/// 选最高不超过 N 的**视频流** + 最佳**音频流**再合并，才能拿到该档位下的最高分辨率。
+///
+/// `best`（界面「最高画质」）**不能**映射成 yt-dlp 的裸 `best` —— 裸 `best` 要求
+/// 单文件同时含音视频，YouTube 的预混流最高通常只有 360p，于是「最高画质」会下载到
+/// 360p。必须用 `bestvideo+bestaudio/best`（无 height 上限，取该视频可用的最高画质，
+/// 4K 频道即 4K）。
+pub(crate) fn quality_to_format(quality: &str) -> String {
+    match quality {
+        "best" => "bestvideo+bestaudio/best".to_string(),
+        "2160p" => "bestvideo[height<=2160]+bestaudio/best[height<=2160]".to_string(),
+        "1440p" => "bestvideo[height<=1440]+bestaudio/best[height<=1440]".to_string(),
+        "720p" => "bestvideo[height<=720]+bestaudio/best[height<=720]".to_string(),
+        "480p" => "bestvideo[height<=480]+bestaudio/best[height<=480]".to_string(),
+        _ => "bestvideo[height<=1080]+bestaudio/best[height<=1080]".to_string(),
+    }
+}
+
 /// 构造 yt-dlp 下载参数（代理与 Cookie 不在此处，由调用方按需追加）。
 ///
 /// `--newline` 与 `--progress` 都不可省：
@@ -523,14 +543,7 @@ impl YtDlpService {
 
         let mut cmd = yt_dlp_command_async(yt_dlp_path);
 
-        let format_str = match quality {
-            "best" => "best".to_string(),
-            "2160p" => "bestvideo[height<=2160]+bestaudio/best[height<=2160]".to_string(),
-            "1440p" => "bestvideo[height<=1440]+bestaudio/best[height<=1440]".to_string(),
-            "720p" => "bestvideo[height<=720]+bestaudio/best[height<=720]".to_string(),
-            "480p" => "bestvideo[height<=480]+bestaudio/best[height<=480]".to_string(),
-            _ => "bestvideo[height<=1080]+bestaudio/best[height<=1080]".to_string(),
-        };
+        let format_str = quality_to_format(quality);
 
         cmd.args(build_download_args(
             &format_str,
@@ -776,29 +789,20 @@ mod tests {
 
     // ── Format string tests ────────────────────────────────────────
 
-    /// Since `download_video` builds format strings internally, we test the
-    /// logic by exercising the quality→format mapping through the `match` arms.
-    /// This verifies the format string generation logic is correct.
-    fn get_expected_format(quality: &str) -> &str {
-        match quality {
-            "best" => "best",
-            "2160p" => "bestvideo[height<=2160]+bestaudio/best[height<=2160]",
-            "1440p" => "bestvideo[height<=1440]+bestaudio/best[height<=1440]",
-            "720p" => "bestvideo[height<=720]+bestaudio/best[height<=720]",
-            "480p" => "bestvideo[height<=480]+bestaudio/best[height<=480]",
-            _ => "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-        }
-    }
+    // 直接测**生产**映射函数 `quality_to_format`。此前这里复制了一份 `match` 做
+    // `get_expected_format`，断言等于自己的副本 —— 生产映射改错它也不会红。
 
     #[test]
-    fn test_format_string_for_best() {
-        assert_eq!(get_expected_format("best"), "best");
+    fn test_format_string_for_best_has_no_height_cap() {
+        // 「最高画质」必须取该视频可用最高分辨率（4K 频道即 4K）。
+        // 裸 `best` 是单文件预混流（YouTube 通常只有 360p），绝不能再出现。
+        assert_eq!(quality_to_format("best"), "bestvideo+bestaudio/best");
     }
 
     #[test]
     fn test_format_string_for_2160p() {
         assert_eq!(
-            get_expected_format("2160p"),
+            quality_to_format("2160p"),
             "bestvideo[height<=2160]+bestaudio/best[height<=2160]"
         );
     }
@@ -806,7 +810,7 @@ mod tests {
     #[test]
     fn test_format_string_for_1440p() {
         assert_eq!(
-            get_expected_format("1440p"),
+            quality_to_format("1440p"),
             "bestvideo[height<=1440]+bestaudio/best[height<=1440]"
         );
     }
@@ -814,7 +818,7 @@ mod tests {
     #[test]
     fn test_format_string_for_1080p_default() {
         assert_eq!(
-            get_expected_format("1080p"),
+            quality_to_format("1080p"),
             "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
         );
     }
@@ -822,7 +826,7 @@ mod tests {
     #[test]
     fn test_format_string_for_720p() {
         assert_eq!(
-            get_expected_format("720p"),
+            quality_to_format("720p"),
             "bestvideo[height<=720]+bestaudio/best[height<=720]"
         );
     }
@@ -830,7 +834,7 @@ mod tests {
     #[test]
     fn test_format_string_for_480p() {
         assert_eq!(
-            get_expected_format("480p"),
+            quality_to_format("480p"),
             "bestvideo[height<=480]+bestaudio/best[height<=480]"
         );
     }
@@ -838,15 +842,15 @@ mod tests {
     #[test]
     fn test_format_string_unknown_falls_back_to_1080p() {
         assert_eq!(
-            get_expected_format("360p"),
+            quality_to_format("360p"),
             "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
         );
         assert_eq!(
-            get_expected_format("abc"),
+            quality_to_format("abc"),
             "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
         );
         assert_eq!(
-            get_expected_format(""),
+            quality_to_format(""),
             "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
         );
     }

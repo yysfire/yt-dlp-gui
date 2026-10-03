@@ -204,7 +204,7 @@ utils/
 | 检查新视频 | `yt-dlp --flat-playlist --dump-json [--dateafter <YYYYMMDD>] <url>` |
 | 下载视频 | `yt-dlp -f <format> -o <template> --no-playlist --newline --progress --progress-template <模板> --print after_move:filepath <url>` |
 
-画质预设映射为格式字符串（如 "1080p" → `bestvideo[height<=1080]+bestaudio/best[height<=1080]`）。代理（`--proxy`）和 Cookie（`--cookies`）仅非空时才传入。下载参数由 `services/ytdlp.rs::build_download_args()` 统一构造。
+画质预设映射为格式字符串（`services/ytdlp.rs::quality_to_format()`）：`"1080p"` → `bestvideo[height<=1080]+bestaudio/best[height<=1080]`，`"best"`（界面「最高画质」）→ **`bestvideo+bestaudio/best`**（无 height 上限，4K 频道即 4K）。**「最高画质」绝不能映射成裸 `best`** —— 裸 `best` 要求单文件含音视频，YouTube 的预混流通常最高只有 360p，会静默下到 360p。代理（`--proxy`）和 Cookie（`--cookies`）仅非空时才传入。下载参数由 `services/ytdlp.rs::build_download_args()` 统一构造。
 
 **下载命令里的进度参数一条都不能少**（三者缺一进度条就是空的，历史 bug）：
 - `--print` **隐含 `--quiet`**，会整体抑制进度输出，必须用 `--progress` 抵消；
