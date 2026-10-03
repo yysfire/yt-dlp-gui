@@ -11,7 +11,7 @@ import { useDownloadProgress } from "@/hooks/useDownloadProgress";
 import { useHealthCheck } from "@/hooks/useHealthCheck";
 import AppShell from "@/components/AppShell";
 import * as api from "@/lib/tauri";
-import type { AppSettings } from "@/types";
+import type { AppSettings, FileExistenceResult } from "@/types";
 
 /** Light theme palette. */
 const lightTheme = createTheme({
@@ -71,6 +71,10 @@ const darkTheme = createTheme({
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(false);
+  // 磁盘上已缺失的文件路径集合。它是**纯派生**的 UI 事实，不落库；唯一数据来源是
+  // 后端 `file-sync-complete` 事件（周期同步每 5 分钟一次，或「已下载」视图手动刷新）。
+  // 提升到 App 是因为它是事件的天然汇聚点，且 DetailPanel 与 DownloadedList 都要用。
+  const [missingPaths, setMissingPaths] = useState<Set<string>>(new Set());
 
   const {
     subscriptions,
@@ -79,6 +83,7 @@ export default function App() {
     addSubscription,
     deleteSubscription,
     togglePause,
+    updateQuality,
     updateGroup,
     refresh: refreshSubs,
   } = useSubscriptions();
@@ -184,6 +189,23 @@ export default function App() {
     };
   }, []);
 
+  // Listen for file-sync-complete → 派生出「文件缺失」集合，下发给两个面板
+  useEffect(() => {
+    const unlistenPromise = listen<FileExistenceResult[]>(
+      "file-sync-complete",
+      (event) => {
+        setMissingPaths(
+          new Set(
+            event.payload.filter((r) => !r.exists).map((r) => r.file_path),
+          ),
+        );
+      },
+    );
+    return () => {
+      unlistenPromise.then((fn) => fn());
+    };
+  }, []);
+
   const theme = darkMode ? darkTheme : lightTheme;
 
   return (
@@ -210,6 +232,8 @@ export default function App() {
           await refreshRecords();
         }}
         onUpdateGroup={updateGroup}
+        onUpdateQuality={updateQuality}
+        missingPaths={missingPaths}
         progressMap={progressMap}
         healthChecking={healthChecking}
         healthProgress={healthProgress}

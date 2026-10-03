@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildUnifiedVideoList,
   statusPriority,
+  qualityRank,
   formatTime,
   formatDuration,
   formatFileSize,
@@ -41,6 +42,9 @@ function makeRecord(overrides: Partial<DownloadRecord> = {}): DownloadRecord {
     status: "completed",
     error_message: null,
     downloaded_at: "2026-01-01T00:00:00Z",
+    quality: "1080p",
+    retry_count: 0,
+    last_retry_at: null,
     ...overrides,
   };
 }
@@ -58,6 +62,8 @@ function makeTask(overrides: Partial<DownloadTask> = {}): DownloadTask {
     error_message: null,
     created_at: "2026-01-01T00:00:00Z",
     completed_at: null,
+    record_id: "rec-1",
+    next_retry_at: null,
     ...overrides,
   };
 }
@@ -457,21 +463,28 @@ describe("buildUnifiedVideoList - 输出形状", () => {
     expect(build()).toEqual([]);
   });
 
-  it("每个条目都显式带有三个来源字段（值可为 undefined）", () => {
+  it("每个条目都显式带有全部字段（值可为 undefined）", () => {
     const items = build([makeVideo()]);
 
     expect(Object.keys(items[0]).sort()).toEqual([
       "channelInfo",
       "downloadInfo",
+      "downloadedElsewhere",
       "id",
+      "missing",
       "queueTask",
       "status",
       "title",
+      "upgradeable",
       "url",
     ]);
     expect(items[0].channelInfo).toBeDefined();
     expect(items[0].downloadInfo).toBeUndefined();
     expect(items[0].queueTask).toBeUndefined();
+    // 三个正交标记默认关闭
+    expect(items[0].upgradeable).toBe(false);
+    expect(items[0].missing).toBe(false);
+    expect(items[0].downloadedElsewhere).toBe(false);
   });
 });
 
@@ -494,6 +507,171 @@ describe("statusPriority", () => {
 
     const priorities = order.map(statusPriority);
     expect([...priorities].sort((a, b) => a - b)).toEqual(priorities);
+  });
+
+  it("retrying 插在 downloading 之后、waiting 之前（decisions §6.3）", () => {
+    expect(statusPriority("downloading")).toBeLessThan(statusPriority("retrying"));
+    expect(statusPriority("retrying")).toBeLessThan(statusPriority("waiting"));
+  });
+});
+
+describe("qualityRank - 画质档次全序", () => {
+  it("480p < 720p < 1080p < 1440p < 2160p < best（严格递增）", () => {
+    const order = ["480p", "720p", "1080p", "1440p", "2160p", "best"];
+    const ranks = order.map((q) => qualityRank(q) as number);
+    for (let i = 1; i < ranks.length; i++) {
+      expect(ranks[i]).toBeGreaterThan(ranks[i - 1]);
+    }
+  });
+
+  it("未知 / 空串 / audio / 非预设串 一律不可比较（返回 null）", () => {
+    for (const q of ["", "audio", "360p", "2160", "BEST", null, undefined]) {
+      expect(qualityRank(q)).toBeNull();
+    }
+  });
+});
+
+describe("buildUnifiedVideoList - 可升级/缺失/已在他处 真值表", () => {
+  const subId = "sub-1";
+
+  /** 只喂一条记录（或空），返回唯一（或第一条）条目。 */
+  function buildOne(
+    record: DownloadRecord | null,
+    opts: {
+      preset?: string;
+      missingPaths?: Set<string>;
+      /** null 表示不传 subscriptionId（不做归属判定） */
+      subscriptionId?: string | null;
+      tasks?: DownloadTask[];
+      videos?: VideoInfo[];
+    } = {},
+  ) {
+    const items = buildUnifiedVideoList({
+      videos: opts.videos ?? [],
+      records: record ? [record] : [],
+      tasks: opts.tasks ?? [],
+      qualityPreset: opts.preset,
+      missingPaths: opts.missingPaths,
+      subscriptionId:
+        opts.subscriptionId === null ? undefined : opts.subscriptionId ?? subId,
+    });
+    return items[0];
+  }
+
+  // 真值表：upgradeable = true 的三行
+  it("completed 720p + 订阅 1080p → 可升级 1080p", () => {
+    const item = buildOne(makeRecord({ quality: "720p" }), { preset: "1080p" });
+    expect(item.upgradeable).toBe(true);
+    expect(item.missing).toBe(false);
+    expect(item.downloadedElsewhere).toBe(false);
+  });
+
+  it("completed 720p + 订阅 best → 可升级", () => {
+    expect(buildOne(makeRecord({ quality: "720p" }), { preset: "best" }).upgradeable).toBe(true);
+  });
+
+  it("completed 2160p + 订阅 best → 可升级", () => {
+    expect(buildOne(makeRecord({ quality: "2160p" }), { preset: "best" }).upgradeable).toBe(true);
+  });
+
+  // 缺失优先于升级
+  it("completed 720p + 订阅 1080p + 文件缺失 → 仅 missing，不可升级", () => {
+    const record = makeRecord({ quality: "720p", file_path: "/tmp/gone.mp4" });
+    const item = buildOne(record, {
+      preset: "1080p",
+      missingPaths: new Set(["/tmp/gone.mp4"]),
+    });
+    expect(item.missing).toBe(true);
+    expect(item.upgradeable).toBe(false);
+  });
+
+  // 同档 / 降级 / 未知 都不提示
+  it("同档 → 不提示", () => {
+    expect(buildOne(makeRecord({ quality: "1080p" }), { preset: "1080p" }).upgradeable).toBe(false);
+  });
+
+  it("降级 → 不提示", () => {
+    expect(buildOne(makeRecord({ quality: "1080p" }), { preset: "720p" }).upgradeable).toBe(false);
+  });
+
+  it("best 记录 + 2160p 订阅 → 降级，不提示", () => {
+    expect(buildOne(makeRecord({ quality: "best" }), { preset: "2160p" }).upgradeable).toBe(false);
+  });
+
+  it("记录画质为空（旧记录）→ 永不提示", () => {
+    expect(buildOne(makeRecord({ quality: "" }), { preset: "1080p" }).upgradeable).toBe(false);
+  });
+
+  it("订阅 preset 为空/未知 → 不提示", () => {
+    expect(buildOne(makeRecord({ quality: "720p" }), { preset: "" }).upgradeable).toBe(false);
+    expect(buildOne(makeRecord({ quality: "720p" }), { preset: undefined }).upgradeable).toBe(false);
+  });
+
+  it("记录画质为 audio（未知档）→ 不提示", () => {
+    expect(buildOne(makeRecord({ quality: "audio" }), { preset: "1080p" }).upgradeable).toBe(false);
+  });
+
+  // 状态行：非 completed 一律 false
+  it.each(["failed", "cancelled", "downloading", "paused", "retrying", "waiting"] as const)(
+    "记录状态为 %s 时三个标记都为 false",
+    (status) => {
+      const item = buildOne(makeRecord({ status, quality: "720p" }), { preset: "1080p" });
+      expect(item.upgradeable).toBe(false);
+      expect(item.missing).toBe(false);
+      expect(item.downloadedElsewhere).toBe(false);
+    },
+  );
+
+  it("deleted 记录 → 不判可升级（文件是否存在由 UI 用「重新下载」入口处理）", () => {
+    const record = makeRecord({ status: "deleted", quality: "720p" });
+    const item = buildOne(record, {
+      preset: "1080p",
+      missingPaths: new Set([record.file_path]),
+    });
+    expect(item.upgradeable).toBe(false);
+    expect(item.missing).toBe(false);
+  });
+
+  it("无记录 → 三个标记都 false", () => {
+    const item = buildOne(null, { preset: "1080p", videos: [makeVideo()] });
+    expect(item.upgradeable).toBe(false);
+    expect(item.missing).toBe(false);
+    expect(item.downloadedElsewhere).toBe(false);
+  });
+
+  it("有活跃队列任务 → 三个标记都 false", () => {
+    const item = buildOne(makeRecord({ quality: "720p" }), {
+      preset: "1080p",
+      tasks: [makeTask({ status: "running" })],
+    });
+    expect(item.upgradeable).toBe(false);
+    expect(item.missing).toBe(false);
+    expect(item.downloadedElsewhere).toBe(false);
+  });
+
+  it("记录归属其它订阅 → downloadedElsewhere，且不判升级/缺失", () => {
+    const record = makeRecord({
+      subscription_id: "sub-OTHER",
+      quality: "720p",
+      file_path: "/tmp/gone.mp4",
+    });
+    const item = buildOne(record, {
+      preset: "1080p",
+      missingPaths: new Set(["/tmp/gone.mp4"]),
+    });
+    expect(item.downloadedElsewhere).toBe(true);
+    expect(item.upgradeable).toBe(false);
+    expect(item.missing).toBe(false);
+  });
+
+  it("不传 subscriptionId 时不做归属判定（downloadedElsewhere 恒 false）", () => {
+    const record = makeRecord({ subscription_id: "sub-OTHER" });
+    expect(buildOne(record, { subscriptionId: null }).downloadedElsewhere).toBe(false);
+  });
+
+  it("成功记录的重试次数原样透传（成功不归零）", () => {
+    const item = buildOne(makeRecord({ retry_count: 2 }), { preset: "1080p" });
+    expect(item.downloadInfo?.retry_count).toBe(2);
   });
 });
 

@@ -17,6 +17,10 @@ import * as api from "@/lib/tauri";
 interface DownloadedListProps {
   /** All download records (unfiltered). */
   records: DownloadRecord[];
+  /** 磁盘上已缺失的文件路径集合（由 App 从 file-sync-complete 汇聚后下发） */
+  missingPaths: Set<string>;
+  /** 按订阅当前画质重下某条记录 */
+  onRedownload: (recordId: string) => void;
   loading?: boolean;
   error?: string | null;
   onRefresh?: () => void;
@@ -28,12 +32,13 @@ interface DownloadedListProps {
  */
 export default function DownloadedList({
   records,
+  missingPaths,
+  onRedownload,
   loading = false,
   error = null,
   onRefresh,
 }: DownloadedListProps) {
   const [search, setSearch] = useState("");
-  const [missingPaths, setMissingPaths] = useState<Set<string>>(new Set());
   const [syncing, setSyncing] = useState(false);
 
   // Client-side search filtering (case-insensitive)
@@ -43,15 +48,12 @@ export default function DownloadedList({
     return records.filter((r) => r.video_title.toLowerCase().includes(lower));
   }, [records, search]);
 
-  // Run file existence sync
+  // Run file existence sync. 结果不由本组件持有 —— 后端会 emit `file-sync-complete`，
+  // 由 App 汇聚成 `missingPaths` 再下发（与周期同步共用同一份状态）。
   const handleSync = useCallback(async () => {
     setSyncing(true);
     try {
-      const results = await api.syncFileStates();
-      const missing = new Set(
-        results.filter((r) => !r.exists).map((r) => r.file_path)
-      );
-      setMissingPaths(missing);
+      await api.syncFileStates();
     } catch (e) {
       console.error("Sync failed:", e);
     } finally {
@@ -65,27 +67,6 @@ export default function DownloadedList({
       handleSync();
     }
   }, [records.length > 0]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Listen for file-sync-complete events from the backend
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    import("@tauri-apps/api/event").then(({ listen }) => {
-      listen<Array<{ file_path: string; exists: boolean }>>(
-        "file-sync-complete",
-        (event) => {
-          const missing = new Set(
-            event.payload.filter((r) => !r.exists).map((r) => r.file_path)
-          );
-          setMissingPaths(missing);
-        }
-      ).then((fn) => {
-        unlisten = fn;
-      });
-    });
-    return () => {
-      unlisten?.();
-    };
-  }, []);
 
   const handleDelete = useCallback(() => {
     onRefresh?.();
@@ -153,6 +134,7 @@ export default function DownloadedList({
               key={r.id}
               record={r}
               fileMissing={missingPaths.has(r.file_path)}
+              onRedownload={onRedownload}
               onDeleted={handleDelete}
             />
           ))}

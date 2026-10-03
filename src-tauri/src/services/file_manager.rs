@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use tauri::Emitter;
 use tokio::sync::Semaphore;
 
 use crate::models::DownloadRecord;
@@ -43,6 +44,30 @@ pub async fn check_files_exist(file_paths: &[String]) -> Vec<FileExistenceResult
     results
 }
 
+/// 检查所有 `completed` 且 `file_path` 非空的记录，文件是否仍存在于磁盘，并
+/// emit `file-sync-complete`（前端据此派生「文件缺失」）。
+///
+/// **存在性检查只有这一条实现**：周期任务（`scheduler::spawn_file_sync`）与命令
+/// （`commands::file_manager::sync_file_states`）都调用它 —— 原先两处各自内联了一遍
+/// 完全相同的过滤逻辑，必然漂移。
+///
+/// 注意：只检查 `completed` 的记录；`deleted` / `failed` 等状态的记录本就不该有文件。
+pub async fn sync_completed_records(
+    data_dir: &Path,
+    app_handle: &tauri::AppHandle,
+) -> Vec<FileExistenceResult> {
+    let records = StorageService::load_download_records(data_dir).unwrap_or_default();
+    let file_paths: Vec<String> = records
+        .iter()
+        .filter(|r| r.status == "completed" && !r.file_path.is_empty())
+        .map(|r| r.file_path.clone())
+        .collect();
+
+    let results = check_files_exist(&file_paths).await;
+    let _ = app_handle.emit("file-sync-complete", &results);
+    results
+}
+
 /// Moves a file to the system trash (recycle bin) instead of permanently deleting it.
 ///
 /// On Linux: uses `gio trash` (preferred, supports undo via desktop file manager).
@@ -51,7 +76,7 @@ pub async fn check_files_exist(file_paths: &[String]) -> Vec<FileExistenceResult
 /// recycle bin requires the `trash` crate or winapi, both not yet in scope).
 ///
 /// Falls back to `std::fs::remove_file` when the trash command is not available.
-fn delete_file_to_trash(path: &Path) {
+pub(crate) fn delete_file_to_trash(path: &Path) {
     #[cfg(target_os = "linux")]
     {
         // gio trash is the most reliable Linux trash implementation

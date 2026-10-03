@@ -49,6 +49,17 @@ export interface Subscription {
   last_health_check: string | null;
 }
 
+/** 下载记录状态。`retrying` 表示失败后正处于退避等待（尚未放弃）。 */
+export type DownloadRecordStatus =
+  | "downloading"
+  | "completed"
+  | "failed"
+  | "paused"
+  | "cancelled"
+  | "waiting"
+  | "deleted"
+  | "retrying";
+
 /** Represents a single video download record. */
 export interface DownloadRecord {
   id: string;
@@ -58,9 +69,15 @@ export interface DownloadRecord {
   video_url: string;
   file_path: string;
   file_size: number;
-  status: "downloading" | "completed" | "failed" | "paused" | "cancelled" | "waiting" | "deleted";
+  status: DownloadRecordStatus;
   error_message: string | null;
   downloaded_at: string; // ISO 8601
+  /** 下载时请求的画质 preset；空串 = 未知（旧记录），永不参与升级判定 */
+  quality: string;
+  /** 本轮已重试次数（0..=3）；成功时保留，新一轮下载开始时归零 */
+  retry_count: number;
+  /** 最近一次重试尝试时间（ISO 8601），未重试过为 null */
+  last_retry_at: string | null;
 }
 
 /** Result of checking whether a file exists on disk. */
@@ -70,7 +87,14 @@ export interface FileExistenceResult {
 }
 
 /** Download task status in memory queue */
-export type TaskStatus = "waiting" | "running" | "paused" | "completed" | "failed" | "cancelled";
+export type TaskStatus =
+  | "waiting"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "retrying";
 
 /** Real-time download progress */
 export interface DownloadProgress {
@@ -96,6 +120,10 @@ export interface DownloadTask {
   error_message: string | null;
   created_at: string;
   completed_at: string | null;
+  /** 对应 DownloadRecord.id；完成 / 失败 / 状态回写全部按它精确定位 */
+  record_id: string;
+  /** 退避期的下次重试时刻（ISO 8601），非退避期为 null；前端据此驱动倒计时 */
+  next_retry_at: string | null;
 }
 
 /** Download queue runtime state */
@@ -226,6 +254,7 @@ export interface VideoInfo {
 export type VideoStatus =
   | "new"
   | "downloading"
+  | "retrying"
   | "paused"
   | "waiting"
   | "completed"
@@ -251,6 +280,12 @@ export interface UnifiedVideoItem {
   readonly url: string;
   /** 视频当前状态 */
   readonly status: UnifiedVideoStatus;
+  /** 本订阅当前画质档次高于记录中记录的档次（**文件缺失时恒为 false**） */
+  readonly upgradeable: boolean;
+  /** 该记录的文件不在磁盘上（**优先于 upgradeable**）；纯派生，不落库 */
+  readonly missing: boolean;
+  /** 该视频已被**其它订阅**下载（本订阅没有记录）；不提供重下/升级 */
+  readonly downloadedElsewhere: boolean;
 }
 
 /** 视频列表分页结果 */

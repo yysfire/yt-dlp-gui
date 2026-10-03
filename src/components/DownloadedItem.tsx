@@ -28,6 +28,8 @@ import {
   Pause as PausedIcon,
   HourglassEmpty as WaitingIcon,
   Cancel as CancelledIcon,
+  Autorenew as RetryingIcon,
+  FileDownload as RedownloadIcon,
 } from "@mui/icons-material";
 import type { SvgIconComponent } from "@mui/icons-material";
 import type { DownloadRecord } from "@/types";
@@ -36,6 +38,8 @@ import * as api from "@/lib/tauri";
 interface DownloadedItemProps {
   record: DownloadRecord;
   fileMissing?: boolean;
+  /** 按订阅当前画质重下这一条记录（「文件缺失」与「已删除」共用） */
+  onRedownload?: (recordId: string) => void;
   onDeleted?: () => void;
 }
 
@@ -100,6 +104,8 @@ export function resolveStatusVisual(
       return { Icon: WaitingIcon, color: "text.disabled" };
     case "cancelled":
       return { Icon: CancelledIcon, color: "text.disabled" };
+    case "retrying":
+      return { Icon: RetryingIcon, color: "warning.main" };
   }
 }
 
@@ -110,6 +116,7 @@ export function resolveStatusVisual(
 export default function DownloadedItem({
   record,
   fileMissing = false,
+  onRedownload,
   onDeleted,
 }: DownloadedItemProps) {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -169,12 +176,21 @@ export default function DownloadedItem({
                 <Chip label="已删除" size="small" sx={{ height: 18, fontSize: "0.6rem" }} />
               )}
               {fileMissing && !isDeleted && (
-                <Chip label="文件已缺失" size="small" color="warning" sx={{ height: 18, fontSize: "0.6rem" }} />
+                <Chip label="文件缺失" size="small" color="warning" sx={{ height: 18, fontSize: "0.6rem" }} />
               )}
             </Stack>
           }
           sx={{ my: 0 }}
         />
+
+        {/* 「文件缺失」与「已删除」共用同一个「重新下载」入口 */}
+        {(isDeleted || fileMissing) && onRedownload && (
+          <Tooltip title="重新下载">
+            <IconButton size="small" onClick={() => onRedownload(record.id)}>
+              <RedownloadIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        )}
 
         {!isDeleted && (
           <>

@@ -1,10 +1,9 @@
 use std::path::Path;
 
-use tauri::{Emitter, State};
+use tauri::State;
 
 use crate::services::download_queue::notify_records_changed;
 use crate::services::file_manager::{self, FileExistenceResult};
-use crate::services::StorageService;
 use crate::AppContext;
 
 /// Opens the parent directory of a file in the system file manager.
@@ -140,18 +139,6 @@ pub async fn sync_file_states(
     state: State<'_, AppContext>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<FileExistenceResult>, String> {
-    let records = StorageService::load_download_records(&state.data_dir)
-        .map_err(|e| e.to_string())?;
-
-    // Only check completed records that have file paths
-    let file_paths: Vec<String> = records
-        .iter()
-        .filter(|r| r.status == "completed" && !r.file_path.is_empty())
-        .map(|r| r.file_path.clone())
-        .collect();
-
-    let results = file_manager::check_files_exist(&file_paths).await;
-
-    let _ = app_handle.emit("file-sync-complete", &results);
-    Ok(results)
+    // 与周期任务共用同一实现（含 emit file-sync-complete）
+    Ok(file_manager::sync_completed_records(&state.data_dir, &app_handle).await)
 }

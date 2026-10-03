@@ -553,6 +553,15 @@ impl YtDlpService {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
+        // 子进程句柄一旦被 drop 就击杀进程。
+        //
+        // 调用方（download_queue）平时把 `Child` 存进 `ActiveTask`、直到下载结束才释放；
+        // 唯一的例外是「spawn 成功、但 entry 已被 `cancel` 抢先移除」这条极窄路径 ——
+        // 此时函数会直接丢弃 `Child`。没有本开关的话，yt-dlp 会变成**孤儿进程**继续
+        // 下载并写出无人追踪的文件。开启后 drop 即 kill，取消在任何时刻都能生效。
+        // 正常流程中进程已退出，drop 时的 kill 是无害的空操作。
+        cmd.kill_on_drop(true);
+
         let child = cmd.spawn().map_err(|e| AppError::YtDlp(format!(
             "Failed to execute yt-dlp: {}",
             e

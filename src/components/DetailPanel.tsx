@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
-import { Box, Typography, Avatar, Chip, Alert, Skeleton, List, ListItem, Link, IconButton } from "@mui/material";
+import { Box, Typography, Avatar, Chip, Alert, Skeleton, List, ListItem, Link, IconButton, Select, MenuItem } from "@mui/material";
+import { alpha, type Theme } from "@mui/material/styles";
 import {
   CheckCircle as SuccessIcon,
   Error as ErrorIcon,
@@ -9,10 +10,13 @@ import {
   Cancel as CancelIcon,
   Downloading as DownloadingIcon,
   Replay as ReplayIcon,
+  Autorenew as RetryingIcon,
   HourglassEmpty as WaitingIcon,
   DeleteOutline as DeletedIcon,
+  SystemUpdateAlt as UpgradeIcon,
+  FileDownload as RedownloadIcon,
 } from "@mui/icons-material";
-import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask, ChannelInfo, VideoInfo } from "@/types";
+import type { Subscription, DownloadRecord, DownloadProgress, DownloadTask, ChannelInfo, VideoInfo, UnifiedVideoItem } from "@/types";
 import { getChannelInfo, getChannelVideos } from "@/lib/tauri";
 import {
   buildUnifiedVideoList,
@@ -22,16 +26,87 @@ import {
   formatUploadDate,
 } from "@/lib/unifiedVideoList";
 
+/** 界面提供的画质档位（decisions §2.1：界面只给这五档）。 */
+const QUALITY_OPTIONS = ["best", "1080p", "720p", "480p", "audio"] as const;
+
+/** 画质档位的展示文案：`best` 渲染为「最高画质」。 */
+function qualityLabel(quality: string): string {
+  return quality === "best" ? "最高画质" : quality;
+}
+
+/** 重试次数上限（与后端 `retry_policy::MAX_ATTEMPTS` 对齐）。 */
+const MAX_RETRY_ATTEMPTS = 3;
+
+/**
+ * 退避倒计时：每秒刷新一次剩余秒数。
+ *
+ * **只在详情面板使用** —— 列表视图每行挂一个计时器代价过高（decisions §8）。
+ */
+function RetryCountdown({ nextRetryAt }: { nextRetryAt: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const target = new Date(nextRetryAt).getTime();
+  const seconds = Number.isFinite(target)
+    ? Math.max(0, Math.ceil((target - now) / 1000))
+    : 0;
+  return <>· 还有 {seconds} 秒</>;
+}
+
+/** 行内徽标的统一样式（高度/字号都压到与元信息一致）。 */
+const badgeSx = { height: 18, fontSize: "0.6rem", ml: 0.5 };
+
+/** 强调行的语义调色板键；`null` 表示非强调行。 */
+type AccentKey = "primary" | "error" | "warning" | null;
+
+/**
+ * 判定行的强调类别。`missing` / `deleted` 优先于 `upgradeable`（与标记派生规则一致）。
+ */
+function accentKey(item: UnifiedVideoItem): AccentKey {
+  if (item.missing || item.status === "deleted") return "error";
+  if (item.upgradeable) return "primary";
+  if (item.status === "retrying") return "warning";
+  return null;
+}
+
+/**
+ * 行首 3px 色条的颜色语义键。
+ *
+ * 非强调行用 `transparent` 占位 —— 直接省略边框会让行宽在有无强调之间跳动。
+ */
+function accentColor(item: UnifiedVideoItem): string {
+  const key = accentKey(item);
+  return key ? `${key}.main` : "transparent";
+}
+
+/**
+ * 强调行的**极淡底色**（与色条配套，decisions §8）。
+ *
+ * 用 `alpha(..., 0.06)` 而非固定色值，使亮/暗色主题各自解析出合适的浅色。
+ */
+function accentTint(item: UnifiedVideoItem, theme: Theme): string {
+  const key = accentKey(item);
+  return key ? alpha(theme.palette[key].main, 0.06) : "transparent";
+}
+
 interface DetailPanelProps {
   subscription: Subscription | null;
+  /** **全局去重后**的下载记录（含其它订阅的归属，用于判定「已在其它订阅下载」） */
   records: DownloadRecord[];
   queueTasks: DownloadTask[];
+  /** 磁盘上已缺失的文件路径集合 */
+  missingPaths?: Set<string>;
   error?: string | null;
   progressMap?: Map<string, DownloadProgress>;
   onPauseDownload: (videoUrl: string) => void;
   onResumeDownload: (taskId: string) => void;
   onCancelDownload: (videoUrl: string) => void;
-  onRetryDownload: (subscriptionId: string) => void;
+  /** 按订阅当前画质重下某条记录（升级 / 重新下载 / 重试共用） */
+  onRedownload: (recordId: string) => void;
+  /** 修改订阅的画质 preset */
+  onUpdateQuality: (id: string, quality: string) => void;
 }
 
 /** Right-side detail panel showing channel info and download records. */
@@ -39,11 +114,13 @@ export default function DetailPanel({
   subscription,
   records,
   queueTasks,
+  missingPaths,
   error,
   progressMap,
   onPauseDownload,
   onCancelDownload,
-  onRetryDownload,
+  onRedownload,
+  onUpdateQuality,
 }: DetailPanelProps) {
   // 异步加载状态
   const [channelInfo, setChannelInfo] = useState<ChannelInfo | null>(null);
@@ -144,21 +221,39 @@ export default function DetailPanel({
 
   const isDead = subscription?.health_status === "dead";
 
-  // 合并频道视频、下载记录、队列任务为统一列表
+  // 合并频道视频、下载记录、队列任务为统一列表，并派生「可升级 / 文件缺失 /
+  // 已在其它订阅下载」三个正交标记。records 是全局记录，靠 subscriptionId 区分归属。
   const unifiedItems = useMemo(() => {
     try {
-      return buildUnifiedVideoList({ videos: videoList, records, tasks: queueTasks });
+      return buildUnifiedVideoList({
+        videos: videoList,
+        records,
+        tasks: queueTasks,
+        qualityPreset: subscription?.quality_preset,
+        missingPaths,
+        subscriptionId: subscription?.id,
+      });
     } catch (e) {
       console.error("[DetailPanel] buildUnifiedVideoList failed:", e);
       return [];
     }
-  }, [videoList, records, queueTasks]);
+  }, [
+    videoList,
+    records,
+    queueTasks,
+    subscription?.quality_preset,
+    subscription?.id,
+    missingPaths,
+  ]);
 
-  // 已完成数从 records 派生（唯一真相源是下载记录，不再由后端维护计数字段）。
-  // 口径：当前仍处于 completed 的记录条数。必须放在下方提前返回之前。
+  // 已完成数从 records 派生（唯一真相源是下载记录）。因为现在收到的是**全局**记录，
+  // 必须按本订阅过滤 —— 口径：本订阅仍处于 completed 的记录条数。
   const completedCount = useMemo(
-    () => records.filter((r) => r.status === "completed").length,
-    [records],
+    () =>
+      records.filter(
+        (r) => r.subscription_id === subscription?.id && r.status === "completed",
+      ).length,
+    [records, subscription?.id],
   );
 
   if (!subscription) {
@@ -218,12 +313,36 @@ export default function DetailPanel({
               variant="outlined"
               sx={{ height: 20, fontSize: "0.7rem" }}
             />
-            <Chip
-              label={subscription.quality_preset}
+            {/* 订阅级画质设置入口：复用既有 update_subscription_quality 命令。
+                界面只给 best / 1080p / 720p / 480p / audio 五档；若订阅现值不在其中
+                （API 或手改文件产生），把它一并列出来以免 Select 渲染为空。 */}
+            <Select
+              value={subscription.quality_preset}
+              onChange={(e) => onUpdateQuality(subscription.id, e.target.value)}
               size="small"
               variant="outlined"
-              sx={{ height: 20, fontSize: "0.7rem" }}
-            />
+              title="下载画质"
+              aria-label="下载画质"
+              sx={{
+                height: 20,
+                fontSize: "0.7rem",
+                "& .MuiSelect-select": {
+                  py: 0,
+                  pl: 0.75,
+                  pr: "20px !important",
+                  fontSize: "0.7rem",
+                },
+                "& .MuiSelect-icon": { fontSize: 14, right: 2 },
+              }}
+            >
+              {Array.from(
+                new Set<string>([...QUALITY_OPTIONS, subscription.quality_preset]),
+              ).map((q) => (
+                <MenuItem key={q} value={q} sx={{ fontSize: "0.75rem" }}>
+                  {qualityLabel(q)}
+                </MenuItem>
+              ))}
+            </Select>
             {subscription.paused && (
               <Chip
                 label="已暂停"
@@ -351,6 +470,11 @@ export default function DetailPanel({
                             px: 2,
                             borderBottom: 1,
                             borderColor: "divider",
+                            // 行首 3px 色条：可升级 / 缺失·已删除 / 重试中
+                            borderLeft: "3px solid",
+                            borderLeftColor: accentColor(item),
+                            // 与色条配套的极淡底色（亮/暗主题各自解析）
+                            bgcolor: (theme) => accentTint(item, theme),
                             opacity: item.status === "deleted" ? 0.5 : 1,
                           }}
                         >
@@ -358,6 +482,7 @@ export default function DetailPanel({
                           <Box sx={{ width: 40, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
                             {item.status === "new" && <VideoIcon sx={{ fontSize: 18, color: "text.disabled" }} />}
                             {item.status === "downloading" && <DownloadingIcon sx={{ fontSize: 18, color: "info.main" }} />}
+                            {item.status === "retrying" && <RetryingIcon sx={{ fontSize: 18, color: "warning.main" }} />}
                             {item.status === "paused" && <PauseIcon sx={{ fontSize: 18, color: "warning.main" }} />}
                             {item.status === "waiting" && <WaitingIcon sx={{ fontSize: 18, color: "text.disabled" }} />}
                             {item.status === "completed" && <SuccessIcon sx={{ fontSize: 18, color: "success.main" }} />}
@@ -422,6 +547,20 @@ export default function DetailPanel({
                                         </>
                                       )}
                                       {item.status === "cancelled" && `已取消${date ? ` · ${date}` : ""}`}
+                                      {item.status === "retrying" && (
+                                        <>
+                                          <Box component="span" sx={{ color: "warning.main", fontWeight: 500 }}>
+                                            重试中
+                                          </Box>
+                                          {` (${item.downloadInfo?.retry_count ?? 0}/${MAX_RETRY_ATTEMPTS})`}
+                                          {item.queueTask?.next_retry_at && (
+                                            <>
+                                              {" "}
+                                              <RetryCountdown nextRetryAt={item.queueTask.next_retry_at} />
+                                            </>
+                                          )}
+                                        </>
+                                      )}
                                       {item.status === "deleted" && (
                                         <>
                                           <Box component="span" sx={{ color: "text.disabled", fontWeight: 500 }}>已删除</Box>
@@ -434,6 +573,28 @@ export default function DetailPanel({
                                   );
                                 })()}
                               </Typography>
+                              {/* 徽标（chip）：可升级 / 文件缺失 / 已在其它订阅下载。
+                                  缺失与可升级互斥，缺失优先（由派生规则保证）。 */}
+                              {item.upgradeable && (
+                                <Chip
+                                  label={`可升级 ${qualityLabel(subscription.quality_preset)}`}
+                                  size="small"
+                                  color="primary"
+                                  variant="outlined"
+                                  sx={badgeSx}
+                                />
+                              )}
+                              {item.missing && (
+                                <Chip label="文件缺失" size="small" color="error" sx={badgeSx} />
+                              )}
+                              {item.downloadedElsewhere && (
+                                <Chip
+                                  label="已在其它订阅下载"
+                                  size="small"
+                                  variant="outlined"
+                                  sx={badgeSx}
+                                />
+                              )}
                               <Box sx={{ flex: 1 }} />
                               <Typography variant="caption" sx={{ fontSize: "0.65rem", color: "text.disabled", whiteSpace: "nowrap" }}>
                                 {item.downloadInfo && item.status === "downloading" && `下载中`}
@@ -475,18 +636,48 @@ export default function DetailPanel({
                               gap: 0.5,
                             }}
                           >
-                            {item.queueTask && item.status === "downloading" && (
+                            {/* 升级：仅「可升级」时出现（已在其它订阅下载的行不提供） */}
+                            {item.upgradeable && item.downloadInfo && !item.downloadedElsewhere && (
+                              <IconButton
+                                size="small"
+                                onClick={() => onRedownload(item.downloadInfo!.id)}
+                                title={`升级到 ${qualityLabel(subscription.quality_preset)}`}
+                                sx={{ color: "primary.main" }}
+                              >
+                                <UpgradeIcon sx={{ fontSize: 18 }} />
+                              </IconButton>
+                            )}
+                            {/* 重新下载：「文件缺失」与「已删除」共用同一入口 */}
+                            {(item.missing || item.status === "deleted") &&
+                              item.downloadInfo &&
+                              !item.downloadedElsewhere && (
+                                <IconButton
+                                  size="small"
+                                  onClick={() => onRedownload(item.downloadInfo!.id)}
+                                  title="重新下载"
+                                  sx={{ color: "error.main" }}
+                                >
+                                  <RedownloadIcon sx={{ fontSize: 18 }} />
+                                </IconButton>
+                              )}
+                            {item.queueTask && (item.status === "downloading" || item.status === "retrying") && (
                               <IconButton size="small" onClick={() => onPauseDownload(item.url)} title="暂停">
                                 <PauseIcon sx={{ fontSize: 18 }} />
                               </IconButton>
                             )}
-                            {item.queueTask && (item.status === "downloading" || item.status === "waiting" || item.status === "paused") && (
+                            {item.queueTask && (item.status === "downloading" || item.status === "retrying" || item.status === "waiting" || item.status === "paused") && (
                               <IconButton size="small" onClick={() => onCancelDownload(item.url)} title="取消" sx={{ color: "error.main" }}>
                                 <CancelIcon sx={{ fontSize: 18 }} />
                               </IconButton>
                             )}
-                            {item.status === "failed" && (
-                              <IconButton size="small" onClick={() => onRetryDownload(subscription.id)} title="重试" sx={{ color: "warning.main" }}>
+                            {/* 失败重试：只重下这一条记录（不再是「重查整个订阅」） */}
+                            {item.status === "failed" && item.downloadInfo && !item.downloadedElsewhere && (
+                              <IconButton
+                                size="small"
+                                onClick={() => onRedownload(item.downloadInfo!.id)}
+                                title="重试"
+                                sx={{ color: "warning.main" }}
+                              >
                                 <ReplayIcon sx={{ fontSize: 18 }} />
                               </IconButton>
                             )}

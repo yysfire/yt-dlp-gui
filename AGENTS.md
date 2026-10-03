@@ -79,14 +79,14 @@ App.tsx                      # 根组件：主题提供者、暗色模式、事�
 
 > 注意：把状态下移到局部组件时，要确认该组件不会因折叠/切换而卸载（`SubscriptionList` 就依赖「始终挂载、仅 CSS 隐藏」这一点来保住筛选状态）。
 
-**后端通信**: `src/lib/tauri.ts` 封装了全部 36 个 Tauri `invoke()` 调用，返回类型与 `src/types/index.ts` 一致（类型是手写断言，与 Rust 侧 serde 结构各自维护，没有校验机制，改字段时两边都要动）。前端通过 `listen()` 订阅后端推送事件，事件名分散在多个文件中定义，**没有单一契约清单**（下面这份即事实上的契约，改事件名或载荷时请同步此处）：
+**后端通信**: `src/lib/tauri.ts` 封装了全部 37 个 Tauri `invoke()` 调用，返回类型与 `src/types/index.ts` 一致（类型是手写断言，与 Rust 侧 serde 结构各自维护，没有校验机制，改字段时两边都要动；`DownloadRecord` 另有共享 fixture 兜底，见「下载记录契约」一节）。前端通过 `listen()` 订阅后端推送事件，事件名分散在多个文件中定义，**没有单一契约清单**（下面这份即事实上的契约，改事件名或载荷时请同步此处）：
 
 - `records-changed` — 下载记录发生变化（**无载荷**）。**唯一订阅者是 `App.tsx`**（`AppShell` 只订 `queue-changed`，`StatusBar` 只订 `scheduler-check-complete`）。所有 emit 统一走 `services/download_queue.rs::notify_records_changed`（纯 emit，零 I/O 零加锁，可在临界区安全调用）；契约：**凡写 `download_records.json` 的路径都必须调用它**
 - `download-progress` — 单条下载的进度（带载荷，`useDownloadProgress` 消费）
 - `queue-changed` — 下载队列状态变化（带载荷）
 - `scheduler-check-complete` — **任一次检查完成**：自动调度与托盘「检查全部」经 `run_check_round`，手动「检查全部」经 `check_all_subscriptions`，手动单订阅经 `check_subscription`；均在该次检查的 `last_check_time` 落盘后 emit。语义是「一次检查完成」，**不是**「调度器轮次」
 - `subscriptions-updated` — 批量导入/删除后
-- `file-sync-complete` — 文件存在性同步结果
+- `file-sync-complete` — 文件存在性同步结果（**唯一消费者是 `App.tsx`**，汇聚成 `missingPaths` 后下发给 `DetailPanel` 与 `DownloadedList`；两个面板不再各自订阅）。emit 入口收敛为 `services/file_manager.rs::sync_completed_records`（周期任务与 `sync_file_states` 共用）
 - `health-check-progress` / `health-check-complete` — 健康检查
 - `import-progress` / `import-complete` — 批量导入
 - `settings-changed` — settings 落盘并同步缓存后（前端保存 **或** 托盘切换 `scheduler_paused`），**带完整 `AppSettings` 载荷**；`App.tsx` 用它同步 `darkMode`（取代原先的 5 秒轮询）。契约：**凡写 settings 的路径都必须 emit 本事件**
@@ -95,13 +95,14 @@ App.tsx                      # 根组件：主题提供者、暗色模式、事�
 
 ### Rust 后端（`src-tauri/src/`）
 
-`lib.rs` 定义模块划分、注册命令（36 个，见末尾 `generate_handler!`）、装配全局状态；后台周期任务委托给 `services::scheduler`。
+`lib.rs` 定义模块划分、注册命令（37 个，见末尾 `generate_handler!`）、装配全局状态；后台周期任务委托给 `services::scheduler`。
 
 ```
-commands/               # Tauri IPC 命令处理函数（36 个注册命令）
+commands/               # Tauri IPC 命令处理函数（37 个注册命令）
   subscription.rs       # 订阅增删改查、分组、batch_delete、get_channel_info
+                        #   add_subscription 用 AppSettings.quality_preset 作新建订阅默认画质
   download.rs           # check_subscription / check_all（后者是 run_check_round 的薄委托）、
-                        #   记录查询、队列控制、get_channel_videos
+                        #   记录查询、队列控制、get_channel_videos、redownload_video
                         #   以及共享的 check_and_download / run_check_round（被 scheduler 与 tray 调用）
   settings.rs           # get/update 设置、get_app_state、路径与代理校验
   health.rs             # check_all_health / check_selected_health（快照后 spawn 后台任务）
@@ -109,13 +110,13 @@ commands/               # Tauri IPC 命令处理函数（36 个注册命令）
   file_manager.rs       # 打开所在文件夹、文件存在性检查、删除文件、同步文件状态
 
 services/               # 业务逻辑（多数无状态，通过参数接收路径/配置）
-  storage.rs            # JSON 持久化 + 写事务（见「持久化」一节）
-  download_queue.rs     # 下载队列：并发控制、子进程生命周期、暂停/恢复/取消（有状态）
+  storage.rs            # JSON 持久化 + 写事务（见「持久化」一节）；deduplicate_vec 的 rank 表
+  download_queue.rs     # 下载队列：并发控制、子进程生命周期、暂停/恢复/取消、**失败自动重试**（有状态）
                         #   并导出 notify_records_changed —— records-changed 的唯一 emit 入口
   ytdlp.rs              # yt-dlp 命令行封装（解析频道、检查视频、下载视频）
   opml.rs               # OPML 2.0 XML 导入/导出（quick-xml）
   health.rs             # HTTP 健康检查（reqwest）
-  file_manager.rs       # 文件存在性/删除，并与记录状态联动
+  file_manager.rs       # 文件存在性/删除/回收站；sync_completed_records（存在性检查唯一实现）
   settings_validator.rs # 下载路径与代理 URL 校验（纯函数）
   tray.rs               # 系统托盘：菜单、状态、图标
   scheduler.rs          # 后台周期任务：spawn_scheduler（自动检查订阅）+ spawn_file_sync
@@ -127,6 +128,8 @@ models/                 # 数据结构（serde 序列化/反序列化）
 utils/
   error.rs              # AppError 枚举（12 个变体，thiserror）
   progress_parser.rs    # yt-dlp 进度行解析（纯函数）
+  retry_policy.rs       # 失败归因与重试策略（纯函数）：classify_failure / error_lines /
+                        #   remaining_after / phase_of / should_retry / sanitize_error_message
 ```
 
 **关键设计规则**：
@@ -145,7 +148,7 @@ utils/
   - **已完成数**（`status === "completed"`）：状态栏（`AppShell.tsx` → `StatusBar`，文案「已完成」）与详情面板头部（`DetailPanel.tsx`，文案「已完成」）。
   历史上该字段有「完成回调增量」与「启动重算」两个语义不同的写者，导致显示不一致——不要重新引入。
 - **写操作与事件成对**：凡修改持久化数据的路径，必须在写事务完成后 emit 对应事件 —— 记录改动 → `services/download_queue.rs::notify_records_changed`，队列改动 → `DownloadQueue::emit_queue_changed`，settings 改动 → `settings-changed`。emit 一律是**纯 emit**（零 I/O、零加锁），因此可在任意临界区内安全调用；不要为了构造载荷去读文件或加锁。前端对高频事件做短延时合并（`App.tsx` 的 `scheduleRefresh`，150ms 窗口内只排一次，用 schedule-once 而非 debounce 以免连续事件把刷新无限推迟）。
-**`check_and_download()`**（`commands/download.rs`）是检查入口：按 **该订阅自己的检查游标 `last_successful_check_at`** 换算日期下界（`date_lower_bound()`）→ `yt-dlp --flat-playlist` 取新视频 → 对已有记录去重（`failed` 可重试）→ 逐个交给 `DownloadQueue::enqueue_from_video()` 入队。**真正的下载、进度解析与记录状态落库都在 `download_queue.rs` 的 `execute_download_with_control()` 里**（该函数按 `video_url + subscription_id` 定位记录并做事务写入）。
+**`check_and_download()`**（`commands/download.rs`）是检查入口：按 **该订阅自己的检查游标 `last_successful_check_at`** 换算日期下界（`date_lower_bound()`）→ `yt-dlp --flat-playlist` 取新视频 → 对已有记录去重（`failed` 可重试）→ 逐个交给 `DownloadQueue::enqueue_from_video()` 入队。**真正的下载、进度解析、失败归因与记录状态落库都在 `download_queue.rs` 的 `execute_download_with_control()` 里**（该函数按 `record_id` 精确定位记录并做事务写入，并在内部完成自动重试的退避循环）。
 
 > **两个时间字段，语义不可互换**（`Subscription`）：
 > - `last_checked_at` —— 最近一次检查**尝试**（无论成败），供 `DetailPanel` 的「上次检查」显示，与 `last_check_status` / `last_check_error` 同属一次尝试的结果；
@@ -157,6 +160,38 @@ utils/
 > 3. 游标为 `None`（从未成功过，含刚加入）时**不带 `--dateafter`**，因此新订阅能抓到加入之前上传的视频。此时 yt-dlp 会返回该 URL 的全部视频（`--playlist-end 5` 的限制已被移除，是 `cc0583f` 的有意决定），大频道的首轮检查可能较慢。
 
 `check_and_download` 还有一个「无队列时直接建记录」的兜底分支 —— 因为 `QueueContext` 在 `lib.rs` setup 里必然注册，该分支实际上走不到。
+
+### 下载记录契约、全局去重与失败重试（spec 008）
+
+> 实现期的**唯一真相源**是 `specs/008-download-management-enhanced/decisions.md`（wayfinder 地图折叠件）。`spec.md` / `plan.md` / `contracts/` 若与它冲突，以 `decisions.md` 为准。
+
+**`DownloadRecord` 的新字段**（均 `#[serde(default)]`，旧 `download_records.json` 直接可加载，不做迁移）：
+
+- `quality: String` —— 下载时**请求的 preset**（不是实际分辨率），**空串 = 未知**。存实际分辨率会让「用户选 1080p 而源最高 720p」永远误报可升级。
+- `retry_count: u32` —— 本轮已重试次数；**新一轮下载开始时归零，成功时保留**。
+- `last_retry_at: Option<String>` —— 最近一次重试时间，`None` 时**不出现**该键（而非 `null`）。
+
+`DownloadRecord` 的 Rust↔TS 一致性由**共享 fixture** 兜底：`src-tauri/tests/fixtures/download_record.json`，Rust 侧 `models/download.rs` 用 `include_str!` + `to_value == fixture`，前端侧 `src/types/__tests__/downloadRecordContract.test.ts` 用 `?raw` 读同一文件。**改字段必须同时改 fixture 与 TS interface**（`error_message` 为 None 时键缺省，故 fixture 里没有这个键）。
+
+**全局去重与归属**：一个 `video_id` ↔ 一条记录 ↔ **一个文件**。这是输出模板 `%(title)s.%(ext)s` 没有订阅判别符的**物理必然**。记录的 `subscription_id` 是**归属**（首次下载它的订阅）；其它订阅的列表把它呈现为「已在其它订阅下载」，**不提供重下/升级**。入队收口 `enqueue_record` 按 `(video_id, subscription_id)` **upsert 重置**（保留 `file_path`/`file_size`/`downloaded_at`），并有幂等守卫（记录状态 ∈ `{waiting, downloading, retrying}` 或队列/活动任务已有同 `record_id` 则不重复入队）。**所有记录回写一律按 `record_id` 精确定位**（旧的 `(video_url, subscription_id)` 过滤会误伤同键记录）。
+
+**`retrying` 状态**：失败但可重试且未达上限时，记录置 `retrying`、`DownloadTask.status` 为 `retrying`、`next_retry_at` 有值；前端 `statusPriority` 把它插在 `downloading` 之后。`deduplicate_vec` 的 rank 表也**必须**登记它（否则同 `video_id` 的重试记录会被旧的 `failed` 挤掉）。`recover_state` 在启动时把 `downloading` / `paused` / `retrying` 一并置 `failed` + `Application restarted`（不主动恢复重试）。
+
+**失败归因与重试**（`utils/retry_policy.rs`，纯函数）：
+
+- 判据顺序：退出码短路（`None`/`0`/`2`/`101` → 不重试）→ 终态黑名单 → `Tunnel connection failed: <code>` → `HTTP Error <code>:` → 网络白名单 → 兜底 `Unknown`（调用方视同 `Retry`）。
+- **只读最后一条 `ERROR:` 行** —— `WARNING:` 行里会合法出现 `HTTP Error 403`，对整段 stderr 做子串匹配会把「格式不可用」误判成 403。
+- 退避 30/60/120 秒、最多 3 次，**硬编码**（不提供设置项）。循环在 `execute_download_with_control` 内部**就地重试**，退避期间**继续占用并发名额**。
+- `ActiveTask.pid` 是 `Option<u32>`：退避期间子进程已退出，陈旧的 PID 可能已被系统复用，**所有发信号的动作只允许出现在 `Some(pid)` 分支内**；`update_max_concurrent` 缩容时排除 `child.is_none()`（退避中）的 entry。
+- stderr 必须与 stdout **并发读取**（只保留尾部 64 KiB）—— 不读会让管道写满，yt-dlp 阻塞在写 stderr 上表现为「下载卡死」。
+- `error_message` 落库前**剥离代理凭证**（`user:pass@`）并截断到 200 字符 —— 它来自真实 stderr，而 `proxy_url` 可能含明文口令。
+- 取消优先于失败：取消会移除 entry 并 `notify` 唤醒退避循环，循环醒来发现 entry 不存在即退出且**不回写任何记录**（否则会把 `cancelled` 覆盖成 `failed`）。
+
+**`redownload_video`** 是「升级」「重新下载」与失败行「重试」共用的**唯一**命令：后端据 `record_id` 反查记录与订阅，取订阅**当前**的 `quality_preset`，走同一入队收口。「重新检查整个订阅」只保留在工具栏。
+
+**文件存在性不参与检查路径**：`check_and_download` 的 `seen_ids` / `seen_urls` 语义逐字不变（`status != "failed"` 即算已存在），`deleted` 与「文件缺失」的记录都**留在集合内**、**不自动重下**。存在性只由周期同步一条路径负责（`sync_completed_records` → `file-sync-complete` → 前端派生 `missing` → 用户点「重新下载」）。这是有意设计：若自动重下，用户「删文件腾空间」会被检查无限填满，而「移动/整理下载目录」会把整个库重下一遍。
+
+> ⚠️ **用户可见的后果**：修改 `download_dir`（或整体移动下载目录）后，旧记录的绝对 `file_path` 失效，列表会显示「文件缺失」，需要**手动**重新下载。本次**不做**路径重定位（decisions §4.6）。
 
 ### yt-dlp 命令行调用
 
@@ -260,5 +295,5 @@ issue 与 spec 以 GitHub issue 形式存在（`yysfire/yt-dlp-gui`，使用 `gh
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at `specs/007-unified-video-list/plan.md`
+at `specs/008-download-management-enhanced/plan.md`
 <!-- SPECKIT END -->

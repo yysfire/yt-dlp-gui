@@ -34,6 +34,9 @@ interface AppShellProps {
   onCheckSubscription: (id: string) => Promise<void>;
   onManualCheckAll: () => Promise<void>;
   onUpdateGroup: (id: string, groupName: string) => Promise<void>;
+  onUpdateQuality: (id: string, quality: string) => Promise<void>;
+  /** 磁盘上已缺失的文件路径集合（由 App 从 file-sync-complete 汇聚） */
+  missingPaths: Set<string>;
   progressMap?: Map<string, DownloadProgress>;
   healthChecking: boolean;
   healthProgress: { completed: number; total: number } | null;
@@ -59,6 +62,8 @@ export default function AppShell({
   onCheckSubscription,
   onManualCheckAll,
   onUpdateGroup,
+  onUpdateQuality,
+  missingPaths,
   progressMap,
   healthChecking,
   healthProgress,
@@ -82,9 +87,6 @@ export default function AppShell({
   const selectedId = view.kind === "detail" ? view.subscriptionId : null;
 
   const selectedSub = subscriptions.find((s) => s.id === selectedId) ?? null;
-  const filteredRecords = selectedId
-    ? records.filter((r) => r.subscription_id === selectedId)
-    : [];
   const recordCount = records.length;
   // 徽标显示下载记录总数（含 deleted —— 删除文件时记录有意保留以便追溯）；
   // 状态栏只数其中仍处于 completed 的记录，两者口径不同、不要互相替换。
@@ -138,13 +140,16 @@ export default function AppShell({
     }
   }, [refreshQueue]);
 
-  const handleRetry = useCallback(async (subscriptionId: string) => {
+  // 「升级」/「重新下载」/失败行的「重试」全部走同一条命令：按订阅**当前**画质
+  // 重下这一条记录。不再有「重新检查整个订阅」的行内语义（那是工具栏的职责）。
+  const handleRedownload = useCallback(async (recordId: string) => {
     try {
-      await api.checkSubscription(subscriptionId);
+      await api.redownloadVideo(recordId);
+      refreshQueue();
     } catch (e) {
-      console.error("Failed to retry:", e);
+      console.error("Failed to redownload:", e);
     }
-  }, []);
+  }, [refreshQueue]);
 
   return (
     <div className="flex flex-col h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100">
@@ -207,19 +212,25 @@ export default function AppShell({
             {view.kind === "downloads" ? (
               <DownloadedList
                 records={records}
+                missingPaths={missingPaths}
+                onRedownload={handleRedownload}
                 onRefresh={onRefreshSubscriptions}
               />
             ) : (
               <DetailPanel
                 subscription={selectedSub}
-                records={filteredRecords}
+                // 传**全局去重后**的记录：DetailPanel 需要据此判定「已在其它订阅下载」
+                // （计数仍只数本订阅，见 DetailPanel 内部）。
+                records={records}
                 queueTasks={queueTasks}
+                missingPaths={missingPaths}
                 error={recordsError}
                 progressMap={progressMap}
                 onPauseDownload={handlePause}
                 onResumeDownload={handleResume}
                 onCancelDownload={handleCancel}
-                onRetryDownload={handleRetry}
+                onRedownload={handleRedownload}
+                onUpdateQuality={onUpdateQuality}
               />
             )}
           </div>

@@ -67,23 +67,46 @@ export function formatTime(iso: string): string {
   }
 }
 
+/** 画质档次全序（数字越大越高）；未知档位返回 `null`，**永不参与比较**。 */
+const QUALITY_RANK: Record<string, number> = {
+  "480p": 1,
+  "720p": 2,
+  "1080p": 3,
+  "1440p": 4,
+  "2160p": 5,
+  best: 6,
+};
+
+/**
+ * 画质档次的比较键。
+ *
+ * 未知值（空串 / `audio` / 其它串）返回 `null` —— 方向是「宁可漏报，不可对看不懂的
+ * 值天天提示」。
+ */
+export function qualityRank(quality: string | null | undefined): number | null {
+  if (!quality) return null;
+  return QUALITY_RANK[quality] ?? null;
+}
+
 /** 按状态排序优先级（越小越靠前） */
 export function statusPriority(status: UnifiedVideoStatus): number {
   switch (status) {
     case "downloading":
       return 0;
-    case "waiting":
+    case "retrying":
       return 1;
-    case "paused":
+    case "waiting":
       return 2;
-    case "completed":
+    case "paused":
       return 3;
-    case "new":
+    case "completed":
       return 4;
-    case "cancelled":
+    case "new":
       return 5;
-    case "failed":
+    case "cancelled":
       return 6;
+    case "failed":
+      return 7;
     default:
       return 9;
   }
@@ -115,6 +138,7 @@ function deriveStatus(sources: Sources): UnifiedVideoStatus {
   const task = sources.task;
   if (task) {
     if (task.status === "running") return "downloading";
+    if (task.status === "retrying") return "retrying";
     if (task.status === "paused") return "paused";
     if (task.status === "waiting") return "waiting";
     if (task.status === "cancelled") return "cancelled";
@@ -128,6 +152,55 @@ function deriveStatus(sources: Sources): UnifiedVideoStatus {
     return sources.record.status;
   }
   return "new";
+}
+
+/**
+ * 派生三个**正交**标记（规则按序执行，见 decisions.md §2.4 / data-model §7.1）。
+ *
+ * 1. 无本订阅记录 → 都 false（`downloadedElsewhere` 单独判：记录属于别的订阅）；
+ * 2. 有活跃队列任务 → 都 false；
+ * 3. 记录状态非 `completed` → `missing` / `upgradeable` 为 false；
+ * 4. `missing == true` → `upgradeable = false`（**缺失优先于升级**）；
+ * 5. 记录画质或订阅 preset 未知 → `upgradeable = false`；
+ * 6. `rank(订阅) > rank(记录)` → `upgradeable = true`（同档与降级都不提示）。
+ */
+function deriveFlags(
+  sources: Sources,
+  subscriptionId: string | undefined,
+  missingPaths: Set<string> | undefined,
+  qualityPreset: string | undefined,
+): Pick<UnifiedVideoItem, "upgradeable" | "missing" | "downloadedElsewhere"> {
+  const record = sources.record;
+
+  // 「已在其它订阅下载」：有记录，但归属不是本订阅。此时不参与本订阅的升级/缺失判定。
+  const downloadedElsewhere =
+    record != null && subscriptionId != null && record.subscription_id !== subscriptionId;
+
+  // 有活跃队列任务时一切标记关闭（任务本身就是最新事实）
+  if (sources.task != null) {
+    return { upgradeable: false, missing: false, downloadedElsewhere };
+  }
+
+  const isOurs =
+    record != null && (subscriptionId == null || record.subscription_id === subscriptionId);
+  if (!isOurs || record.status !== "completed") {
+    return { upgradeable: false, missing: false, downloadedElsewhere };
+  }
+
+  // 文件缺失：纯派生，不落库。只对本订阅的 completed 记录判定。
+  const missing =
+    record.file_path !== "" && (missingPaths?.has(record.file_path) ?? false);
+
+  if (missing) {
+    return { upgradeable: false, missing: true, downloadedElsewhere };
+  }
+
+  const recordRank = qualityRank(record.quality);
+  const presetRank = qualityRank(qualityPreset);
+  const upgradeable =
+    recordRank != null && presetRank != null && presetRank > recordRank;
+
+  return { upgradeable, missing: false, downloadedElsewhere };
 }
 
 /**
@@ -155,17 +228,31 @@ function itemTime(sources: Sources): number {
 /**
  * 合并频道视频、下载记录与队列任务为统一列表。
  *
- * 输出按状态优先级排序（下载中 → 等待 → 暂停 → 已完成 → 新视频 → 已取消 → 失败），
+ * 输出按状态优先级排序（下载中 → 重试中 → 等待 → 暂停 → 已完成 → 新视频 → 已取消 → 失败），
  * 同状态内按时间倒序；时间并列时保持插入顺序（`records → tasks → videos`）。
+ *
+ * `records` 传入的是**全局去重后**的记录（可能包含其它订阅的归属）：
+ * - `subscriptionId` 用于区分「本订阅的记录」与「已在其它订阅下载」；
+ * - 不传 `subscriptionId` 时不做归属判定（`downloadedElsewhere` 恒 false），
+ *   以兼容只关心合并/排序的调用方。
  */
 export function buildUnifiedVideoList({
   videos,
   records,
   tasks,
+  qualityPreset,
+  missingPaths,
+  subscriptionId,
 }: {
   videos: VideoInfo[];
   records: DownloadRecord[];
   tasks: DownloadTask[];
+  /** 当前订阅的画质 preset；未知（含 undefined / 空串）永不判「可升级」 */
+  qualityPreset?: string;
+  /** 磁盘上已缺失的文件路径集合（来自 `file-sync-complete`） */
+  missingPaths?: Set<string>;
+  /** 当前订阅 id；用于判定「已在其它订阅下载」 */
+  subscriptionId?: string;
 }): UnifiedVideoItem[] {
   // 阶段一：按合并键索引三路来源，并顺带演化展示字段。
   //
@@ -226,20 +313,24 @@ export function buildUnifiedVideoList({
     }
   }
 
-  // 阶段二：一次性产出条目并排序。状态在这里算一次即可 ——
-  // 它只取决于队列任务与下载记录，与阶段一的轮次无关。
-  const indexed = Array.from(sources, ([, src]) => ({
-    time: itemTime(src),
-    item: {
-      channelInfo: src.channel,
-      downloadInfo: src.record,
-      queueTask: src.task,
-      id: src.id,
-      title: src.title,
-      url: src.url,
-      status: deriveStatus(src),
-    } satisfies UnifiedVideoItem,
-  }));
+  // 阶段二：一次性产出条目并排序。状态与三个标记在这里算一次即可 ——
+  // 它们只取决于队列任务与下载记录，与阶段一的轮次无关。
+  const indexed = Array.from(sources, ([, src]) => {
+    const flags = deriveFlags(src, subscriptionId, missingPaths, qualityPreset);
+    return {
+      time: itemTime(src),
+      item: {
+        channelInfo: src.channel,
+        downloadInfo: src.record,
+        queueTask: src.task,
+        id: src.id,
+        title: src.title,
+        url: src.url,
+        status: deriveStatus(src),
+        ...flags,
+      } satisfies UnifiedVideoItem,
+    };
+  });
 
   indexed.sort((a, b) => {
     const pa = statusPriority(a.item.status);
