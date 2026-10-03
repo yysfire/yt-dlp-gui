@@ -649,7 +649,7 @@ describe("buildUnifiedVideoList - 可升级/缺失/已在他处 真值表", () =
     expect(item.downloadedElsewhere).toBe(false);
   });
 
-  it("记录归属其它订阅 → downloadedElsewhere，且不判升级/缺失", () => {
+  it("记录归属其它订阅：该视频出现在本订阅频道里 → downloadedElsewhere，且不判升级/缺失", () => {
     const record = makeRecord({
       subscription_id: "sub-OTHER",
       quality: "720p",
@@ -658,6 +658,8 @@ describe("buildUnifiedVideoList - 可升级/缺失/已在他处 真值表", () =
     const item = buildOne(record, {
       preset: "1080p",
       missingPaths: new Set(["/tmp/gone.mp4"]),
+      // 条目由本订阅的频道视频撑起，其它订阅的记录只负责标注
+      videos: [makeVideo()],
     });
     expect(item.downloadedElsewhere).toBe(true);
     expect(item.upgradeable).toBe(false);
@@ -672,6 +674,87 @@ describe("buildUnifiedVideoList - 可升级/缺失/已在他处 真值表", () =
   it("成功记录的重试次数原样透传（成功不归零）", () => {
     const item = buildOne(makeRecord({ retry_count: 2 }), { preset: "1080p" });
     expect(item.downloadInfo?.retry_count).toBe(2);
+  });
+});
+
+describe("buildUnifiedVideoList - 条目来源（选中订阅只应看到自己的视频）", () => {
+  const subId = "sub-1";
+
+  it("其它订阅的记录不会作为独立条目出现", () => {
+    const otherRecord = makeRecord({
+      id: "rec-other",
+      subscription_id: "sub-2",
+      video_id: "vid-2",
+      video_url: "https://example.com/watch?v=vid-2",
+      video_title: "Other Subscription Video",
+    });
+    const items = buildUnifiedVideoList({
+      videos: [],
+      records: [otherRecord],
+      tasks: [],
+      subscriptionId: subId,
+    });
+    expect(items).toEqual([]);
+  });
+
+  it("其它订阅的队列任务不会作为独立条目出现", () => {
+    const otherTask = makeTask({
+      id: "task-other",
+      subscription_id: "sub-2",
+      video_id: "vid-2",
+      video_url: "https://example.com/watch?v=vid-2",
+      video_title: "Other Subscription Video",
+    });
+    const items = buildUnifiedVideoList({
+      videos: [],
+      records: [],
+      tasks: [otherTask],
+      subscriptionId: subId,
+    });
+    expect(items).toEqual([]);
+  });
+
+  it("本订阅自己的记录即使不在频道列表里也仍然出现", () => {
+    const ownRecord = makeRecord({
+      subscription_id: subId,
+      video_id: "vid-old",
+      video_url: "https://example.com/watch?v=vid-old",
+    });
+    const items = buildUnifiedVideoList({
+      videos: [],
+      records: [ownRecord],
+      tasks: [],
+      subscriptionId: subId,
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0].downloadInfo?.id).toBe("rec-1");
+  });
+
+  it("其它订阅下载的视频若出现在本订阅频道里，合并为一条并标记已在他处下载", () => {
+    const video = makeVideo({ id: "vid-2", url: "https://example.com/watch?v=vid-2" });
+    const otherRecord = makeRecord({
+      subscription_id: "sub-2",
+      video_id: "vid-2",
+      video_url: "https://example.com/watch?v=vid-2",
+    });
+    const items = buildUnifiedVideoList({
+      videos: [video],
+      records: [otherRecord],
+      tasks: [],
+      subscriptionId: subId,
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0].downloadedElsewhere).toBe(true);
+  });
+
+  it("不传 subscriptionId 时保持旧行为：所有来源都成为条目（兼容只做合并的调用方）", () => {
+    const otherRecord = makeRecord({ subscription_id: "sub-2", video_id: "vid-2" });
+    const items = buildUnifiedVideoList({
+      videos: [],
+      records: [otherRecord],
+      tasks: [],
+    });
+    expect(items).toHaveLength(1);
   });
 });
 

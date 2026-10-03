@@ -846,13 +846,17 @@ describe("DetailPanel", () => {
       expect(onRedownload).toHaveBeenCalledWith("rec-1");
     });
 
-    it("已在其它订阅下载：显示 chip，且不提供升级 / 重新下载", async () => {
+    it("已在其它订阅下载：其它订阅下载的视频出现在本订阅频道里 → 显示 chip，且不提供升级 / 重新下载", async () => {
       const sub = makeSub({ id: "sub-1", quality_preset: "1080p" });
       const record = makeRecord({
         subscription_id: "sub-OTHER",
         quality: "720p",
         video_title: "Other Sub Video",
       });
+      // 条目由本订阅的频道视频撑起，其它订阅的记录只负责标注 —— 不再单独成条
+      mockChannelVideosOnce([
+        makeVideo({ id: "vid-1", title: "Other Sub Video", url: "https://e/v1" }),
+      ]);
 
       render(
         <DetailPanel subscription={sub} {...defaultProps} records={[record]} />,
@@ -862,6 +866,38 @@ describe("DetailPanel", () => {
       expect(within(row).getByText("已在其它订阅下载")).toBeInTheDocument();
       expect(within(row).queryByTitle("升级到 1080p")).toBeNull();
       expect(within(row).queryByTitle("重新下载")).toBeNull();
+    });
+
+    it("其它订阅的记录 / 任务不会单独成条（回归：选中一个订阅只看得到自己的视频）", async () => {
+      const sub = makeSub({ id: "sub-1" });
+      const otherRecord = makeRecord({
+        subscription_id: "sub-OTHER",
+        video_id: "vid-other",
+        video_url: "https://e/other",
+        video_title: "Other Subscription Video",
+      });
+      const otherTask = makeTask({
+        subscription_id: "sub-OTHER",
+        video_id: "vid-other-2",
+        video_url: "https://e/other-2",
+        video_title: "Other Subscription Task",
+      });
+
+      render(
+        <DetailPanel
+          subscription={sub}
+          {...defaultProps}
+          records={[otherRecord]}
+          queueTasks={[otherTask]}
+        />,
+      );
+
+      // 频道列表为空（默认 mock），本订阅也没有记录 → 不应出现任何行
+      await waitFor(() => {
+        expect(screen.getByText("暂无视频")).toBeInTheDocument();
+      });
+      expect(screen.queryByText("Other Subscription Video")).toBeNull();
+      expect(screen.queryByText("Other Subscription Task")).toBeNull();
     });
 
     it("订阅级画质下拉：选择后调用 onUpdateQuality(id, value)", async () => {

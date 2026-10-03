@@ -240,6 +240,13 @@ function itemTime(sources: Sources): number {
  * - `subscriptionId` 用于区分「本订阅的记录」与「已在其它订阅下载」；
  * - 不传 `subscriptionId` 时不做归属判定（`downloadedElsewhere` 恒 false），
  *   以兼容只关心合并/排序的调用方。
+ *
+ * **条目来源**（传了 `subscriptionId` 时）：只有满足下面之一的 key 才产出条目 ——
+ * 1. 该 video 出现在 `videos`（本订阅频道列表）；
+ * 2. 记录属于本订阅；
+ * 3. 队列任务属于本订阅。
+ * 其它订阅的记录 / 任务**只能为已存在的条目提供标注**（如 `downloadedElsewhere`），
+ * **绝不单独成条** —— 否则选中一个订阅会看到其它订阅的全部视频。
  */
 export function buildUnifiedVideoList({
   videos,
@@ -320,22 +327,34 @@ export function buildUnifiedVideoList({
 
   // 阶段二：一次性产出条目并排序。状态与三个标记在这里算一次即可 ——
   // 它们只取决于队列任务与下载记录，与阶段一的轮次无关。
-  const indexed = Array.from(sources, ([, src]) => {
-    const flags = deriveFlags(src, subscriptionId, missingPaths, qualityPreset);
-    return {
-      time: itemTime(src),
-      item: {
-        channelInfo: src.channel,
-        downloadInfo: src.record,
-        queueTask: src.task,
-        id: src.id,
-        title: src.title,
-        url: src.url,
-        status: deriveStatus(src),
-        ...flags,
-      } satisfies UnifiedVideoItem,
-    };
-  });
+  //
+  // 传了 subscriptionId 时按「条目来源」过滤：其它订阅的记录 / 任务若没有本订阅的
+  // 同 key 频道视频 / 记录 / 任务撑起这一条，就不产出条目（它们只为已存在的条目标注）。
+  // 不传 subscriptionId 时保持旧行为：所有来源都成为条目。
+  const belongsHere = (src: Sources): boolean =>
+    subscriptionId == null ||
+    src.channel != null ||
+    src.record?.subscription_id === subscriptionId ||
+    src.task?.subscription_id === subscriptionId;
+
+  const indexed = Array.from(sources)
+    .filter(([, src]) => belongsHere(src))
+    .map(([, src]) => {
+      const flags = deriveFlags(src, subscriptionId, missingPaths, qualityPreset);
+      return {
+        time: itemTime(src),
+        item: {
+          channelInfo: src.channel,
+          downloadInfo: src.record,
+          queueTask: src.task,
+          id: src.id,
+          title: src.title,
+          url: src.url,
+          status: deriveStatus(src),
+          ...flags,
+        } satisfies UnifiedVideoItem,
+      };
+    });
 
   indexed.sort((a, b) => {
     const pa = statusPriority(a.item.status);
