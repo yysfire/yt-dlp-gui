@@ -10,7 +10,7 @@ use tauri::{Emitter, AppHandle};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Semaphore;
 
-use crate::models::{DownloadRecord, Subscription};
+use crate::models::{AppSettings, DownloadRecord, RecordStatus, Subscription};
 use crate::services::{StorageService, YtDlpService};
 use crate::utils::AppError;
 use crate::utils::progress_parser;
@@ -181,6 +181,22 @@ pub struct DownloadContext {
     pub data_dir: PathBuf,
 }
 
+impl DownloadContext {
+    /// 从当前设置构造下载上下文。
+    ///
+    /// `proxy` / `cookie_file` 一律包成 `Some`（空串 = 未配置），由 yt-dlp 调用层
+    /// 按非空判断决定是否传参 —— 这段包装语义原先在三个命令里各写一遍，收敛到这里。
+    pub fn from_settings(settings: &AppSettings, data_dir: PathBuf) -> Self {
+        Self {
+            yt_dlp_path: settings.yt_dlp_path.clone(),
+            proxy: Some(settings.proxy_url.clone()),
+            cookie_file: Some(settings.cookie_file.clone()),
+            download_dir: PathBuf::from(&settings.download_dir),
+            data_dir,
+        }
+    }
+}
+
 /// Holds the child process handle and PID for an active download.
 struct ActiveTask {
     child: Option<tokio::process::Child>,
@@ -307,7 +323,10 @@ impl DownloadQueue {
             .find(|r| matches(r));
 
         if let Some(existing) = existing {
-            let busy = matches!(existing.status.as_str(), "waiting" | "downloading" | "retrying");
+            let busy = matches!(
+                existing.status,
+                RecordStatus::Waiting | RecordStatus::Downloading | RecordStatus::Retrying
+            );
             if busy || self.has_in_flight_task(&existing.id) {
                 return Ok(existing);
             }
@@ -318,7 +337,7 @@ impl DownloadQueue {
             if let Some(r) = all.iter_mut().find(|r| matches(r)) {
                 // 重置本次尝试相关字段；**保留** file_path / file_size（旧路径还要用于
                 // 回收）与 downloaded_at（完成时才更新）。
-                r.status = "downloading".to_string();
+                r.status = RecordStatus::Downloading;
                 r.error_message = None;
                 r.quality = quality.to_string();
                 r.retry_count = 0;
@@ -750,30 +769,52 @@ impl DownloadQueue {
         active_tasks.lock().unwrap().contains_key(task_id)
     }
 
+    /// 按 `record_id` 精确定位并就地修改一条下载记录（事务）。
+    ///
+    /// 返回闭包的返回值；记录不存在时返回 `None`（闭包不执行）。这是所有
+    /// 「按 id 回写记录」的**唯一形状** —— 原先 finalize_* / update_record_status
+    /// 各自重复了「update_download_records + find + 守卫」。
+    ///
+    /// 注意：`f` 在全局写锁内执行，**禁止**在其中做文件 I/O、获取其它应用级锁
+    /// 或再调 `update_*`。
+    fn update_record_by_id<T>(
+        data_dir: &Path,
+        record_id: &str,
+        f: impl FnOnce(&mut DownloadRecord) -> T,
+    ) -> Option<T> {
+        StorageService::update_download_records(data_dir, |records| {
+            Ok(records.iter_mut().find(|r| r.id == record_id).map(f))
+        })
+        .ok()
+        .flatten()
+    }
+
     /// 成功完成：按 `record_id` 回写新路径与状态，并在**新路径落库之后**回收旧文件。
     ///
     /// `downloaded_at` **只在这里**写；`retry_count` 保留（成功不归零）；`error_message` 清空。
     /// 已取消的记录不覆盖。
     fn finalize_success(ctx: &DownloadContext, record_id: &str, file_path: &str) {
-        let old_path = StorageService::update_download_records(&ctx.data_dir, |records| {
-            let Some(existing) = records.iter_mut().find(|r| r.id == record_id) else {
-                return Ok(None);
-            };
-            if existing.status == "cancelled" {
-                return Ok(None);
+        // 文件大小在事务**外**算好：事务闭包持全局写锁，AGENTS.md 禁止在其中做文件 I/O。
+        let new_size = if file_path.is_empty() {
+            None
+        } else {
+            Some(std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0))
+        };
+
+        let old_path = Self::update_record_by_id(&ctx.data_dir, record_id, |existing| {
+            if existing.status == RecordStatus::Cancelled {
+                return None;
             }
             let old = existing.file_path.clone();
-            if !file_path.is_empty() {
-                let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
+            if let Some(size) = new_size {
                 existing.file_path = file_path.to_string();
-                existing.file_size = file_size;
+                existing.file_size = size;
             }
-            existing.status = "completed".to_string();
+            existing.status = RecordStatus::Completed;
             existing.error_message = None;
             existing.downloaded_at = Utc::now().to_rfc3339();
-            Ok(Some(old))
+            Some(old)
         })
-        .ok()
         .flatten();
 
         // 顺序不可反：先落库新路径、再回收旧文件。反过来若「回收成功但落库失败」，
@@ -795,15 +836,12 @@ impl DownloadQueue {
         retry_count: u32,
         last_retry_at: &str,
     ) {
-        let _ = StorageService::update_download_records(&ctx.data_dir, |records| {
-            if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
-                if existing.status != "cancelled" {
-                    existing.status = "retrying".to_string();
-                    existing.retry_count = retry_count;
-                    existing.last_retry_at = Some(last_retry_at.to_string());
-                }
+        Self::update_record_by_id(&ctx.data_dir, record_id, |existing| {
+            if existing.status != RecordStatus::Cancelled {
+                existing.status = RecordStatus::Retrying;
+                existing.retry_count = retry_count;
+                existing.last_retry_at = Some(last_retry_at.to_string());
             }
-            Ok(())
         });
     }
 
@@ -813,14 +851,11 @@ impl DownloadQueue {
     /// `proxy_url` 可能含明文口令 —— 把剥离放在写入函数内，任何调用点都无法绕过。
     fn finalize_failed(ctx: &DownloadContext, record_id: &str, message: &str) {
         let message = retry_policy::sanitize_error_message(message);
-        let _ = StorageService::update_download_records(&ctx.data_dir, |records| {
-            if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
-                if existing.status != "cancelled" {
-                    existing.status = "failed".to_string();
-                    existing.error_message = Some(message.clone());
-                }
+        Self::update_record_by_id(&ctx.data_dir, record_id, |existing| {
+            if existing.status != RecordStatus::Cancelled {
+                existing.status = RecordStatus::Failed;
+                existing.error_message = Some(message.clone());
             }
-            Ok(())
         });
     }
 
@@ -901,7 +936,7 @@ impl DownloadQueue {
         };
 
         if let Some(record_id) = paused_record_id {
-            self.update_record_status(data_dir, &record_id, "paused", None);
+            self.update_record_status(data_dir, &record_id, RecordStatus::Paused, None);
             self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
@@ -921,7 +956,7 @@ impl DownloadQueue {
         };
 
         if let Some(record_id) = waiting_record_id {
-            self.update_record_status(data_dir, &record_id, "paused", None);
+            self.update_record_status(data_dir, &record_id, RecordStatus::Paused, None);
             self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
@@ -967,7 +1002,11 @@ impl DownloadQueue {
         };
 
         if let Some((record_id, backing_off)) = resumed {
-            let status = if backing_off { "retrying" } else { "downloading" };
+            let status = if backing_off {
+                RecordStatus::Retrying
+            } else {
+                RecordStatus::Downloading
+            };
             self.update_record_status(data_dir, &record_id, status, None);
             self.notify_records_changed();
             self.emit_queue_changed();
@@ -988,7 +1027,7 @@ impl DownloadQueue {
         };
 
         if let Some(record_id) = waiting_record_id {
-            self.update_record_status(data_dir, &record_id, "downloading", None);
+            self.update_record_status(data_dir, &record_id, RecordStatus::Downloading, None);
             self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
@@ -1027,7 +1066,7 @@ impl DownloadQueue {
         match paused_record_id {
             Some(record_id) => {
                 log::info!("Paused download by url {}", video_url);
-                self.update_record_status(data_dir, &record_id, "paused", None);
+                self.update_record_status(data_dir, &record_id, RecordStatus::Paused, None);
                 self.notify_records_changed();
                 self.emit_queue_changed();
                 Ok(())
@@ -1050,7 +1089,7 @@ impl DownloadQueue {
                 match waiting_record_id {
                     Some(record_id) => {
                         log::info!("Paused waiting download by url {}", video_url);
-                        self.update_record_status(data_dir, &record_id, "paused", None);
+                        self.update_record_status(data_dir, &record_id, RecordStatus::Paused, None);
                         self.notify_records_changed();
                         self.emit_queue_changed();
                         Ok(())
@@ -1087,7 +1126,7 @@ impl DownloadQueue {
         };
 
         if let Some(record_id) = waiting_record_id {
-            self.update_record_status(&ctx.data_dir, &record_id, "cancelled", Some("Cancelled by user".to_string()));
+            self.update_record_status(&ctx.data_dir, &record_id, RecordStatus::Cancelled, Some("Cancelled by user".to_string()));
             self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
@@ -1128,7 +1167,7 @@ impl DownloadQueue {
             // downloaded_at**（只有真正成功完成时才写）
             let _ = StorageService::update_download_records(&ctx.data_dir, |records| {
                 if let Some(r) = records.iter_mut().find(|r| r.id == entry.task.record_id) {
-                    r.status = "cancelled".to_string();
+                    r.status = RecordStatus::Cancelled;
                     r.error_message = Some("Cancelled by user".to_string());
                 }
                 Ok(())
@@ -1151,7 +1190,7 @@ impl DownloadQueue {
         };
 
         if let Some(task) = cancelled_task {
-            self.update_record_status(&ctx.data_dir, &task.record_id, "cancelled", Some("Cancelled by user".to_string()));
+            self.update_record_status(&ctx.data_dir, &task.record_id, RecordStatus::Cancelled, Some("Cancelled by user".to_string()));
             self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
@@ -1181,13 +1220,16 @@ impl DownloadQueue {
     /// Updates a DownloadRecord's status and error message, located by `record_id`.
     ///
     /// **不写 `downloaded_at`**：该字段只在真正成功完成时更新（暂停 / 取消 / 重试都不改）。
-    fn update_record_status(&self, data_dir: &PathBuf, record_id: &str, status: &str, error_message: Option<String>) {
-        let _ = StorageService::update_download_records(data_dir, |records| {
-            if let Some(r) = records.iter_mut().find(|r| r.id == record_id) {
-                r.status = status.to_string();
-                r.error_message = error_message.clone();
-            }
-            Ok(())
+    fn update_record_status(
+        &self,
+        data_dir: &PathBuf,
+        record_id: &str,
+        status: RecordStatus,
+        error_message: Option<String>,
+    ) {
+        Self::update_record_by_id(data_dir, record_id, |r| {
+            r.status = status;
+            r.error_message = error_message;
         });
     }
 
@@ -1543,7 +1585,7 @@ mod tests {
             "https://e/v".to_string(),
             "vid-1".to_string(),
         );
-        r.status = status.to_string();
+        r.status = RecordStatus::parse(status);
         r.quality = "1080p".to_string();
         r
     }
@@ -1557,7 +1599,7 @@ mod tests {
         DownloadQueue::finalize_retrying(&test_ctx(tmp.path()), &record.id, 2, "2026-01-01T00:00:00Z");
 
         let r = load_one(tmp.path());
-        assert_eq!(r.status, "retrying");
+        assert_eq!(r.status, RecordStatus::Retrying);
         assert_eq!(r.retry_count, 2);
         assert_eq!(r.last_retry_at.as_deref(), Some("2026-01-01T00:00:00Z"));
     }
@@ -1572,7 +1614,7 @@ mod tests {
 
         let r = load_one(tmp.path());
         // 取消优先于失败：不得把 cancelled 覆盖成 failed
-        assert_eq!(r.status, "cancelled");
+        assert_eq!(r.status, RecordStatus::Cancelled);
     }
 
     #[test]
@@ -1588,7 +1630,7 @@ mod tests {
         );
 
         let r = load_one(tmp.path());
-        assert_eq!(r.status, "failed");
+        assert_eq!(r.status, RecordStatus::Failed);
         assert!(!r.error_message.as_deref().unwrap().contains("user:pass@"));
     }
 
@@ -1604,7 +1646,7 @@ mod tests {
         DownloadQueue::finalize_success(&test_ctx(tmp.path()), &record.id, "");
 
         let r = load_one(tmp.path());
-        assert_eq!(r.status, "completed");
+        assert_eq!(r.status, RecordStatus::Completed);
         // 成功时保留重试次数（spec 故事 2 场景 2）
         assert_eq!(r.retry_count, 2);
         // 成功时清空错误信息
@@ -1654,7 +1696,7 @@ mod tests {
 
         // 同一路径不得被回收（否则会把刚下好的文件删掉）
         assert!(file.exists(), "同路径文件不应被回收");
-        assert_eq!(load_one(tmp.path()).status, "completed");
+        assert_eq!(load_one(tmp.path()).status, RecordStatus::Completed);
     }
 
     #[test]

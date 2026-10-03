@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use tauri::{Emitter, Manager, State};
 
-use crate::models::{DownloadRecord, Subscription};
+use crate::models::{DownloadRecord, RecordStatus, Subscription};
 use crate::services::{StorageService, YtDlpService};
 use crate::services::download_queue::notify_records_changed;
 use crate::utils::AppError;
@@ -206,13 +206,13 @@ pub(crate) async fn check_and_download(
     // Failed records are not excluded — they can be retried.
     let mut seen_ids: std::collections::HashSet<String> = existing_records
         .iter()
-        .filter(|r| r.status != "failed")
+        .filter(|r| r.status != RecordStatus::Failed)
         .filter(|r| !r.video_id.is_empty())
         .map(|r| r.video_id.clone())
         .collect();
     let mut seen_urls: std::collections::HashSet<String> = existing_records
         .iter()
-        .filter(|r| r.status != "failed")
+        .filter(|r| r.status != RecordStatus::Failed)
         .map(|r| r.video_url.clone())
         .collect();
 
@@ -450,13 +450,10 @@ pub async fn redownload_video(
     // 克隆下载参数并释放设置锁（enqueue 会做文件 I/O）
     let ctx = {
         let settings = state.settings.lock().map_err(|e| e.to_string())?;
-        crate::services::download_queue::DownloadContext {
-            yt_dlp_path: settings.yt_dlp_path.clone(),
-            proxy: Some(settings.proxy_url.clone()),
-            cookie_file: Some(settings.cookie_file.clone()),
-            download_dir: std::path::PathBuf::from(&settings.download_dir),
-            data_dir: state.data_dir.clone(),
-        }
+        crate::services::download_queue::DownloadContext::from_settings(
+            &settings,
+            state.data_dir.clone(),
+        )
     };
 
     let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
@@ -491,11 +488,11 @@ pub fn recover_state(data_dir: &PathBuf) -> Result<(), AppError> {
     let recovered = StorageService::update_download_records(data_dir, |records| {
         let mut recovered = 0usize;
         for record in records.iter_mut() {
-            if record.status == "downloading"
-                || record.status == "paused"
-                || record.status == "retrying"
+            if record.status == RecordStatus::Downloading
+                || record.status == RecordStatus::Paused
+                || record.status == RecordStatus::Retrying
             {
-                record.status = "failed".to_string();
+                record.status = RecordStatus::Failed;
                 record.error_message = Some("Application restarted".to_string());
                 recovered += 1;
             }
@@ -548,13 +545,10 @@ pub async fn cancel_download(
     state: State<'_, AppContext>,
 ) -> Result<(), String> {
     let settings = state.settings.lock().map_err(|e| e.to_string())?;
-    let ctx = crate::services::download_queue::DownloadContext {
-        yt_dlp_path: settings.yt_dlp_path.clone(),
-        proxy: Some(settings.proxy_url.clone()),
-        cookie_file: Some(settings.cookie_file.clone()),
-        download_dir: std::path::PathBuf::from(&settings.download_dir),
-        data_dir: state.data_dir.clone(),
-    };
+    let ctx = crate::services::download_queue::DownloadContext::from_settings(
+        &settings,
+        state.data_dir.clone(),
+    );
     drop(settings);
 
     let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
@@ -586,13 +580,10 @@ pub async fn cancel_download_by_url(
     state: State<'_, AppContext>,
 ) -> Result<(), String> {
     let settings = state.settings.lock().map_err(|e| e.to_string())?;
-    let ctx = crate::services::download_queue::DownloadContext {
-        yt_dlp_path: settings.yt_dlp_path.clone(),
-        proxy: Some(settings.proxy_url.clone()),
-        cookie_file: Some(settings.cookie_file.clone()),
-        download_dir: std::path::PathBuf::from(&settings.download_dir),
-        data_dir: state.data_dir.clone(),
-    };
+    let ctx = crate::services::download_queue::DownloadContext::from_settings(
+        &settings,
+        state.data_dir.clone(),
+    );
     drop(settings);
 
     let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
@@ -692,7 +683,7 @@ mod tests {
             url.to_string(),
             vid.to_string(),
         );
-        r.status = status.to_string();
+        r.status = RecordStatus::parse(status);
         r
     }
 
@@ -714,10 +705,10 @@ mod tests {
             .expect("load should succeed");
         assert_eq!(recovered.len(), 2);
         // Video A was "downloading" → should be "failed"
-        assert_eq!(recovered[0].status, "failed");
+        assert_eq!(recovered[0].status, RecordStatus::Failed);
         assert_eq!(recovered[0].error_message, Some("Application restarted".to_string()));
         // Video B was "completed" → should stay "completed"
-        assert_eq!(recovered[1].status, "completed");
+        assert_eq!(recovered[1].status, RecordStatus::Completed);
         assert_eq!(recovered[1].error_message, None);
     }
 
@@ -734,7 +725,7 @@ mod tests {
 
         let recovered = StorageService::load_download_records(tmp.path())
             .expect("load should succeed");
-        assert_eq!(recovered[0].status, "failed");
+        assert_eq!(recovered[0].status, RecordStatus::Failed);
         assert_eq!(recovered[0].error_message, Some("Application restarted".to_string()));
     }
 
@@ -753,7 +744,7 @@ mod tests {
 
         let recovered = StorageService::load_download_records(tmp.path())
             .expect("load should succeed");
-        assert_eq!(recovered[0].status, "failed");
+        assert_eq!(recovered[0].status, RecordStatus::Failed);
         assert_eq!(recovered[0].error_message, Some("Application restarted".to_string()));
     }
 
@@ -773,9 +764,9 @@ mod tests {
         let recovered = StorageService::load_download_records(tmp.path())
             .expect("load should succeed");
         assert_eq!(recovered.len(), 3);
-        assert_eq!(recovered[0].status, "completed");
-        assert_eq!(recovered[1].status, "failed");
-        assert_eq!(recovered[2].status, "cancelled");
+        assert_eq!(recovered[0].status, RecordStatus::Completed);
+        assert_eq!(recovered[1].status, RecordStatus::Failed);
+        assert_eq!(recovered[2].status, RecordStatus::Cancelled);
     }
 
     #[test]
@@ -791,7 +782,7 @@ mod tests {
 
         let recovered = StorageService::load_download_records(tmp.path())
             .expect("load should succeed");
-        assert_eq!(recovered[0].status, "completed");
+        assert_eq!(recovered[0].status, RecordStatus::Completed);
     }
 
     // ── 日期下界换算 + 游标推进：取自订阅自己的 last_successful_check_at ──
@@ -964,13 +955,13 @@ mod tests {
     ) -> bool {
         let seen_ids: std::collections::HashSet<String> = existing
             .iter()
-            .filter(|r| r.status != "failed")
+            .filter(|r| r.status != RecordStatus::Failed)
             .filter(|r| !r.video_id.is_empty())
             .map(|r| r.video_id.clone())
             .collect();
         let seen_urls: std::collections::HashSet<String> = existing
             .iter()
-            .filter(|r| r.status != "failed")
+            .filter(|r| r.status != RecordStatus::Failed)
             .map(|r| r.video_url.clone())
             .collect();
 

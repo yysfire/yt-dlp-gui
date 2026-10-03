@@ -107,8 +107,13 @@ export function statusPriority(status: UnifiedVideoStatus): number {
       return 6;
     case "failed":
       return 7;
-    default:
+    case "deleted":
       return 9;
+    default: {
+      // 新增状态时此处编译报错，强制登记排序优先级
+      const exhaustive: never = status;
+      return exhaustive;
+    }
   }
 }
 

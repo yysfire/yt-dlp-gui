@@ -106,6 +106,11 @@ export function resolveStatusVisual(
       return { Icon: CancelledIcon, color: "text.disabled" };
     case "retrying":
       return { Icon: RetryingIcon, color: "warning.main" };
+    default: {
+      // 新增状态时此处编译报错，强制登记图标与颜色
+      const exhaustive: never = status;
+      return exhaustive;
+    }
   }
 }
 

@@ -1,6 +1,85 @@
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
+
+/// 下载记录的状态。
+///
+/// 这是状态字符串的**唯一真相源**：业务逻辑一律匹配本枚举（编译器强制穷尽），
+/// 字符串只在序列化边界由 [`Self::as_str`] 产出。
+///
+/// [`Self::Unknown`] 承接无法识别的历史值 —— 旧 `download_records.json` 或人工编辑
+/// 出现未知状态时**不丢数据、不加载失败**，原样往返（序列化回原字符串）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordStatus {
+    Waiting,
+    Downloading,
+    Retrying,
+    Completed,
+    Failed,
+    Paused,
+    Cancelled,
+    Deleted,
+    /// 无法识别的状态，原样保留。
+    Unknown(String),
+}
+
+impl RecordStatus {
+    /// 序列化 / 展示用的字符串形式。
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Downloading => "downloading",
+            Self::Retrying => "retrying",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Paused => "paused",
+            Self::Cancelled => "cancelled",
+            Self::Deleted => "deleted",
+            Self::Unknown(s) => s,
+        }
+    }
+
+    /// 由字符串解析；无法识别时保留原值到 [`Self::Unknown`]。
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "waiting" => Self::Waiting,
+            "downloading" => Self::Downloading,
+            "retrying" => Self::Retrying,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "paused" => Self::Paused,
+            "cancelled" => Self::Cancelled,
+            "deleted" => Self::Deleted,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+
+    /// 去重时的保留优先级（越小越优先）。未知 / 无下载语义的状态排最后。
+    pub fn dedup_rank(&self) -> usize {
+        match self {
+            Self::Completed => 0,
+            Self::Downloading => 1,
+            Self::Retrying => 2,
+            Self::Failed => 3,
+            Self::Paused => 4,
+            Self::Cancelled => 5,
+            Self::Waiting | Self::Deleted | Self::Unknown(_) => 9,
+        }
+    }
+}
+
+impl Serialize for RecordStatus {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RecordStatus {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self::parse(&s))
+    }
+}
 
 /// Represents a single download record for a video.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,8 +96,8 @@ pub struct DownloadRecord {
     pub file_path: String,
     /// File size in bytes
     pub file_size: u64,
-    /// Download status: "downloading", "completed", "failed", "paused", "cancelled", "waiting", "deleted"
-    pub status: String,
+    /// 下载状态。见 [`RecordStatus`]。
+    pub status: RecordStatus,
     /// ISO 8601 timestamp of download
     pub downloaded_at: String,
     /// Platform-specific video ID used for deduplication
@@ -55,7 +134,7 @@ impl DownloadRecord {
             video_url,
             file_path: String::new(),
             file_size: 0,
-            status: "downloading".to_string(),
+            status: RecordStatus::Downloading,
             downloaded_at: Utc::now().to_rfc3339(),
             video_id,
             error_message: None,
@@ -92,7 +171,7 @@ mod tests {
         // Verify defaults
         assert_eq!(record.file_path, "", "file_path should default to empty string");
         assert_eq!(record.file_size, 0, "file_size should default to 0");
-        assert_eq!(record.status, "downloading", "status should default to 'downloading'");
+        assert_eq!(record.status, RecordStatus::Downloading, "status should default to 'downloading'");
 
         // Verify timestamp
         assert!(!record.downloaded_at.is_empty());
@@ -108,14 +187,14 @@ mod tests {
             "https://example.com/v".to_string(),
             "".to_string(),
         );
-        assert_eq!(record.status, "downloading");
+        assert_eq!(record.status, RecordStatus::Downloading);
 
         // Simulate completed
-        record.status = "completed".to_string();
+        record.status = RecordStatus::Completed;
         record.file_path = "/downloads/video.mp4".to_string();
         record.file_size = 123456789;
         record.downloaded_at = Utc::now().to_rfc3339();
-        assert_eq!(record.status, "completed");
+        assert_eq!(record.status, RecordStatus::Completed);
         assert_eq!(record.file_path, "/downloads/video.mp4");
         assert_eq!(record.file_size, 123456789);
 
@@ -126,8 +205,8 @@ mod tests {
             "https://example.com/f".to_string(),
             "".to_string(),
         );
-        record2.status = "failed".to_string();
-        assert_eq!(record2.status, "failed");
+        record2.status = RecordStatus::Failed;
+        assert_eq!(record2.status, RecordStatus::Failed);
         assert_eq!(record2.file_path, ""); // unchanged, download failed
         assert_eq!(record2.file_size, 0);
     }
@@ -141,7 +220,7 @@ mod tests {
             video_url: "https://example.com/video".to_string(),
             file_path: "/tmp/video.mp4".to_string(),
             file_size: 999_999,
-            status: "completed".to_string(),
+            status: RecordStatus::Completed,
             downloaded_at: "2025-05-28T12:00:00+00:00".to_string(),
             video_id: "dQw4w9WgXcQ".to_string(),
             error_message: None,
@@ -208,7 +287,7 @@ mod tests {
             "https://example.com/f".to_string(),
             "abc123".to_string(),
         );
-        record.status = "failed".to_string();
+        record.status = RecordStatus::Failed;
         record.error_message = Some("yt-dlp error: Network error".to_string());
 
         let json = serde_json::to_string(&record).expect("serialization should succeed");
@@ -237,11 +316,48 @@ mod tests {
             "abc".to_string(),
         );
 
-        record.status = "paused".to_string();
-        assert_eq!(record.status, "paused");
+        record.status = RecordStatus::Paused;
+        assert_eq!(record.status, RecordStatus::Paused);
 
-        record.status = "cancelled".to_string();
-        assert_eq!(record.status, "cancelled");
+        record.status = RecordStatus::Cancelled;
+        assert_eq!(record.status, RecordStatus::Cancelled);
+    }
+
+    #[test]
+    fn test_record_status_as_str_roundtrips_all_known_values() {
+        // as_str 产出的字符串与 parse 输入必须完全一致（序列化边界唯一真相源）
+        for s in [
+            "waiting",
+            "downloading",
+            "retrying",
+            "completed",
+            "failed",
+            "paused",
+            "cancelled",
+            "deleted",
+        ] {
+            assert_eq!(RecordStatus::parse(s).as_str(), s, "往返不一致: {}", s);
+        }
+    }
+
+    #[test]
+    fn test_record_status_unknown_value_is_preserved_losslessly() {
+        // 未知状态（人工编辑 / 未来版本写入）不得导致加载失败，且原样往返
+        let status = RecordStatus::parse("some-future-state");
+        assert_eq!(status, RecordStatus::Unknown("some-future-state".to_string()));
+        assert_eq!(status.as_str(), "some-future-state");
+
+        let json = r#"{"status":"some-future-state"}"#;
+        #[derive(Deserialize)]
+        struct Wrap {
+            status: RecordStatus,
+        }
+        let parsed: Wrap = serde_json::from_str(json).expect("未知状态也必须能反序列化");
+        assert_eq!(parsed.status, RecordStatus::Unknown("some-future-state".to_string()));
+        assert_eq!(
+            serde_json::to_value(&parsed.status).unwrap(),
+            serde_json::json!("some-future-state")
+        );
     }
 
     // ── Rust ↔ TS 契约基准（共享 fixture）──────────────────────────
@@ -269,7 +385,7 @@ mod tests {
             video_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_string(),
             file_path: "/home/user/Videos/yt-dlp/示例视频.mp4".to_string(),
             file_size: 123_456_789,
-            status: "completed".to_string(),
+            status: RecordStatus::Completed,
             downloaded_at: "2026-10-02T12:34:56.789+00:00".to_string(),
             error_message: None,
             quality: "1080p".to_string(),

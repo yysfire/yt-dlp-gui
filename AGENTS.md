@@ -110,7 +110,8 @@ commands/               # Tauri IPC 命令处理函数（37 个注册命令）
   file_manager.rs       # 打开所在文件夹、文件存在性检查、删除文件、同步文件状态
 
 services/               # 业务逻辑（多数无状态，通过参数接收路径/配置）
-  storage.rs            # JSON 持久化 + 写事务（见「持久化」一节）；deduplicate_vec 的 rank 表
+  storage.rs            # JSON 持久化 + 写事务（见「持久化」一节）；deduplicate_vec 去重
+                        #   （状态优先级见 models/download.rs 的 RecordStatus::dedup_rank）
   download_queue.rs     # 下载队列：并发控制、子进程生命周期、暂停/恢复/取消、**失败自动重试**（有状态）
                         #   并导出 notify_records_changed —— records-changed 的唯一 emit 入口
   ytdlp.rs              # yt-dlp 命令行封装（解析频道、检查视频、下载视频）
@@ -175,7 +176,7 @@ utils/
 
 **全局去重与归属**：一个 `video_id` ↔ 一条记录 ↔ **一个文件**。这是输出模板 `%(title)s.%(ext)s` 没有订阅判别符的**物理必然**。记录的 `subscription_id` 是**归属**（首次下载它的订阅）；其它订阅的列表把它呈现为「已在其它订阅下载」，**不提供重下/升级**。入队收口 `enqueue_record` 按 `(video_id, subscription_id)` **upsert 重置**（保留 `file_path`/`file_size`/`downloaded_at`），并有幂等守卫（记录状态 ∈ `{waiting, downloading, retrying}` 或队列/活动任务已有同 `record_id` 则不重复入队）。**所有记录回写一律按 `record_id` 精确定位**（旧的 `(video_url, subscription_id)` 过滤会误伤同键记录）。
 
-**`retrying` 状态**：失败但可重试且未达上限时，记录置 `retrying`、`DownloadTask.status` 为 `retrying`、`next_retry_at` 有值；前端 `statusPriority` 把它插在 `downloading` 之后。`deduplicate_vec` 的 rank 表也**必须**登记它（否则同 `video_id` 的重试记录会被旧的 `failed` 挤掉）。`recover_state` 在启动时把 `downloading` / `paused` / `retrying` 一并置 `failed` + `Application restarted`（不主动恢复重试）。
+**`retrying` 状态**：失败但可重试且未达上限时，记录置 `retrying`、`DownloadTask.status` 为 `retrying`、`next_retry_at` 有值；前端 `statusPriority` 把它插在 `downloading` 之后。**记录状态是 `RecordStatus` 无损枚举**（`models/download.rs`，`Unknown(String)` 兜底，序列化输出与 fixture 逐字符串一致）——业务逻辑一律匹配枚举（编译器强制穷尽），去重优先级也在枚举的 `dedup_rank()` 上；新增状态时编译器会强制登记，否则同 `video_id` 的重试记录会被旧的 `failed` 挤掉。`recover_state` 在启动时把 `downloading` / `paused` / `retrying` 一并置 `failed` + `Application restarted`（不主动恢复重试）。
 
 **失败归因与重试**（`utils/retry_policy.rs`，纯函数）：
 

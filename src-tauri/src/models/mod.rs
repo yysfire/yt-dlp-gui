@@ -6,7 +6,7 @@ pub mod health;
 pub mod video;
 
 pub use subscription::Subscription;
-pub use download::DownloadRecord;
+pub use download::{DownloadRecord, RecordStatus};
 pub use settings::{AppSettings, AppState};
 pub use import_export::*;
 pub use video::{ChannelInfo, VideoInfo, VideoListResult};

@@ -165,22 +165,9 @@ impl StorageService {
     /// Deduplicate a vec of DownloadRecords in memory (no disk I/O).
     /// Same priority rules as deduplicate_records().
     ///
-    /// rank 表里 **必须**登记 `retrying`：不登记会落入兜底 9（最低），当同一
-    /// `video_id` 有多条历史记录时，正在重试的那条会被 `failed` 挤掉，导致
-    /// 「重试中」的记录被丢弃、旧的失败记录复活。
+    /// 优先级定义在记录状态类型 `RecordStatus::dedup_rank` 上（单一真相源），
+    /// 新增状态时由编译器强制在该处登记，避免遗漏导致同 `video_id` 的记录被错误挤掉。
     pub fn deduplicate_vec(records: Vec<DownloadRecord>) -> Vec<DownloadRecord> {
-        let status_rank = |s: &str| -> usize {
-            match s {
-                "completed" => 0,
-                "downloading" => 1,
-                "retrying" => 2,
-                "failed" => 3,
-                "paused" => 4,
-                "cancelled" => 5,
-                _ => 9,
-            }
-        };
-
         let mut groups: HashMap<String, Vec<DownloadRecord>> =
             HashMap::new();
         let mut no_id_records: Vec<DownloadRecord> = Vec::new();
@@ -199,8 +186,8 @@ impl StorageService {
                 deduped.push(group.pop().unwrap());
             } else {
                 group.sort_by(|a, b| {
-                    let ra = status_rank(&a.status);
-                    let rb = status_rank(&b.status);
+                    let ra = a.status.dedup_rank();
+                    let rb = b.status.dedup_rank();
                     ra.cmp(&rb).then_with(|| b.downloaded_at.cmp(&a.downloaded_at))
                 });
                 deduped.push(group.remove(0));
@@ -350,6 +337,7 @@ impl StorageService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::RecordStatus;
     use tempfile::TempDir;
 
     fn setup_temp_dir() -> TempDir {
@@ -517,29 +505,29 @@ mod tests {
     fn test_deduplicate_vec_keeps_completed_over_failed() {
         let mut r1 = make_record("sub-1", "Video");
         r1.video_id = "vid-1".to_string();
-        r1.status = "failed".to_string();
+        r1.status = RecordStatus::Failed;
         r1.downloaded_at = "2026-06-01T12:00:00Z".to_string();
 
         let mut r2 = make_record("sub-1", "Video");
         r2.video_id = "vid-1".to_string();
-        r2.status = "completed".to_string();
+        r2.status = RecordStatus::Completed;
         r2.downloaded_at = "2026-06-01T11:00:00Z".to_string();
 
         let result = StorageService::deduplicate_vec(vec![r1.clone(), r2.clone()]);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].status, "completed");
+        assert_eq!(result[0].status, RecordStatus::Completed);
     }
 
     #[test]
     fn test_deduplicate_vec_same_status_keeps_latest() {
         let mut r1 = make_record("sub-1", "Video");
         r1.video_id = "vid-1".to_string();
-        r1.status = "failed".to_string();
+        r1.status = RecordStatus::Failed;
         r1.downloaded_at = "2026-06-01T12:00:00Z".to_string();
 
         let mut r2 = make_record("sub-1", "Video");
         r2.video_id = "vid-1".to_string();
-        r2.status = "failed".to_string();
+        r2.status = RecordStatus::Failed;
         r2.downloaded_at = "2026-06-01T13:00:00Z".to_string();
 
         let result = StorageService::deduplicate_vec(vec![r1.clone(), r2.clone()]);
@@ -554,33 +542,33 @@ mod tests {
         // 前端只会看到一个旧的失败态，重试进度彻底不可见。
         let mut retrying = make_record("sub-1", "Video");
         retrying.video_id = "vid-1".to_string();
-        retrying.status = "retrying".to_string();
+        retrying.status = RecordStatus::Retrying;
         retrying.downloaded_at = "2026-06-01T12:00:00Z".to_string();
 
         let mut failed = make_record("sub-1", "Video");
         failed.video_id = "vid-1".to_string();
-        failed.status = "failed".to_string();
+        failed.status = RecordStatus::Failed;
         failed.downloaded_at = "2026-06-01T13:00:00Z".to_string();
 
         // 故意让 failed 的时间更新：rank 优先于时间，retrying 仍应胜出
         let result = StorageService::deduplicate_vec(vec![failed, retrying]);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].status, "retrying");
+        assert_eq!(result[0].status, RecordStatus::Retrying);
     }
 
     #[test]
     fn test_deduplicate_vec_downloading_beats_retrying() {
         let mut retrying = make_record("sub-1", "Video");
         retrying.video_id = "vid-1".to_string();
-        retrying.status = "retrying".to_string();
+        retrying.status = RecordStatus::Retrying;
 
         let mut downloading = make_record("sub-1", "Video");
         downloading.video_id = "vid-1".to_string();
-        downloading.status = "downloading".to_string();
+        downloading.status = RecordStatus::Downloading;
 
         let result = StorageService::deduplicate_vec(vec![retrying, downloading]);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].status, "downloading");
+        assert_eq!(result[0].status, RecordStatus::Downloading);
     }
 
     #[test]
@@ -588,15 +576,15 @@ mod tests {
         // waiting / deleted / 未知值统一落兜底 9，低于 cancelled(5)
         let mut waiting = make_record("sub-1", "Video");
         waiting.video_id = "vid-1".to_string();
-        waiting.status = "waiting".to_string();
+        waiting.status = RecordStatus::Waiting;
 
         let mut cancelled = make_record("sub-1", "Video");
         cancelled.video_id = "vid-1".to_string();
-        cancelled.status = "cancelled".to_string();
+        cancelled.status = RecordStatus::Cancelled;
 
         let result = StorageService::deduplicate_vec(vec![waiting, cancelled]);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].status, "cancelled");
+        assert_eq!(result[0].status, RecordStatus::Cancelled);
     }
 
     #[test]

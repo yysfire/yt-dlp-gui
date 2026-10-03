@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tokio::sync::Semaphore;
 
-use crate::models::DownloadRecord;
+use crate::models::{DownloadRecord, RecordStatus};
 use crate::services::StorageService;
 use crate::utils::AppError;
 
@@ -59,7 +59,7 @@ pub async fn sync_completed_records(
     let records = StorageService::load_download_records(data_dir).unwrap_or_default();
     let file_paths: Vec<String> = records
         .iter()
-        .filter(|r| r.status == "completed" && !r.file_path.is_empty())
+        .filter(|r| r.status == RecordStatus::Completed && !r.file_path.is_empty())
         .map(|r| r.file_path.clone())
         .collect();
 
@@ -143,7 +143,7 @@ pub fn delete_file_and_update_record(
     StorageService::update_download_records(data_dir, |records| {
         match records.iter_mut().find(|r| r.id == record_id) {
             Some(record) => {
-                record.status = "deleted".to_string();
+                record.status = RecordStatus::Deleted;
                 Ok(record.clone())
             }
             None => Err(AppError::NotFound(format!("下载记录不存在: {}", record_id))),
@@ -195,17 +195,17 @@ mod tests {
             "https://example.com/v".to_string(),
             "vid-1".to_string(),
         );
-        record.status = "completed".to_string();
+        record.status = RecordStatus::Completed;
         record.file_path = file_path.to_string_lossy().to_string();
 
         StorageService::seed_download_records(&data_dir, &[record.clone()]).unwrap();
 
         let result = delete_file_and_update_record(&record.id, &data_dir).unwrap();
-        assert_eq!(result.status, "deleted");
+        assert_eq!(result.status, RecordStatus::Deleted);
         assert!(!file_path.exists());
 
         let records = StorageService::load_download_records(&data_dir).unwrap();
-        assert_eq!(records[0].status, "deleted");
+        assert_eq!(records[0].status, RecordStatus::Deleted);
     }
 
     #[test]
@@ -219,13 +219,13 @@ mod tests {
             "https://example.com/v".to_string(),
             "vid-2".to_string(),
         );
-        record.status = "completed".to_string();
+        record.status = RecordStatus::Completed;
         record.file_path = "/nonexistent/video.mp4".to_string();
 
         StorageService::seed_download_records(&data_dir, &[record.clone()]).unwrap();
 
         let result = delete_file_and_update_record(&record.id, &data_dir).unwrap();
-        assert_eq!(result.status, "deleted");
+        assert_eq!(result.status, RecordStatus::Deleted);
     }
 
     #[test]
