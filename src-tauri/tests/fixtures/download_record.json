@@ -1,0 +1,14 @@
+{
+  "id": "0f0a9c1e-6b0a-4a7c-9f1b-2d3e4f5a6b7c",
+  "subscription_id": "1a2b3c4d-5e6f-4a8b-9c0d-1e2f3a4b5c6d",
+  "video_id": "dQw4w9WgXcQ",
+  "video_title": "示例视频",
+  "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "file_path": "/home/user/Videos/yt-dlp/示例视频.mp4",
+  "file_size": 123456789,
+  "status": "completed",
+  "downloaded_at": "2026-10-02T12:34:56.789+00:00",
+  "quality": "1080p",
+  "retry_count": 2,
+  "last_retry_at": "2026-10-02T12:30:00+00:00"
+}

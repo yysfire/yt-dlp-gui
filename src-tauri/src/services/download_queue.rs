@@ -1,7 +1,8 @@
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use chrono::Utc;
 use serde::Serialize;
@@ -9,10 +10,11 @@ use tauri::{Emitter, AppHandle};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Semaphore;
 
-use crate::models::{DownloadRecord, Subscription};
+use crate::models::{AppSettings, DownloadRecord, RecordStatus, Subscription};
 use crate::services::{StorageService, YtDlpService};
 use crate::utils::AppError;
 use crate::utils::progress_parser;
+use crate::utils::retry_policy;
 
 // ── Windows process suspension (S-07) ────────────────────────────
 
@@ -100,6 +102,8 @@ pub enum TaskStatus {
     Completed,
     Failed,
     Cancelled,
+    /// 失败后处于退避等待（子进程已退出、等待下次重试）。前端据此显示「重试中」。
+    Retrying,
 }
 
 impl std::fmt::Display for TaskStatus {
@@ -111,6 +115,7 @@ impl std::fmt::Display for TaskStatus {
             TaskStatus::Completed => write!(f, "completed"),
             TaskStatus::Failed => write!(f, "failed"),
             TaskStatus::Cancelled => write!(f, "cancelled"),
+            TaskStatus::Retrying => write!(f, "retrying"),
         }
     }
 }
@@ -129,6 +134,11 @@ pub struct DownloadTask {
     pub error_message: Option<String>,
     pub created_at: String,
     pub completed_at: Option<String>,
+    /// 对应 `DownloadRecord.id`。完成 / 失败 / 状态回写**全部按它精确定位** ——
+    /// 旧的 `(video_url, subscription_id)` 过滤会匹配到所有同键记录。
+    pub record_id: String,
+    /// 退避期的下次重试时刻（ISO 8601），非退避期为 `None`。**不落库**。
+    pub next_retry_at: Option<String>,
 }
 
 /// Progress information for a running download.
@@ -171,14 +181,77 @@ pub struct DownloadContext {
     pub data_dir: PathBuf,
 }
 
+impl DownloadContext {
+    /// 从当前设置构造下载上下文。
+    ///
+    /// `proxy` / `cookie_file` 一律包成 `Some`（空串 = 未配置），由 yt-dlp 调用层
+    /// 按非空判断决定是否传参 —— 这段包装语义原先在三个命令里各写一遍，收敛到这里。
+    pub fn from_settings(settings: &AppSettings, data_dir: PathBuf) -> Self {
+        Self {
+            yt_dlp_path: settings.yt_dlp_path.clone(),
+            proxy: Some(settings.proxy_url.clone()),
+            cookie_file: Some(settings.cookie_file.clone()),
+            download_dir: PathBuf::from(&settings.download_dir),
+            data_dir,
+        }
+    }
+}
+
 /// Holds the child process handle and PID for an active download.
 struct ActiveTask {
     child: Option<tokio::process::Child>,
-    pid: u32,
+    /// 与 `child` **同步**：`Some` 当且仅当 `child` 存在。
+    ///
+    /// 退避期间 entry 继续存活但子进程早已退出，那个数字**可能已被系统复用给
+    /// 无关进程** —— 对陈旧 PID 发 SIGSTOP 会挂起用户毫不相干的进程。用类型让
+    /// 「没有 PID 却发信号」在编译期不可表示。
+    pid: Option<u32>,
     task: DownloadTask,
     /// T028: Last known download progress percentage (0.0–100.0).
     /// Used by adjust_concurrency to select which tasks to pause first.
     last_progress_percent: f32,
+    /// 打断退避等待（取消 / 暂停时唤醒）。
+    notify: Arc<tokio::sync::Notify>,
+}
+
+/// 等待子进程退出时的轮询间隔（毫秒）。
+///
+/// `child` 必须留在 entry 里，cancel 才能对它发信号；而 `Child::wait()` 需要
+/// `&mut Child`（无法在持锁等待的同时让 cancel 拿到锁）。故用短轮询 + `notify`
+/// 唤醒的组合：正常退出最多晚 [`WAIT_POLL_MS`] 被发现，取消则被 `notify` 立即唤醒。
+const WAIT_POLL_MS: u64 = 200;
+
+/// stderr 累积上限：只保留尾部 64 KiB，让内存有界。
+const STDERR_TAIL_LIMIT: usize = 64 * 1024;
+
+/// 等待进程退出的一次轮询结果。
+enum ProcessPoll {
+    Exited(std::process::ExitStatus),
+    Cancelled,
+    Running,
+}
+
+/// 退避等待的结局。
+enum BackoffOutcome {
+    /// 计满剩余时长，可以重试。
+    Elapsed,
+    /// entry 已被取消移除 —— 调用方必须直接退出且**不回写任何记录**。
+    Cancelled,
+}
+
+/// 记录的 upsert / 归属键匹配：`(video_id, subscription_id)`；`video_id` 为空时回退 `video_url`。
+fn record_matches_key(
+    r: &DownloadRecord,
+    subscription_id: &str,
+    video_id: &str,
+    video_url: &str,
+) -> bool {
+    r.subscription_id == subscription_id
+        && if video_id.is_empty() {
+            r.video_url == video_url
+        } else {
+            r.video_id == video_id
+        }
 }
 
 /// FIFO download queue with concurrency control and process lifecycle management.
@@ -202,37 +275,15 @@ impl DownloadQueue {
         }
     }
 
-    /// Enqueues a batch of new video download tasks.
-    pub fn enqueue_batch(
-        &self,
-        videos: Vec<(String, String, String)>,
-        subscription_id: String,
-        quality: String,
-    ) -> usize {
-        let mut queue = self.queue.lock().unwrap();
-        let count = videos.len();
-        for (video_id, video_title, video_url) in videos {
-            let task = DownloadTask {
-                id: uuid::Uuid::new_v4().to_string(),
-                video_id,
-                video_url,
-                video_title,
-                subscription_id: subscription_id.clone(),
-                quality: quality.clone(),
-                status: TaskStatus::Waiting,
-                progress: None,
-                error_message: None,
-                created_at: Utc::now().to_rfc3339(),
-                completed_at: None,
-            };
-            queue.push_back(task);
-        }
-        drop(queue);
-        self.emit_queue_changed();
-        count
-    }
-
-    /// Queues a single download task from a check result.
+    /// 统一入队收口：按 `(video_id, subscription_id)` **upsert 重置**记录并压入队列。
+    ///
+    /// 键里的 `subscription_id` 是**归属**：带它能防止「重试 B 的失败记录时误把 A 的
+    /// 完成记录重置掉」。全局去重下 B 根本走不到入队（`seen_ids` 挡掉），所以不影响
+    /// 全局唯一。
+    ///
+    /// 幂等守卫放在这一个收口：`queue` / `active_tasks` 已有同 `record_id` 的任务，
+    /// **或**记录状态 ∈ `{waiting, downloading, retrying}` → 不重复入队，直接返回当前记录。
+    /// 这样检查路径与命令路径（升级 / 重新下载）拿到的是**同一份**保证。
     pub fn enqueue_from_video(
         &self,
         sub: &Subscription,
@@ -241,38 +292,112 @@ impl DownloadQueue {
         video_id: String,
         quality: String,
         data_dir: &PathBuf,
-    ) -> Result<(), AppError> {
-        let record = DownloadRecord::new(
-            sub.id.clone(),
-            video_title.clone(),
-            video_url.clone(),
-            video_id.clone(),
-        );
+    ) -> Result<DownloadRecord, AppError> {
+        self.enqueue_record(
+            data_dir,
+            &sub.id,
+            &video_id,
+            &video_url,
+            &video_title,
+            &quality,
+        )
+    }
 
-        StorageService::update_download_records(data_dir, |all_records| {
-            all_records.push(record);
-            Ok(())
+    /// 入队收口的核心实现（见 [`Self::enqueue_from_video`]）。
+    pub(crate) fn enqueue_record(
+        &self,
+        data_dir: &Path,
+        subscription_id: &str,
+        video_id: &str,
+        video_url: &str,
+        video_title: &str,
+        quality: &str,
+    ) -> Result<DownloadRecord, AppError> {
+        let matches = |r: &DownloadRecord| {
+            record_matches_key(r, subscription_id, video_id, video_url)
+        };
+
+        // 阶段 1：只读定位现有记录，做幂等守卫（必须在重置之前判断状态）
+        let existing = StorageService::load_download_records(data_dir)?
+            .into_iter()
+            .find(|r| matches(r));
+
+        if let Some(existing) = existing {
+            let busy = matches!(
+                existing.status,
+                RecordStatus::Waiting | RecordStatus::Downloading | RecordStatus::Retrying
+            );
+            if busy || self.has_in_flight_task(&existing.id) {
+                return Ok(existing);
+            }
+        }
+
+        // 阶段 2：事务内 upsert 重置（命中）或新建（未命中）
+        let record = StorageService::update_download_records(data_dir, |all| {
+            if let Some(r) = all.iter_mut().find(|r| matches(r)) {
+                // 重置本次尝试相关字段；**保留** file_path / file_size（旧路径还要用于
+                // 回收）与 downloaded_at（完成时才更新）。
+                r.status = RecordStatus::Downloading;
+                r.error_message = None;
+                r.quality = quality.to_string();
+                r.retry_count = 0;
+                r.last_retry_at = None;
+                if !video_title.is_empty() {
+                    r.video_title = video_title.to_string();
+                }
+                Ok(r.clone())
+            } else {
+                let mut r = DownloadRecord::new(
+                    subscription_id.to_string(),
+                    video_title.to_string(),
+                    video_url.to_string(),
+                    video_id.to_string(),
+                );
+                r.quality = quality.to_string();
+                all.push(r.clone());
+                Ok(r)
+            }
         })?;
         self.notify_records_changed();
 
+        // 阶段 3：压入队列
         let mut queue = self.queue.lock().unwrap();
         queue.push_back(DownloadTask {
             id: uuid::Uuid::new_v4().to_string(),
-            video_id,
-            video_url,
-            video_title,
-            subscription_id: sub.id.clone(),
-            quality,
+            video_id: video_id.to_string(),
+            video_url: video_url.to_string(),
+            video_title: video_title.to_string(),
+            subscription_id: subscription_id.to_string(),
+            quality: quality.to_string(),
             status: TaskStatus::Waiting,
             progress: None,
             error_message: None,
             created_at: Utc::now().to_rfc3339(),
             completed_at: None,
+            record_id: record.id.clone(),
+            next_retry_at: None,
         });
         drop(queue);
         self.emit_queue_changed();
 
-        Ok(())
+        Ok(record)
+    }
+
+    /// 队列或活动任务里是否已有指向该记录的任务（幂等守卫用）。
+    ///
+    /// 加锁顺序固定为 `queue → active_tasks`；两把锁都只短暂持有且不嵌套。
+    fn has_in_flight_task(&self, record_id: &str) -> bool {
+        if record_id.is_empty() {
+            return false;
+        }
+        {
+            let queue = self.queue.lock().unwrap();
+            if queue.iter().any(|t| t.record_id == record_id) {
+                return true;
+            }
+        }
+        let active = self.active_tasks.lock().unwrap();
+        active.values().any(|e| e.task.record_id == record_id)
     }
 
     /// Starts processing the queue in a background task.
@@ -336,8 +461,15 @@ impl DownloadQueue {
         });
     }
 
-    /// Executes a download with process lifecycle control.
-    /// Reads stdout for progress, supports pause/resume via signals.
+    /// Executes a download with process lifecycle control and automatic retry.
+    ///
+    /// 骨架（前提 P11：循环接线无自动化测试，纯逻辑已抽到 `utils::retry_policy` 单测）：
+    /// - spawn → 并发读 stdout（进度）/ stderr（失败归因）→ **可取消地**等待进程退出；
+    /// - 成功 → 按 `record_id` 回写记录 → 旧文件回收（新旧路径不等时）；
+    /// - 失败 → 分类：可重试且未达上限 ⇒ 写 `retrying` 后进入退避并重新 spawn；
+    ///   不可重试 / 达上限 ⇒ 写 `failed` + 脱敏后的最后一条 `ERROR:` 行；
+    /// - 退避期间子进程已退出（`child=None` / `pid=None`），entry 继续存活并**占用并发名额**；
+    /// - 取消 ⇒ entry 被移除，本函数**不回写任何记录**（否则会把 `cancelled` 覆盖成 `failed`）。
     async fn execute_download_with_control(
         task: &DownloadTask,
         ctx: &DownloadContext,
@@ -347,6 +479,7 @@ impl DownloadQueue {
         max_concurrent: &Arc<AtomicU32>,
     ) {
         let task_id = task.id.clone();
+        let record_id = task.record_id.clone();
 
         // FR-012: Verify download path, fall back to default if inaccessible
         let effective_download_dir = {
@@ -367,50 +500,22 @@ impl DownloadQueue {
             }
         };
 
-        // Spawn the yt-dlp process
-        let spawned = match YtDlpService::download_video_spawn(
-            &ctx.yt_dlp_path,
-            &ctx.proxy,
-            &ctx.cookie_file,
-            &task.video_url,
-            &task.quality,
-            &effective_download_dir,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                log::error!("Failed to spawn yt-dlp for {}: {}", task.video_title, e);
-                return;
-            }
-        };
-
-        let mut child = spawned.child;
-        let stdout = match child.stdout.take() {
-            Some(s) => s,
-            None => return,
-        };
-
-        // Register the active task with PID
-        let pid = {
-            if let Some(id) = child.id() {
-                id
-            } else {
-                log::warn!("Could not get PID for yt-dlp process");
-                return;
-            }
-        };
+        // 注册 entry（退避期间 entry 存活而子进程不存在，故初始 child/pid 都是 None）
+        let notify = Arc::new(tokio::sync::Notify::new());
         {
             let mut active = active_tasks.lock().unwrap();
-            // 任务此刻真正开始执行，状态必须从入队时的 Waiting 推进到 Running。
-            // 前端 `deriveStatus` 只把 running 映射为「下载中」，而进度条只在「下载中」渲染；
-            // 状态停在 waiting 会让整段下载期间都没有进度条。
             let mut running_task = task.clone();
             running_task.status = TaskStatus::Running;
-            active.insert(task_id.clone(), ActiveTask {
-                child: Some(child),
-                pid,
-                task: running_task,
-                last_progress_percent: 0.0,
-            });
+            active.insert(
+                task_id.clone(),
+                ActiveTask {
+                    child: None,
+                    pid: None,
+                    task: running_task,
+                    last_progress_percent: 0.0,
+                    notify: Arc::clone(&notify),
+                },
+            );
         }
 
         // 通知前端「该任务已进入运行态」。`queue-changed` 是 AppShell 唯一重新拉取队列的
@@ -422,212 +527,436 @@ impl DownloadQueue {
             max_concurrent.load(Ordering::Relaxed),
         );
 
-        // Read progress from stdout
-        let reader = BufReader::new(stdout);
-        let mut lines = reader.lines();
-        let app_clone = app_handle.clone();
-        let active_clone = Arc::clone(active_tasks);
-        let active_progress = Arc::clone(active_tasks); // T028: separate clone for progress tracking
+        let mut attempts: u32 = 0; // 已重试次数
 
-        // Clone fields needed inside the spawned task
-        let task_url = task.video_url.clone();
-        let task_id_for_progress = task_id.clone();
-        let task_id_for_lookup = task_id.clone();
-
-        // Spawn progress reader in a separate task
-        let progress_handle = tokio::spawn(async move {
-            let mut file_path = String::new();
-
-            while let Ok(line) = lines.next_line().await {
-                let line = match line {
-                    Some(l) => l,
-                    None => break,
-                };
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
+        loop {
+            // ── spawn ─────────────────────────────────────────────
+            let spawned = match YtDlpService::download_video_spawn(
+                &ctx.yt_dlp_path,
+                &ctx.proxy,
+                &ctx.cookie_file,
+                &task.video_url,
+                &task.quality,
+                &effective_download_dir,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    // spawn 失败（路径不存在 / 无执行权限）：配置问题，**不可重试**。
+                    // 必须补写 failed —— 旧实现直接 return，记录会永久停在「下载中」。
+                    log::error!("Failed to spawn yt-dlp for {}: {}", task.video_title, e);
+                    // 脱敏与截断在 finalize_failed 内统一处理
+                    Self::finalize_failed(ctx, &record_id, &format!("无法启动 yt-dlp：{}", e));
+                    notify_records_changed(app_handle);
+                    return;
                 }
+            };
 
-                if let Some(event) = progress_parser::parse_progress_line(trimmed) {
-                    // Clone Strings for progress tracking (moved into progress_event below)
-                    let speed_str = event.speed.clone();
-                    let eta_str = event.eta.clone();
+            let mut child = spawned.child;
+            let pid = child.id();
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
 
-                    let progress_event = DownloadProgressEvent {
-                        task_id: task_id_for_progress.clone(),
-                        video_url: task_url.clone(),
-                        percent: event.percent,
-                        speed: event.speed,
-                        downloaded_bytes: event.downloaded_bytes,
-                        total_bytes: event.total_bytes,
-                        eta: event.eta,
-                    };
-                    let _ = app_clone.emit("download-progress", progress_event);
+            // 把 child 放回 entry：cancel 需要能对 `Some(child)` 调 `start_kill`
+            {
+                let mut active = active_tasks.lock().unwrap();
+                match active.get_mut(&task_id) {
+                    Some(entry) => {
+                        entry.child = Some(child);
+                        entry.pid = pid;
+                        entry.task.status = TaskStatus::Running;
+                        entry.task.next_retry_at = None;
+                        entry.task.error_message = None;
+                    }
+                    // 已取消：本函数不回写任何记录
+                    None => return,
+                }
+            }
+            emit_queue_state(
+                app_handle,
+                queue,
+                active_tasks,
+                max_concurrent.load(Ordering::Relaxed),
+            );
 
-                    // T028: Update progress on active task for concurrency adjustment
-                    {
-                        let mut active = active_progress.lock().unwrap();
-                        if let Some(entry) = active.get_mut(&task_id_for_progress) {
-                            entry.last_progress_percent = event.percent;
-                            entry.task.progress = Some(ProgressInfo {
+            // ── stdout：进度事件 + `--print after_move:filepath` 的最终路径 ──
+            let Some(stdout) = stdout else {
+                log::warn!("Could not read stdout of yt-dlp process");
+                let msg = "无法读取 yt-dlp 的输出流".to_string();
+                Self::finalize_failed(ctx, &record_id, &msg);
+                notify_records_changed(app_handle);
+                return;
+            };
+            let progress_handle = {
+                let mut lines = BufReader::new(stdout).lines();
+                let app_clone = app_handle.clone();
+                let active_progress = Arc::clone(active_tasks);
+                let task_url = task.video_url.clone();
+                let task_id_for_progress = task_id.clone();
+
+                tokio::spawn(async move {
+                    let mut file_path = String::new();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        if let Some(event) = progress_parser::parse_progress_line(trimmed) {
+                            let speed_str = event.speed.clone();
+                            let eta_str = event.eta.clone();
+                            let progress_event = DownloadProgressEvent {
+                                task_id: task_id_for_progress.clone(),
+                                video_url: task_url.clone(),
                                 percent: event.percent,
-                                speed: speed_str,
+                                speed: event.speed,
                                 downloaded_bytes: event.downloaded_bytes,
                                 total_bytes: event.total_bytes,
-                                eta: eta_str,
-                            });
+                                eta: event.eta,
+                            };
+                            let _ = app_clone.emit("download-progress", progress_event);
+
+                            // T028: Update progress on active task for concurrency adjustment
+                            let mut active = active_progress.lock().unwrap();
+                            if let Some(entry) = active.get_mut(&task_id_for_progress) {
+                                entry.last_progress_percent = event.percent;
+                                entry.task.progress = Some(ProgressInfo {
+                                    percent: event.percent,
+                                    speed: speed_str,
+                                    downloaded_bytes: event.downloaded_bytes,
+                                    total_bytes: event.total_bytes,
+                                    eta: eta_str,
+                                });
+                            }
+                        } else {
+                            file_path = trimmed.to_string();
                         }
                     }
-                } else {
-                    file_path = trimmed.to_string();
+                    file_path
+                })
+            };
+
+            // ── stderr：并发读取（只保留尾部 64 KiB，内存有界）──
+            //
+            // stderr 是 `piped()` 却不读会让管道写满（约 64 KiB），yt-dlp 会**阻塞在写
+            // stderr 上**，表现为「下载卡死」。必须与 stdout 并发读。
+            let stderr_handle = match stderr {
+                Some(stderr) => {
+                    let mut lines = BufReader::new(stderr).lines();
+                    tokio::spawn(async move {
+                        let mut buf = String::new();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            buf.push_str(&line);
+                            buf.push('\n');
+                            if buf.len() > STDERR_TAIL_LIMIT {
+                                let excess = buf.len() - STDERR_TAIL_LIMIT;
+                                let cut = (0..=excess)
+                                    .rev()
+                                    .find(|&i| buf.is_char_boundary(i))
+                                    .unwrap_or(0);
+                                buf.drain(..cut);
+                            }
+                        }
+                        buf
+                    })
                 }
-            }
+                None => tokio::spawn(async { String::new() }),
+            };
 
-            file_path
-        });
+            // ── 等待进程退出（可取消；child 留在 entry 内，cancel 才能 kill）──
+            let exit_status = loop {
+                let poll = {
+                    let mut active = active_tasks.lock().unwrap();
+                    match active.get_mut(&task_id) {
+                        // entry 被 cancel 移除 ⇒ 立即退出且不回写
+                        None => ProcessPoll::Cancelled,
+                        Some(entry) => match entry.child.as_mut() {
+                            None => ProcessPoll::Cancelled,
+                            Some(child) => match child.try_wait() {
+                                Ok(Some(status)) => ProcessPoll::Exited(status),
+                                _ => ProcessPoll::Running,
+                            },
+                        },
+                    }
+                };
+                match poll {
+                    ProcessPoll::Exited(status) => break status,
+                    ProcessPoll::Cancelled => return,
+                    ProcessPoll::Running => {}
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(WAIT_POLL_MS)) => {}
+                    _ = notify.notified() => {}
+                }
+            };
 
-        // Await the child process — take child out without removing the ActiveTask,
-        // so get_tasks() and get_state() can still see the active task during download
-        let child_to_wait = {
-            let mut active = active_clone.lock().unwrap();
-            active.get_mut(&task_id_for_lookup).and_then(|entry| entry.child.take())
-        };
+            let stderr_text = stderr_handle.await.unwrap_or_default();
+            let file_path = progress_handle.await.unwrap_or_default();
 
-        let status = match child_to_wait {
-            Some(mut child) => Some(child.wait().await),
-            None => {
-                // Task was cancelled, child already removed
+            if exit_status.success() {
+                // 入口仍在才回写；否则说明已被取消
+                if !Self::task_entry_exists(active_tasks, &task_id) {
+                    return;
+                }
+                Self::finalize_success(ctx, &record_id, &file_path);
+                notify_records_changed(app_handle);
                 return;
             }
+
+            log::warn!(
+                "yt-dlp exited with code {:?} for {}",
+                exit_status.code(),
+                task.video_title
+            );
+            let decision = retry_policy::classify_failure(&stderr_text, exit_status.code());
+
+            if retry_policy::should_retry(&decision, attempts) {
+                attempts += 1;
+                let remaining = retry_policy::BACKOFF_SECS[(attempts - 1) as usize];
+                let next_retry_at = (Utc::now()
+                    + chrono::Duration::seconds(remaining as i64))
+                .to_rfc3339();
+
+                // 进入退避前先确认 entry 仍在（取消后不回写）
+                let still_present = {
+                    let mut active = active_tasks.lock().unwrap();
+                    match active.get_mut(&task_id) {
+                        Some(entry) => {
+                            // 安全要求：退避期间子进程已退出，pid 必须置空，否则
+                            // 陈旧的 PID 可能已被系统复用，误发信号会挂起无关进程。
+                            entry.child = None;
+                            entry.pid = None;
+                            entry.task.status = TaskStatus::Retrying;
+                            entry.task.next_retry_at = Some(next_retry_at.clone());
+                            true
+                        }
+                        None => false,
+                    }
+                };
+                if !still_present {
+                    return;
+                }
+
+                Self::finalize_retrying(ctx, &record_id, attempts, &next_retry_at);
+                notify_records_changed(app_handle);
+                emit_queue_state(
+                    app_handle,
+                    queue,
+                    active_tasks,
+                    max_concurrent.load(Ordering::Relaxed),
+                );
+
+                match Self::backoff_wait(&task_id, active_tasks, &notify, remaining).await {
+                    BackoffOutcome::Elapsed => continue,
+                    BackoffOutcome::Cancelled => return,
+                }
+            }
+
+            // 不可重试 / 达上限：写真实失败原因（finalize_failed 内脱敏 + 截断）
+            let summary = retry_policy::summarize_failure(&stderr_text);
+            if !Self::task_entry_exists(active_tasks, &task_id) {
+                return;
+            }
+            Self::finalize_failed(ctx, &record_id, &summary);
+            notify_records_changed(app_handle);
+            return;
+        }
+    }
+
+    /// entry 是否仍存在于活动任务表（cancel 会移除它）。
+    fn task_entry_exists(
+        active_tasks: &Arc<Mutex<HashMap<String, ActiveTask>>>,
+        task_id: &str,
+    ) -> bool {
+        active_tasks.lock().unwrap().contains_key(task_id)
+    }
+
+    /// 按 `record_id` 精确定位并就地修改一条下载记录（事务）。
+    ///
+    /// 返回闭包的返回值；记录不存在时返回 `None`（闭包不执行）。这是所有
+    /// 「按 id 回写记录」的**唯一形状** —— 原先 finalize_* / update_record_status
+    /// 各自重复了「update_download_records + find + 守卫」。
+    ///
+    /// 注意：`f` 在全局写锁内执行，**禁止**在其中做文件 I/O、获取其它应用级锁
+    /// 或再调 `update_*`。
+    fn update_record_by_id<T>(
+        data_dir: &Path,
+        record_id: &str,
+        f: impl FnOnce(&mut DownloadRecord) -> T,
+    ) -> Option<T> {
+        StorageService::update_download_records(data_dir, |records| {
+            Ok(records.iter_mut().find(|r| r.id == record_id).map(f))
+        })
+        .ok()
+        .flatten()
+    }
+
+    /// 成功完成：按 `record_id` 回写新路径与状态，并在**新路径落库之后**回收旧文件。
+    ///
+    /// `downloaded_at` **只在这里**写；`retry_count` 保留（成功不归零）；`error_message` 清空。
+    /// 已取消的记录不覆盖。
+    fn finalize_success(ctx: &DownloadContext, record_id: &str, file_path: &str) {
+        // 文件大小在事务**外**算好：事务闭包持全局写锁，AGENTS.md 禁止在其中做文件 I/O。
+        let new_size = if file_path.is_empty() {
+            None
+        } else {
+            Some(std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0))
         };
 
-        let file_path = match progress_handle.await {
-            Ok(fp) => fp,
-            Err(_) => String::new(),
-        };
+        let old_path = Self::update_record_by_id(&ctx.data_dir, record_id, |existing| {
+            if existing.status == RecordStatus::Cancelled {
+                return None;
+            }
+            let old = existing.file_path.clone();
+            if let Some(size) = new_size {
+                existing.file_path = file_path.to_string();
+                existing.file_size = size;
+            }
+            existing.status = RecordStatus::Completed;
+            existing.error_message = None;
+            existing.downloaded_at = Utc::now().to_rfc3339();
+            Some(old)
+        })
+        .flatten();
 
-        match status {
-            Some(Ok(s)) if s.success() => {
-                // Update file info in DownloadRecord
-                if !file_path.is_empty() {
-                    // 只读定位目标记录（不加锁），文件大小在锁外算好
-                    let record_id = StorageService::load_download_records(&ctx.data_dir)
-                        .unwrap_or_default()
-                        .iter()
-                        .filter(|r| r.video_url == task.video_url
-                            && r.subscription_id == task.subscription_id)
-                        .last()
-                        .map(|r| r.id.clone());
+        // 顺序不可反：先落库新路径、再回收旧文件。反过来若「回收成功但落库失败」，
+        // 会留下一个记录和磁盘都没有的空洞；当前顺序最坏只留一个无害的孤儿文件。
+        if let Some(old) = old_path {
+            if !old.is_empty() && !file_path.is_empty() && old != file_path {
+                let old_path = Path::new(&old);
+                if old_path.exists() {
+                    crate::services::file_manager::delete_file_to_trash(old_path);
+                }
+            }
+        }
+    }
 
-                    if let Some(record_id) = record_id {
-                        let file_size = std::fs::metadata(&file_path)
-                            .map(|m| m.len())
-                            .unwrap_or(0);
-                        let _ = StorageService::update_download_records(&ctx.data_dir, |records| {
-                            if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
-                                existing.file_path = file_path;
-                                existing.file_size = file_size;
-                                existing.status = "completed".to_string();
-                            }
-                            Ok(())
-                        });
+    /// 进入退避：写 `retrying` + `retry_count` + `last_retry_at`。已取消的记录不覆盖。
+    fn finalize_retrying(
+        ctx: &DownloadContext,
+        record_id: &str,
+        retry_count: u32,
+        last_retry_at: &str,
+    ) {
+        Self::update_record_by_id(&ctx.data_dir, record_id, |existing| {
+            if existing.status != RecordStatus::Cancelled {
+                existing.status = RecordStatus::Retrying;
+                existing.retry_count = retry_count;
+                existing.last_retry_at = Some(last_retry_at.to_string());
+            }
+        });
+    }
+
+    /// 判失败：写 `failed` + 脱敏原因。已取消的记录不覆盖（取消优先于失败）。
+    ///
+    /// **脱敏在这里做**（而不是只在调用方）：`error_message` 来自真实 stderr，而
+    /// `proxy_url` 可能含明文口令 —— 把剥离放在写入函数内，任何调用点都无法绕过。
+    fn finalize_failed(ctx: &DownloadContext, record_id: &str, message: &str) {
+        let message = retry_policy::sanitize_error_message(message);
+        Self::update_record_by_id(&ctx.data_dir, record_id, |existing| {
+            if existing.status != RecordStatus::Cancelled {
+                existing.status = RecordStatus::Failed;
+                existing.error_message = Some(message.clone());
+            }
+        });
+    }
+
+    /// 退避等待：持**剩余时长**（而非绝对 deadline），暂停冻结 / 恢复续算天然正确。
+    ///
+    /// 取消时 entry 被移除 → 唤醒后立即返回 [`BackoffOutcome::Cancelled`]，
+    /// 调用方**不得**回写任何记录。
+    async fn backoff_wait(
+        task_id: &str,
+        active_tasks: &Arc<Mutex<HashMap<String, ActiveTask>>>,
+        notify: &Arc<tokio::sync::Notify>,
+        mut remaining: u64,
+    ) -> BackoffOutcome {
+        loop {
+            let phase = {
+                let active = active_tasks.lock().unwrap();
+                match active.get(task_id) {
+                    None => return BackoffOutcome::Cancelled,
+                    Some(entry) => {
+                        retry_policy::phase_of(entry.child.is_some(), &entry.task.status.to_string())
                     }
                 }
+            };
 
-                // 计数不再在写端维护：前端的「已下载」由下载记录派生
-                // （口径 = status == "completed" 的条数），故此处只需落状态并通知刷新。
-                notify_records_changed(app_handle);
+            if phase == retry_policy::Phase::Paused {
+                // 冻结：等恢复（或取消）的通知
+                notify.notified().await;
+                continue;
             }
-            _ => {
-                log::error!("yt-dlp process failed for {}", task.video_title);
-                // Update record with error — 同样先只读定位，再单次事务写入
-                let record_id = StorageService::load_download_records(&ctx.data_dir)
-                    .unwrap_or_default()
-                    .iter()
-                    .filter(|r| r.video_url == task.video_url
-                        && r.subscription_id == task.subscription_id)
-                    .last()
-                    .map(|r| r.id.clone());
 
-                if let Some(record_id) = record_id {
-                    // FR-011: distinguish proxy failure from other errors
-                    let has_proxy = ctx.proxy.as_ref()
-                        .map(|p| !p.is_empty())
-                        .unwrap_or(false);
-                    let error_message = if has_proxy {
-                        "代理连接失败".to_string()
-                    } else {
-                        "yt-dlp process exited with error".to_string()
-                    };
+            if remaining == 0 {
+                return BackoffOutcome::Elapsed;
+            }
 
-                    let _ = StorageService::update_download_records(&ctx.data_dir, |records| {
-                        if let Some(existing) = records.iter_mut().find(|r| r.id == record_id) {
-                            if existing.status != "cancelled" {
-                                existing.status = "failed".to_string();
-                                existing.error_message = Some(error_message);
-                            }
-                        }
-                        Ok(())
-                    });
+            let started = std::time::Instant::now();
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(remaining)) => {
+                    return BackoffOutcome::Elapsed;
                 }
-
-                notify_records_changed(app_handle);
+                _ = notify.notified() => {
+                    // 被唤醒（暂停 / 恢复 / 取消）：按相位扣减已过时间后重新判定
+                    let elapsed = started.elapsed().as_secs();
+                    remaining = retry_policy::remaining_after(phase, remaining, elapsed);
+                }
             }
         }
     }
 
     /// Pauses a running download by sending SIGSTOP (Unix) or SuspendThread (Windows).
+    ///
+    /// 退避中的任务（`child=None`）没有进程可停：只把状态置 `Paused` 并 `notify`
+    /// 唤醒退避循环去冻结计时。**发信号只在 `Some(pid)` 分支内**（安全要求）。
     pub fn pause(&self, task_id: &str, data_dir: &PathBuf) -> Result<(), AppError> {
         // Try to pause an active task — must release lock before calling emit_queue_changed
-        let paused_info = {
+        let paused_record_id = {
             let mut active = self.active_tasks.lock().unwrap();
             if let Some(entry) = active.get_mut(task_id) {
-                let pid = entry.pid;
+                if let Some(pid) = entry.pid {
+                    #[cfg(unix)]
+                    {
+                        unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
+                    }
 
-                #[cfg(unix)]
-                {
-                    unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
+                    #[cfg(windows)]
+                    {
+                        windows_process::suspend_process(pid);
+                    }
                 }
-
-                #[cfg(windows)]
-                {
-                    windows_process::suspend_process(pid);
-                }
-
                 entry.task.status = TaskStatus::Paused;
+                // 唤醒退避循环（若在退避中则冻结倒计时）
+                entry.notify.notify_one();
                 log::info!("Paused download task {}", task_id);
-                Some((entry.task.video_url.clone(), entry.task.subscription_id.clone()))
+                Some(entry.task.record_id.clone())
             } else {
                 None
             }
             // active lock guard dropped here — safe to call emit_queue_changed
         };
 
-        if let Some((video_url, subscription_id)) = paused_info {
-            self.update_record_status(data_dir, &video_url, &subscription_id, "paused", None);
+        if let Some(record_id) = paused_record_id {
+            self.update_record_status(data_dir, &record_id, RecordStatus::Paused, None);
             self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
 
         // Check waiting queue
-        let waiting_paused = {
+        let waiting_record_id = {
             let mut queue = self.queue.lock().unwrap();
-            if let Some(pos) = queue.iter().position(|t| t.id == task_id) {
-                if let Some(task) = queue.get_mut(pos) {
+            queue
+                .iter_mut()
+                .find(|t| t.id == task_id)
+                .map(|task| {
                     task.status = TaskStatus::Paused;
-                    Some((task.video_url.clone(), task.subscription_id.clone()))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+                    task.record_id.clone()
+                })
             // queue lock guard dropped here
         };
 
-        if let Some((video_url, subscription_id)) = waiting_paused {
-            self.update_record_status(data_dir, &video_url, &subscription_id, "paused", None);
+        if let Some(record_id) = waiting_record_id {
+            self.update_record_status(data_dir, &record_id, RecordStatus::Paused, None);
             self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
@@ -637,57 +966,68 @@ impl DownloadQueue {
     }
 
     /// Resumes a paused download by sending SIGCONT (Unix) or ResumeThread (Windows).
+    ///
+    /// 退避中恢复：状态回到 `Retrying`，退避循环用**剩余时长**续算。
     pub fn resume(&self, task_id: &str, data_dir: &PathBuf) -> Result<(), AppError> {
         // Try to resume an active task — must release lock before calling emit_queue_changed
-        let resumed_info = {
+        let resumed = {
             let mut active = self.active_tasks.lock().unwrap();
             if let Some(entry) = active.get_mut(task_id) {
-                let pid = entry.pid;
+                if let Some(pid) = entry.pid {
+                    #[cfg(unix)]
+                    {
+                        unsafe { libc::kill(pid as i32, libc::SIGCONT); }
+                    }
 
-                #[cfg(unix)]
-                {
-                    unsafe { libc::kill(pid as i32, libc::SIGCONT); }
+                    #[cfg(windows)]
+                    {
+                        windows_process::resume_process(pid);
+                    }
                 }
-
-                #[cfg(windows)]
-                {
-                    windows_process::resume_process(pid);
-                }
-
-                entry.task.status = TaskStatus::Running;
+                // child 不存在 ⇒ 处于退避等待，恢复后回到 Retrying
+                let backing_off = entry.child.is_none();
+                entry.task.status = if backing_off {
+                    TaskStatus::Retrying
+                } else {
+                    TaskStatus::Running
+                };
+                // 唤醒退避循环继续计时
+                entry.notify.notify_one();
                 log::info!("Resumed download task {}", task_id);
-                Some((entry.task.video_url.clone(), entry.task.subscription_id.clone()))
+                Some((entry.task.record_id.clone(), backing_off))
             } else {
                 None
             }
             // active lock guard dropped here — safe to call emit_queue_changed
         };
 
-        if let Some((video_url, subscription_id)) = resumed_info {
-            self.update_record_status(data_dir, &video_url, &subscription_id, "downloading", None);
+        if let Some((record_id, backing_off)) = resumed {
+            let status = if backing_off {
+                RecordStatus::Retrying
+            } else {
+                RecordStatus::Downloading
+            };
+            self.update_record_status(data_dir, &record_id, status, None);
             self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
         }
 
         // Check waiting queue for paused tasks
-        let waiting_resumed = {
+        let waiting_record_id = {
             let mut queue = self.queue.lock().unwrap();
-            if let Some(pos) = queue.iter().position(|t| t.id == task_id && t.status == TaskStatus::Paused) {
-                if let Some(task) = queue.get_mut(pos) {
+            queue
+                .iter_mut()
+                .find(|t| t.id == task_id && t.status == TaskStatus::Paused)
+                .map(|task| {
                     task.status = TaskStatus::Waiting;
-                    Some((task.video_url.clone(), task.subscription_id.clone()))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+                    task.record_id.clone()
+                })
             // queue lock guard dropped here
         };
 
-        if let Some((video_url, subscription_id)) = waiting_resumed {
-            self.update_record_status(data_dir, &video_url, &subscription_id, "downloading", None);
+        if let Some(record_id) = waiting_record_id {
+            self.update_record_status(data_dir, &record_id, RecordStatus::Downloading, None);
             self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
@@ -698,18 +1038,24 @@ impl DownloadQueue {
 
     /// Pauses a running download identified by video_url.
     pub fn pause_by_url(&self, video_url: &str, data_dir: &PathBuf) -> Result<(), AppError> {
-        let paused_info = {
+        let paused_record_id = {
             let mut active = self.active_tasks.lock().unwrap();
             let mut found = None;
-            for (_task_id, entry) in active.iter_mut() {
+            for entry in active.values_mut() {
                 if entry.task.video_url == video_url {
-                    let pid = entry.pid;
-                    #[cfg(unix)]
-                    {
-                        unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
+                    if let Some(pid) = entry.pid {
+                        #[cfg(unix)]
+                        {
+                            unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
+                        }
+                        #[cfg(windows)]
+                        {
+                            windows_process::suspend_process(pid);
+                        }
                     }
                     entry.task.status = TaskStatus::Paused;
-                    found = Some((entry.task.video_url.clone(), entry.task.subscription_id.clone()));
+                    entry.notify.notify_one();
+                    found = Some(entry.task.record_id.clone());
                     break;
                 }
             }
@@ -717,33 +1063,33 @@ impl DownloadQueue {
             // lock guard dropped here
         };
 
-        match paused_info {
-            Some((url, sub_id)) => {
+        match paused_record_id {
+            Some(record_id) => {
                 log::info!("Paused download by url {}", video_url);
-                self.update_record_status(data_dir, &url, &sub_id, "paused", None);
+                self.update_record_status(data_dir, &record_id, RecordStatus::Paused, None);
                 self.notify_records_changed();
                 self.emit_queue_changed();
                 Ok(())
             }
             None => {
                 // Fallback: check the waiting queue
-                let waiting_paused = {
+                let waiting_record_id = {
                     let mut queue = self.queue.lock().unwrap();
                     let mut found = None;
                     for task in queue.iter_mut() {
                         if task.video_url == video_url {
                             task.status = TaskStatus::Paused;
-                            found = Some((task.video_url.clone(), task.subscription_id.clone()));
+                            found = Some(task.record_id.clone());
                             break;
                         }
                     }
                     found
                     // queue lock guard dropped here
                 };
-                match waiting_paused {
-                    Some((url, sub_id)) => {
+                match waiting_record_id {
+                    Some(record_id) => {
                         log::info!("Paused waiting download by url {}", video_url);
-                        self.update_record_status(data_dir, &url, &sub_id, "paused", None);
+                        self.update_record_status(data_dir, &record_id, RecordStatus::Paused, None);
                         self.notify_records_changed();
                         self.emit_queue_changed();
                         Ok(())
@@ -768,19 +1114,19 @@ impl DownloadQueue {
         }
 
         // Fallback: search the waiting queue
-        let waiting_task = {
+        let waiting_record_id = {
             let mut queue = self.queue.lock().unwrap();
             if let Some(pos) = queue.iter().position(|t| t.video_url == video_url) {
                 let task = queue.remove(pos).unwrap();
-                Some((task.video_url, task.subscription_id))
+                Some(task.record_id)
             } else {
                 None
             }
             // queue lock guard dropped here
         };
 
-        if let Some((url, sub_id)) = waiting_task {
-            self.update_record_status(&ctx.data_dir, &url, &sub_id, "cancelled", Some("Cancelled by user".to_string()));
+        if let Some(record_id) = waiting_record_id {
+            self.update_record_status(&ctx.data_dir, &record_id, RecordStatus::Cancelled, Some("Cancelled by user".to_string()));
             self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
@@ -791,6 +1137,9 @@ impl DownloadQueue {
 
     /// Cancels a download task: kills process if running, removes from queue if waiting,
     /// cleans up partial files, and marks DownloadRecord as cancelled.
+    ///
+    /// 退避中取消：entry 里没有子进程，`notify` 唤醒退避循环 → 循环发现 entry 已移除
+    /// 即退出且**不回写任何记录**（否则会把 `cancelled` 覆盖成 `failed`）。
     pub fn cancel(&self, task_id: &str, ctx: &DownloadContext) -> Result<(), AppError> {
         // Try to cancel an active (running/paused) task first.
         // Must drop the lock guard before calling emit_queue_changed.
@@ -801,25 +1150,25 @@ impl DownloadQueue {
         };
 
         if let Some(mut entry) = removed_entry {
-            // Kill the child process if still running
+            // Kill the child process if still running (退避期间 child=None，无需 kill)
             if let Some(child) = entry.child.as_mut() {
                 let _ = child.start_kill();
+                log::info!("Killed download task {}", task_id);
+            } else {
+                log::info!("Cancelled backing-off download task {}", task_id);
             }
-            log::info!("Killed download task {} (pid {})", task_id, entry.pid);
+            // 打断退避等待：循环醒来发现 entry 已移除即退出
+            entry.notify.notify_one();
 
             // Clean up partial files
             self.cleanup_partial_files(&entry.task.video_title, &ctx.download_dir);
 
-            // Mark matching records as cancelled
+            // Mark the record as cancelled —— 按 record_id 精确定位，且**不改写
+            // downloaded_at**（只有真正成功完成时才写）
             let _ = StorageService::update_download_records(&ctx.data_dir, |records| {
-                for r in records.iter_mut() {
-                    if r.video_url == entry.task.video_url
-                        && r.subscription_id == entry.task.subscription_id
-                    {
-                        r.status = "cancelled".to_string();
-                        r.error_message = Some("Cancelled by user".to_string());
-                        r.downloaded_at = Utc::now().to_rfc3339();
-                    }
+                if let Some(r) = records.iter_mut().find(|r| r.id == entry.task.record_id) {
+                    r.status = RecordStatus::Cancelled;
+                    r.error_message = Some("Cancelled by user".to_string());
                 }
                 Ok(())
             });
@@ -841,7 +1190,7 @@ impl DownloadQueue {
         };
 
         if let Some(task) = cancelled_task {
-            self.update_record_status(&ctx.data_dir, &task.video_url, &task.subscription_id, "cancelled", Some("Cancelled by user".to_string()));
+            self.update_record_status(&ctx.data_dir, &task.record_id, RecordStatus::Cancelled, Some("Cancelled by user".to_string()));
             self.notify_records_changed();
             self.emit_queue_changed();
             return Ok(());
@@ -868,17 +1217,19 @@ impl DownloadQueue {
         }
     }
 
-    /// Updates a DownloadRecord's status and error message.
-    fn update_record_status(&self, data_dir: &PathBuf, video_url: &str, subscription_id: &str, status: &str, error_message: Option<String>) {
-        let _ = StorageService::update_download_records(data_dir, |records| {
-            for r in records.iter_mut() {
-                if r.video_url == video_url && r.subscription_id == subscription_id {
-                    r.status = status.to_string();
-                    r.error_message = error_message.clone();
-                    r.downloaded_at = Utc::now().to_rfc3339();
-                }
-            }
-            Ok(())
+    /// Updates a DownloadRecord's status and error message, located by `record_id`.
+    ///
+    /// **不写 `downloaded_at`**：该字段只在真正成功完成时更新（暂停 / 取消 / 重试都不改）。
+    fn update_record_status(
+        &self,
+        data_dir: &PathBuf,
+        record_id: &str,
+        status: RecordStatus,
+        error_message: Option<String>,
+    ) {
+        Self::update_record_by_id(data_dir, record_id, |r| {
+            r.status = status;
+            r.error_message = error_message;
         });
     }
 
@@ -909,11 +1260,14 @@ impl DownloadQueue {
         if new_max < old {
             let excess = (old - new_max) as usize;
 
-            // FR-010: Pause active tasks with least progress first
+            // FR-010: Pause active tasks with least progress first.
+            // **排除退避中的 entry**（`child.is_none()`）：它们没有进程可暂停，
+            // 且退避期已占用并发名额，不应作为缩容的牺牲品。
             let task_ids_to_pause = {
                 let active = self.active_tasks.lock().unwrap();
                 let mut entries: Vec<(String, f32)> = active
                     .iter()
+                    .filter(|(_, entry)| entry.child.is_some())
                     .map(|(id, entry)| (id.clone(), entry.last_progress_percent))
                     .collect();
                 // Sort by progress ascending (least progress first)
@@ -932,15 +1286,16 @@ impl DownloadQueue {
             for task_id in &task_ids_to_pause {
                 let mut active = self.active_tasks.lock().unwrap();
                 if let Some(entry) = active.get_mut(task_id) {
-                    let pid = entry.pid;
-
-                    #[cfg(unix)]
-                    {
-                        unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
-                    }
-                    #[cfg(windows)]
-                    {
-                        windows_process::suspend_process(pid);
+                    // 安全要求：发信号只在 `Some(pid)` 分支内
+                    if let Some(pid) = entry.pid {
+                        #[cfg(unix)]
+                        {
+                            unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
+                        }
+                        #[cfg(windows)]
+                        {
+                            windows_process::suspend_process(pid);
+                        }
                     }
 
                     entry.task.status = TaskStatus::Paused;
@@ -1035,6 +1390,7 @@ mod tests {
         assert_eq!(TaskStatus::Completed.to_string(), "completed");
         assert_eq!(TaskStatus::Failed.to_string(), "failed");
         assert_eq!(TaskStatus::Cancelled.to_string(), "cancelled");
+        assert_eq!(TaskStatus::Retrying.to_string(), "retrying");
     }
 
     #[test]
@@ -1046,6 +1402,11 @@ mod tests {
         let status = TaskStatus::Completed;
         let json = serde_json::to_string(&status).expect("should serialize");
         assert_eq!(json, "\"completed\"");
+
+        // 前端 downloadTask.status 联合类型含 "retrying"
+        let status = TaskStatus::Retrying;
+        let json = serde_json::to_string(&status).expect("should serialize");
+        assert_eq!(json, "\"retrying\"");
     }
 
     #[test]
@@ -1062,6 +1423,8 @@ mod tests {
             error_message: None,
             created_at: "2025-05-31T00:00:00Z".to_string(),
             completed_at: None,
+            record_id: "rec-1".to_string(),
+            next_retry_at: None,
         };
 
         let json = serde_json::to_string(&task).expect("should serialize");
@@ -1190,5 +1553,163 @@ mod tests {
             "Sort+select should complete fast (actual: {:?})",
             elapsed
         );
+    }
+
+    // ── 记录最终写入（finalize_*）：可直接单测的静态函数 ──────────────
+
+    fn test_ctx(dir: &std::path::Path) -> DownloadContext {
+        DownloadContext {
+            yt_dlp_path: "yt-dlp".to_string(),
+            proxy: None,
+            cookie_file: None,
+            download_dir: dir.to_path_buf(),
+            data_dir: dir.to_path_buf(),
+        }
+    }
+
+    fn seed_record(dir: &std::path::Path, record: &DownloadRecord) {
+        StorageService::seed_download_records(dir, std::slice::from_ref(record))
+            .expect("seed should succeed");
+    }
+
+    fn load_one(dir: &std::path::Path) -> DownloadRecord {
+        StorageService::load_download_records(dir)
+            .expect("load should succeed")
+            .remove(0)
+    }
+
+    fn base_record(status: &str) -> DownloadRecord {
+        let mut r = DownloadRecord::new(
+            "sub-1".to_string(),
+            "Video".to_string(),
+            "https://e/v".to_string(),
+            "vid-1".to_string(),
+        );
+        r.status = RecordStatus::parse(status);
+        r.quality = "1080p".to_string();
+        r
+    }
+
+    #[test]
+    fn finalize_retrying_sets_count_and_timestamp() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = base_record("downloading");
+        seed_record(tmp.path(), &record);
+
+        DownloadQueue::finalize_retrying(&test_ctx(tmp.path()), &record.id, 2, "2026-01-01T00:00:00Z");
+
+        let r = load_one(tmp.path());
+        assert_eq!(r.status, RecordStatus::Retrying);
+        assert_eq!(r.retry_count, 2);
+        assert_eq!(r.last_retry_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn finalize_failed_does_not_overwrite_cancelled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = base_record("cancelled");
+        seed_record(tmp.path(), &record);
+
+        DownloadQueue::finalize_failed(&test_ctx(tmp.path()), &record.id, "boom");
+
+        let r = load_one(tmp.path());
+        // 取消优先于失败：不得把 cancelled 覆盖成 failed
+        assert_eq!(r.status, RecordStatus::Cancelled);
+    }
+
+    #[test]
+    fn finalize_failed_writes_sanitized_message() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = base_record("downloading");
+        seed_record(tmp.path(), &record);
+
+        DownloadQueue::finalize_failed(
+            &test_ctx(tmp.path()),
+            &record.id,
+            "无法启动 yt-dlp：socks5://user:pass@127.0.0.1:1080 refused",
+        );
+
+        let r = load_one(tmp.path());
+        assert_eq!(r.status, RecordStatus::Failed);
+        assert!(!r.error_message.as_deref().unwrap().contains("user:pass@"));
+    }
+
+    #[test]
+    fn finalize_success_preserves_retry_count_and_clears_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut record = base_record("retrying");
+        record.retry_count = 2;
+        record.last_retry_at = Some("2026-01-01T00:00:00Z".to_string());
+        record.error_message = Some("old error".to_string());
+        seed_record(tmp.path(), &record);
+
+        DownloadQueue::finalize_success(&test_ctx(tmp.path()), &record.id, "");
+
+        let r = load_one(tmp.path());
+        assert_eq!(r.status, RecordStatus::Completed);
+        // 成功时保留重试次数（spec 故事 2 场景 2）
+        assert_eq!(r.retry_count, 2);
+        // 成功时清空错误信息
+        assert_eq!(r.error_message, None);
+    }
+
+    #[test]
+    fn finalize_success_reclaims_old_file_only_when_path_differs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let old_file = tmp.path().join("old.webm");
+        let new_file = tmp.path().join("new.mp4");
+        std::fs::write(&old_file, b"old").unwrap();
+        std::fs::write(&new_file, b"new data").unwrap();
+
+        let mut record = base_record("downloading");
+        record.file_path = old_file.to_string_lossy().to_string();
+        seed_record(tmp.path(), &record);
+
+        DownloadQueue::finalize_success(
+            &test_ctx(tmp.path()),
+            &record.id,
+            &new_file.to_string_lossy(),
+        );
+
+        let r = load_one(tmp.path());
+        assert_eq!(r.file_path, new_file.to_string_lossy());
+        assert_eq!(r.file_size, 8);
+        // 先落库新路径、再回收旧文件 ⇒ 旧文件已不在原位置
+        assert!(!old_file.exists(), "旧文件应已被回收");
+    }
+
+    #[test]
+    fn finalize_success_keeps_same_path_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = tmp.path().join("same.mp4");
+        std::fs::write(&file, b"data").unwrap();
+
+        let mut record = base_record("downloading");
+        record.file_path = file.to_string_lossy().to_string();
+        seed_record(tmp.path(), &record);
+
+        DownloadQueue::finalize_success(
+            &test_ctx(tmp.path()),
+            &record.id,
+            &file.to_string_lossy(),
+        );
+
+        // 同一路径不得被回收（否则会把刚下好的文件删掉）
+        assert!(file.exists(), "同路径文件不应被回收");
+        assert_eq!(load_one(tmp.path()).status, RecordStatus::Completed);
+    }
+
+    #[test]
+    fn record_matches_key_prefers_video_id_and_falls_back_to_url() {
+        let mut r = base_record("completed");
+        r.video_id = "vid-1".to_string();
+        assert!(record_matches_key(&r, "sub-1", "vid-1", "https://e/other"));
+        assert!(!record_matches_key(&r, "sub-2", "vid-1", "https://e/other"));
+
+        let mut no_id = base_record("completed");
+        no_id.video_id = String::new();
+        no_id.video_url = "https://e/v".to_string();
+        assert!(record_matches_key(&no_id, "sub-1", "", "https://e/v"));
+        assert!(!record_matches_key(&no_id, "sub-1", "", "https://e/other"));
     }
 }

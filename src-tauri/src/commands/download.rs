@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use tauri::{Emitter, Manager, State};
 
-use crate::models::{DownloadRecord, Subscription};
+use crate::models::{DownloadRecord, RecordStatus, Subscription};
 use crate::services::{StorageService, YtDlpService};
 use crate::services::download_queue::notify_records_changed;
 use crate::utils::AppError;
@@ -206,13 +206,13 @@ pub(crate) async fn check_and_download(
     // Failed records are not excluded — they can be retried.
     let mut seen_ids: std::collections::HashSet<String> = existing_records
         .iter()
-        .filter(|r| r.status != "failed")
+        .filter(|r| r.status != RecordStatus::Failed)
         .filter(|r| !r.video_id.is_empty())
         .map(|r| r.video_id.clone())
         .collect();
     let mut seen_urls: std::collections::HashSet<String> = existing_records
         .iter()
-        .filter(|r| r.status != "failed")
+        .filter(|r| r.status != RecordStatus::Failed)
         .map(|r| r.video_url.clone())
         .collect();
 
@@ -259,8 +259,9 @@ pub(crate) async fn check_and_download(
         }
 
         // Non-queue fallback: create record directly
-        let record =
+        let mut record =
             DownloadRecord::new(sub.id.clone(), video.title.clone(), video.url.clone(), vid.clone());
+        record.quality = quality.clone();
 
         // Save the record immediately so the frontend sees "downloading"
         StorageService::update_download_records(data_dir, |all_records| {
@@ -411,15 +412,87 @@ pub async fn get_download_queue(
     }
 }
 
+/// 按**订阅当前**的画质 preset 重下某条记录（升级与「重新下载」共用）。
+///
+/// 不区分「升级」与「重新下载」—— 二者行为完全一致，差别只在 UI 展示理由。
+/// 后端据 `record_id` 反查记录 → 反查其订阅 → 取订阅**当前的** `quality_preset`
+/// （前端不传画质，避免两侧各持一份真相）→ 走统一入队收口（含幂等守卫与 upsert 重置）。
+#[tauri::command]
+pub async fn redownload_video(
+    record_id: String,
+    queue_ctx: State<'_, QueueContext>,
+    state: State<'_, AppContext>,
+) -> Result<DownloadRecord, String> {
+    // 只读定位：记录与它归属订阅的当前画质（长耗时阶段不持任何锁）
+    let (record, quality) = {
+        let records = StorageService::load_download_records(&state.data_dir)
+            .map_err(|e| e.to_string())?;
+        let record = records
+            .iter()
+            .find(|r| r.id == record_id)
+            .ok_or_else(|| AppError::NotFound(format!("下载记录不存在: {}", record_id)))
+            .map_err(|e| e.to_string())?
+            .clone();
+
+        let subs = StorageService::load_subscriptions(&state.data_dir)
+            .map_err(|e| e.to_string())?;
+        let sub = subs
+            .iter()
+            .find(|s| s.id == record.subscription_id)
+            .ok_or_else(|| {
+                AppError::NotFound(format!("订阅不存在: {}", record.subscription_id))
+            })
+            .map_err(|e| e.to_string())?;
+
+        (record, sub.quality_preset.clone())
+    };
+
+    // 克隆下载参数并释放设置锁（enqueue 会做文件 I/O）
+    let ctx = {
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        crate::services::download_queue::DownloadContext::from_settings(
+            &settings,
+            state.data_dir.clone(),
+        )
+    };
+
+    let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
+    let Some(queue) = guard.as_ref() else {
+        return Err("Download queue not initialized".to_string());
+    };
+
+    let updated = queue
+        .enqueue_record(
+            &state.data_dir,
+            &record.subscription_id,
+            &record.video_id,
+            &record.video_url,
+            &record.video_title,
+            &quality,
+        )
+        .map_err(|e| e.to_string())?;
+
+    // 确保队列驱动在运行（与检查路径同一约定）
+    queue.start_processing(ctx);
+
+    Ok(updated)
+}
+
 /// Recovers download state on application restart.
-/// Marks "downloading" and "paused" records as "failed" since the download process
-/// was terminated when the application exited.
+/// Marks "downloading", "paused" and "retrying" records as "failed" since the download
+/// process was terminated when the application exited.
+///
+/// 置成 `failed`（而非保留 `retrying`）后，下次检查因 `seen_ids` 排除 `failed`
+/// 会自动重新入队，并由入队的 upsert 复用同一条记录 —— 不需要任何新机制。
 pub fn recover_state(data_dir: &PathBuf) -> Result<(), AppError> {
     let recovered = StorageService::update_download_records(data_dir, |records| {
         let mut recovered = 0usize;
         for record in records.iter_mut() {
-            if record.status == "downloading" || record.status == "paused" {
-                record.status = "failed".to_string();
+            if record.status == RecordStatus::Downloading
+                || record.status == RecordStatus::Paused
+                || record.status == RecordStatus::Retrying
+            {
+                record.status = RecordStatus::Failed;
                 record.error_message = Some("Application restarted".to_string());
                 recovered += 1;
             }
@@ -472,13 +545,10 @@ pub async fn cancel_download(
     state: State<'_, AppContext>,
 ) -> Result<(), String> {
     let settings = state.settings.lock().map_err(|e| e.to_string())?;
-    let ctx = crate::services::download_queue::DownloadContext {
-        yt_dlp_path: settings.yt_dlp_path.clone(),
-        proxy: Some(settings.proxy_url.clone()),
-        cookie_file: Some(settings.cookie_file.clone()),
-        download_dir: std::path::PathBuf::from(&settings.download_dir),
-        data_dir: state.data_dir.clone(),
-    };
+    let ctx = crate::services::download_queue::DownloadContext::from_settings(
+        &settings,
+        state.data_dir.clone(),
+    );
     drop(settings);
 
     let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
@@ -510,13 +580,10 @@ pub async fn cancel_download_by_url(
     state: State<'_, AppContext>,
 ) -> Result<(), String> {
     let settings = state.settings.lock().map_err(|e| e.to_string())?;
-    let ctx = crate::services::download_queue::DownloadContext {
-        yt_dlp_path: settings.yt_dlp_path.clone(),
-        proxy: Some(settings.proxy_url.clone()),
-        cookie_file: Some(settings.cookie_file.clone()),
-        download_dir: std::path::PathBuf::from(&settings.download_dir),
-        data_dir: state.data_dir.clone(),
-    };
+    let ctx = crate::services::download_queue::DownloadContext::from_settings(
+        &settings,
+        state.data_dir.clone(),
+    );
     drop(settings);
 
     let guard = queue_ctx.queue.lock().map_err(|e| e.to_string())?;
@@ -616,7 +683,7 @@ mod tests {
             url.to_string(),
             vid.to_string(),
         );
-        r.status = status.to_string();
+        r.status = RecordStatus::parse(status);
         r
     }
 
@@ -638,10 +705,10 @@ mod tests {
             .expect("load should succeed");
         assert_eq!(recovered.len(), 2);
         // Video A was "downloading" → should be "failed"
-        assert_eq!(recovered[0].status, "failed");
+        assert_eq!(recovered[0].status, RecordStatus::Failed);
         assert_eq!(recovered[0].error_message, Some("Application restarted".to_string()));
         // Video B was "completed" → should stay "completed"
-        assert_eq!(recovered[1].status, "completed");
+        assert_eq!(recovered[1].status, RecordStatus::Completed);
         assert_eq!(recovered[1].error_message, None);
     }
 
@@ -658,7 +725,26 @@ mod tests {
 
         let recovered = StorageService::load_download_records(tmp.path())
             .expect("load should succeed");
-        assert_eq!(recovered[0].status, "failed");
+        assert_eq!(recovered[0].status, RecordStatus::Failed);
+        assert_eq!(recovered[0].error_message, Some("Application restarted".to_string()));
+    }
+
+    #[test]
+    fn test_recover_state_marks_retrying_as_failed() {
+        // 应用退出时正在退避等待的记录：必须置 failed（不主动恢复重试）。
+        // 置 failed 后下次检查会自动重新入队并由 upsert 复用同一条记录。
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let records = vec![
+            make_record("sub-1", "Video", "https://youtube.com/watch?v=r", "vid-r", "retrying"),
+        ];
+        StorageService::seed_download_records(tmp.path(), &records)
+            .expect("save should succeed");
+
+        recover_state(&tmp.path().to_path_buf()).expect("recover should succeed");
+
+        let recovered = StorageService::load_download_records(tmp.path())
+            .expect("load should succeed");
+        assert_eq!(recovered[0].status, RecordStatus::Failed);
         assert_eq!(recovered[0].error_message, Some("Application restarted".to_string()));
     }
 
@@ -678,9 +764,9 @@ mod tests {
         let recovered = StorageService::load_download_records(tmp.path())
             .expect("load should succeed");
         assert_eq!(recovered.len(), 3);
-        assert_eq!(recovered[0].status, "completed");
-        assert_eq!(recovered[1].status, "failed");
-        assert_eq!(recovered[2].status, "cancelled");
+        assert_eq!(recovered[0].status, RecordStatus::Completed);
+        assert_eq!(recovered[1].status, RecordStatus::Failed);
+        assert_eq!(recovered[2].status, RecordStatus::Cancelled);
     }
 
     #[test]
@@ -696,7 +782,7 @@ mod tests {
 
         let recovered = StorageService::load_download_records(tmp.path())
             .expect("load should succeed");
-        assert_eq!(recovered[0].status, "completed");
+        assert_eq!(recovered[0].status, RecordStatus::Completed);
     }
 
     // ── 日期下界换算 + 游标推进：取自订阅自己的 last_successful_check_at ──
@@ -869,13 +955,13 @@ mod tests {
     ) -> bool {
         let seen_ids: std::collections::HashSet<String> = existing
             .iter()
-            .filter(|r| r.status != "failed")
+            .filter(|r| r.status != RecordStatus::Failed)
             .filter(|r| !r.video_id.is_empty())
             .map(|r| r.video_id.clone())
             .collect();
         let seen_urls: std::collections::HashSet<String> = existing
             .iter()
-            .filter(|r| r.status != "failed")
+            .filter(|r| r.status != RecordStatus::Failed)
             .map(|r| r.video_url.clone())
             .collect();
 
@@ -926,6 +1012,36 @@ mod tests {
             make_record("sub-1", "Video", "https://youtube.com/watch?v=abc", "abc", "cancelled"),
         ];
         // Cancelled records are in seen_ids (not "failed"), so should be skipped
+        assert!(should_skip(&existing, "abc", "https://youtube.com/watch?v=abc"));
+    }
+
+    #[test]
+    fn test_dedup_skips_deleted_record_no_auto_redownload() {
+        // 「已删除」的记录**留在** seen 集合内 → 检查不会自动重下（有意设计：
+        // 否则用户删文件腾空间会被检查无限填满）。
+        let existing = vec![
+            make_record("sub-1", "Video", "https://youtube.com/watch?v=abc", "abc", "deleted"),
+        ];
+        assert!(should_skip(&existing, "abc", "https://youtube.com/watch?v=abc"));
+    }
+
+    #[test]
+    fn test_dedup_skips_missing_file_record_no_auto_redownload() {
+        // 「文件缺失」不落库（记录状态仍是 completed），因此它天然留在 seen 集合内，
+        // 检查不会自动重下 —— 重下只由用户在 UI 手动触发。
+        let existing = vec![
+            make_record("sub-1", "Video", "https://youtube.com/watch?v=abc", "abc", "completed"),
+        ];
+        assert!(should_skip(&existing, "abc", "https://youtube.com/watch?v=abc"));
+    }
+
+    #[test]
+    fn test_dedup_skips_retrying_record() {
+        // 「重试中」也必须留在 seen 集合内：否则一次检查会给正在重试的视频
+        // 再排一个下载任务，与就地重试的并发语义冲突。
+        let existing = vec![
+            make_record("sub-1", "Video", "https://youtube.com/watch?v=abc", "abc", "retrying"),
+        ];
         assert!(should_skip(&existing, "abc", "https://youtube.com/watch?v=abc"));
     }
 

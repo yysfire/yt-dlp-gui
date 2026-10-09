@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::sync::watch;
 
 use crate::services::StorageService;
@@ -102,14 +102,9 @@ pub fn spawn_file_sync(data_dir: PathBuf, app_handle: AppHandle) {
         tokio::time::sleep(interval).await;
 
         loop {
-            let records = StorageService::load_download_records(&data_dir).unwrap_or_default();
-            let file_paths: Vec<String> = records
-                .iter()
-                .filter(|r| r.status == "completed" && !r.file_path.is_empty())
-                .map(|r| r.file_path.clone())
-                .collect();
-            let results = crate::services::file_manager::check_files_exist(&file_paths).await;
-            let _ = app_handle.emit("file-sync-complete", &results);
+            // 存在性检查的实现收敛在 services::file_manager::sync_completed_records，
+            // 与命令层 sync_file_states 共用（消除两处内联的重复）。
+            crate::services::file_manager::sync_completed_records(&data_dir, &app_handle).await;
             tokio::time::sleep(interval).await;
         }
     });

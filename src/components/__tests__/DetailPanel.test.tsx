@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import DetailPanel from "../DetailPanel";
 import { getChannelVideos } from "@/lib/tauri";
 import { formatDuration, formatFileSize } from "@/lib/unifiedVideoList";
@@ -59,6 +60,9 @@ function makeRecord(overrides: Partial<DownloadRecord> = {}): DownloadRecord {
     status: "completed",
     error_message: null,
     downloaded_at: "2026-06-10T12:00:00Z",
+    quality: "1080p",
+    retry_count: 0,
+    last_retry_at: null,
     ...overrides,
   };
 }
@@ -77,6 +81,8 @@ function makeTask(overrides: Partial<DownloadTask> = {}): DownloadTask {
     error_message: null,
     created_at: "2026-06-10T12:00:00Z",
     completed_at: null,
+    record_id: "rec-1",
+    next_retry_at: null,
     ...overrides,
   };
 }
@@ -114,10 +120,12 @@ describe("DetailPanel", () => {
   const defaultProps = {
     records: emptyRecords,
     queueTasks: [],
+    missingPaths: new Set<string>(),
     onPauseDownload: vi.fn(),
     onResumeDownload: vi.fn(),
     onCancelDownload: vi.fn(),
-    onRetryDownload: vi.fn(),
+    onRedownload: vi.fn(),
+    onUpdateQuality: vi.fn(),
   };
 
   describe("未选择订阅时", () => {
@@ -189,6 +197,9 @@ describe("DetailPanel", () => {
           status: "completed",
           error_message: null,
           downloaded_at: "2026-06-10T12:00:00Z",
+          quality: "1080p",
+          retry_count: 0,
+          last_retry_at: null,
         }),
       );
 
@@ -219,6 +230,9 @@ describe("DetailPanel", () => {
           status: "deleted",
           error_message: null,
           downloaded_at: "2026-06-10T12:00:00Z",
+          quality: "1080p",
+          retry_count: 0,
+          last_retry_at: null,
         },
       ];
 
@@ -755,6 +769,177 @@ describe("DetailPanel", () => {
       const row = await findRow("Cancelled With Duration");
       expect(row.textContent).toContain("已取消");
       expect(row.textContent).not.toContain(formatDuration(600));
+    });
+  });
+
+  // 新增交互（spec 008）：可升级 / 文件缺失 / 已在其它订阅下载 / 订阅级画质设置。
+  // 这些是 US1 的核心可观察路径，纯函数层已有真值表，这里锁定组件接线（章程原则 I）。
+  describe("新增交互（可升级 / 文件缺失 / 已在他处 / 画质设置）", () => {
+    /** 按标题定位列表行（<li>） */
+    async function findRow(title: string): Promise<HTMLElement> {
+      const text = await screen.findByText(title);
+      const row = text.closest("li");
+      if (!row) throw new Error(`未找到标题为「${title}」的列表行`);
+      return row;
+    }
+
+    it("可升级：chip 与按钮 title 带目标档次，点击调用 onRedownload(record.id)", async () => {
+      const onRedownload = vi.fn();
+      const sub = makeSub({ quality_preset: "1080p" });
+      const record = makeRecord({ quality: "720p", video_title: "Upgrade Me" });
+
+      render(
+        <DetailPanel
+          subscription={sub}
+          {...defaultProps}
+          records={[record]}
+          onRedownload={onRedownload}
+        />,
+      );
+
+      const row = await findRow("Upgrade Me");
+      expect(within(row).getByText("可升级 1080p")).toBeInTheDocument();
+
+      await userEvent.click(within(row).getByTitle("升级到 1080p"));
+      expect(onRedownload).toHaveBeenCalledTimes(1);
+      expect(onRedownload).toHaveBeenCalledWith("rec-1");
+    });
+
+    it("可升级：best 渲染为「最高画质」", async () => {
+      const sub = makeSub({ quality_preset: "best" });
+      const record = makeRecord({ quality: "720p", video_title: "Best Upgrade" });
+
+      render(
+        <DetailPanel subscription={sub} {...defaultProps} records={[record]} />,
+      );
+
+      const row = await findRow("Best Upgrade");
+      expect(within(row).getByText("可升级 最高画质")).toBeInTheDocument();
+      expect(within(row).getByTitle("升级到 最高画质")).toBeInTheDocument();
+    });
+
+    it("文件缺失：显示「文件缺失」、只提供「重新下载」，点击调用 onRedownload(record.id)", async () => {
+      const onRedownload = vi.fn();
+      const sub = makeSub({ quality_preset: "1080p" });
+      const record = makeRecord({
+        quality: "720p",
+        video_title: "Gone Video",
+        file_path: "/tmp/gone.mp4",
+      });
+
+      render(
+        <DetailPanel
+          subscription={sub}
+          {...defaultProps}
+          records={[record]}
+          missingPaths={new Set(["/tmp/gone.mp4"])}
+          onRedownload={onRedownload}
+        />,
+      );
+
+      const row = await findRow("Gone Video");
+      expect(within(row).getByText("文件缺失")).toBeInTheDocument();
+      // 缺失优先于升级：不得出现升级按钮
+      expect(within(row).queryByTitle("升级到 1080p")).toBeNull();
+
+      await userEvent.click(within(row).getByTitle("重新下载"));
+      expect(onRedownload).toHaveBeenCalledWith("rec-1");
+    });
+
+    it("已在其它订阅下载：其它订阅下载的视频出现在本订阅频道里 → 显示 chip，且不提供升级 / 重新下载", async () => {
+      const sub = makeSub({ id: "sub-1", quality_preset: "1080p" });
+      const record = makeRecord({
+        subscription_id: "sub-OTHER",
+        quality: "720p",
+        video_title: "Other Sub Video",
+      });
+      // 条目由本订阅的频道视频撑起，其它订阅的记录只负责标注 —— 不再单独成条
+      mockChannelVideosOnce([
+        makeVideo({ id: "vid-1", title: "Other Sub Video", url: "https://e/v1" }),
+      ]);
+
+      render(
+        <DetailPanel subscription={sub} {...defaultProps} records={[record]} />,
+      );
+
+      const row = await findRow("Other Sub Video");
+      expect(within(row).getByText("已在其它订阅下载")).toBeInTheDocument();
+      expect(within(row).queryByTitle("升级到 1080p")).toBeNull();
+      expect(within(row).queryByTitle("重新下载")).toBeNull();
+    });
+
+    it("其它订阅的记录 / 任务不会单独成条（回归：选中一个订阅只看得到自己的视频）", async () => {
+      const sub = makeSub({ id: "sub-1" });
+      const otherRecord = makeRecord({
+        subscription_id: "sub-OTHER",
+        video_id: "vid-other",
+        video_url: "https://e/other",
+        video_title: "Other Subscription Video",
+      });
+      const otherTask = makeTask({
+        subscription_id: "sub-OTHER",
+        video_id: "vid-other-2",
+        video_url: "https://e/other-2",
+        video_title: "Other Subscription Task",
+      });
+
+      render(
+        <DetailPanel
+          subscription={sub}
+          {...defaultProps}
+          records={[otherRecord]}
+          queueTasks={[otherTask]}
+        />,
+      );
+
+      // 频道列表为空（默认 mock），本订阅也没有记录 → 不应出现任何行
+      await waitFor(() => {
+        expect(screen.getByText("暂无视频")).toBeInTheDocument();
+      });
+      expect(screen.queryByText("Other Subscription Video")).toBeNull();
+      expect(screen.queryByText("Other Subscription Task")).toBeNull();
+    });
+
+    it("订阅级画质下拉：选择后调用 onUpdateQuality(id, value)", async () => {
+      const onUpdateQuality = vi.fn();
+      const sub = makeSub({ id: "sub-1", quality_preset: "1080p" });
+
+      render(
+        <DetailPanel
+          subscription={sub}
+          {...defaultProps}
+          onUpdateQuality={onUpdateQuality}
+        />,
+      );
+
+      // 面板内只有一个 combobox（订阅级画质下拉）
+      await userEvent.click(screen.getByRole("combobox"));
+      await userEvent.click(await screen.findByRole("option", { name: "720p" }));
+
+      expect(onUpdateQuality).toHaveBeenCalledWith("sub-1", "720p");
+    });
+
+    it("失败行「重试」只重下这一条记录（调用 onRedownload(record.id)）", async () => {
+      const onRedownload = vi.fn();
+      const sub = makeSub();
+      const record = makeRecord({
+        status: "failed",
+        video_title: "Retry Video",
+        error_message: "boom",
+      });
+
+      render(
+        <DetailPanel
+          subscription={sub}
+          {...defaultProps}
+          records={[record]}
+          onRedownload={onRedownload}
+        />,
+      );
+
+      const row = await findRow("Retry Video");
+      await userEvent.click(within(row).getByTitle("重试"));
+      expect(onRedownload).toHaveBeenCalledWith("rec-1");
     });
   });
 });

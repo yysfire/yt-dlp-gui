@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import DownloadedItem, { resolveStatusVisual } from "../DownloadedItem";
 import {
   CheckCircle as CompletedIcon,
@@ -10,6 +11,7 @@ import {
   Pause as PausedIcon,
   HourglassEmpty as WaitingIcon,
   Cancel as CancelledIcon,
+  Autorenew as RetryingIcon,
 } from "@mui/icons-material";
 import type { DownloadRecord } from "@/types";
 
@@ -32,6 +34,9 @@ function makeRecord(overrides: Partial<DownloadRecord> = {}): DownloadRecord {
     status: "completed",
     error_message: null,
     downloaded_at: "2026-06-10T12:00:00Z",
+    quality: "1080p",
+    retry_count: 0,
+    last_retry_at: null,
     ...overrides,
   };
 }
@@ -60,6 +65,7 @@ describe("DownloadedItem", () => {
       ["paused", false, "PauseIcon"],
       ["waiting", false, "HourglassEmptyIcon"],
       ["cancelled", false, "CancelIcon"],
+      ["retrying", false, "AutorenewIcon"],
     ];
 
     it.each(iconCases)(
@@ -158,6 +164,7 @@ describe("resolveStatusVisual（状态视觉映射的纯函数契约）", () => 
     ["paused", false, "warning.main"],
     ["waiting", false, "text.disabled"],
     ["cancelled", false, "text.disabled"],
+    ["retrying", false, "warning.main"],
   ];
 
   it.each(colorCases)(
@@ -179,6 +186,7 @@ describe("resolveStatusVisual（状态视觉映射的纯函数契约）", () => 
     ["paused", false, PausedIcon],
     ["waiting", false, WaitingIcon],
     ["cancelled", false, CancelledIcon],
+    ["retrying", false, RetryingIcon],
   ];
 
   it.each(iconComponentCases)(
@@ -196,6 +204,7 @@ describe("resolveStatusVisual（状态视觉映射的纯函数契约）", () => 
       "paused",
       "waiting",
       "cancelled",
+      "retrying",
     ];
     for (const status of nonCompleted) {
       const present = resolveStatusVisual(status, false);
@@ -228,5 +237,60 @@ describe("resolveStatusVisual（状态视觉映射的纯函数契约）", () => 
     ];
     expect(new Set(disabledGroup).size).toBe(1);
     expect(disabledGroup[0]).toBe("text.disabled");
+  });
+});
+
+/**
+ * spec 008：「文件缺失」与「已删除」共用同一个「重新下载」入口，
+ * 且复用与详情面板相同的命令（经 `onRedownload` 回调）。
+ */
+describe("DownloadedItem - 重新下载入口", () => {
+  it("fileMissing 时显示「重新下载」，点击调用 onRedownload(record.id)", async () => {
+    const onRedownload = vi.fn();
+    render(
+      <DownloadedItem
+        record={makeRecord({ id: "rec-x", video_title: "Missing Video" })}
+        fileMissing
+        onRedownload={onRedownload}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "重新下载" }));
+    expect(onRedownload).toHaveBeenCalledWith("rec-x");
+  });
+
+  it("deleted 记录也提供「重新下载」，仍不提供打开 / 删除", () => {
+    render(
+      <DownloadedItem
+        record={makeRecord({ status: "deleted", video_title: "Deleted Video" })}
+        onRedownload={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "重新下载" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "打开文件夹" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "删除文件" })).toBeNull();
+  });
+
+  it("正常记录（不缺文件、未删除）不渲染「重新下载」", () => {
+    render(
+      <DownloadedItem
+        record={makeRecord({ video_title: "Completed Video" })}
+        onRedownload={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "重新下载" })).toBeNull();
+  });
+
+  it("未传 onRedownload 时即使 fileMissing 也不渲染按钮", () => {
+    render(
+      <DownloadedItem
+        record={makeRecord({ video_title: "Missing No Handler" })}
+        fileMissing
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "重新下载" })).toBeNull();
   });
 });

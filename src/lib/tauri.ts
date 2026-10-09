@@ -118,6 +118,16 @@ export async function getDownloadQueue(): Promise<DownloadTask[]> {
   return invoke<DownloadTask[]>("get_download_queue");
 }
 
+/**
+ * 按订阅**当前**画质重下某条记录（「升级」与「重新下载」共用同一个命令）。
+ *
+ * @param recordId `DownloadRecord.id`（不是 video_id）—— 从
+ *   `UnifiedVideoItem.downloadInfo.id` 取。
+ */
+export async function redownloadVideo(recordId: string): Promise<DownloadRecord> {
+  return invoke<DownloadRecord>("redownload_video", { recordId });
+}
+
 // ── Settings commands ──────────────────────────────────────────────
 
 /** Returns the current application settings. */

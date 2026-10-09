@@ -58,7 +58,10 @@ pub struct Subscription {
 
 impl Subscription {
     /// Creates a new subscription with generated UUID and current timestamp.
-    /// Default quality preset is "1080p" and paused is false.
+    ///
+    /// `quality_preset` 的构造函数默认值是 `"1080p"`；**生产路径会覆盖它** ——
+    /// `commands::subscription::add_subscription` 用 `AppSettings.quality_preset`
+    /// 作为新建订阅的默认画质（该设置此前是死设置，后端从不读取）。
     pub fn new(
         url: String,
         platform: String,

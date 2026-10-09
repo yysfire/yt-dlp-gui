@@ -28,12 +28,15 @@ pub async fn add_subscription(
 
     // 克隆 yt-dlp 所需设置后立即释放锁：parse_channel_info 是阻塞式子进程调用，
     // 可能耗时数秒，不能持锁跨越它（否则并发 settings/check 访问会被一起卡住）。
-    let (yt_dlp_path, proxy, cookie_file) = {
+    // 顺带取出「新建订阅的默认画质」（`AppSettings.quality_preset` 此前是死设置，
+    // 后端从不读取，导致新建订阅永远硬编码 1080p）。
+    let (yt_dlp_path, proxy, cookie_file, default_quality) = {
         let settings = state.settings.lock().map_err(|e| e.to_string())?;
         (
             settings.yt_dlp_path.clone(),
             Some(settings.proxy_url.clone()),
             Some(settings.cookie_file.clone()),
+            settings.quality_preset.clone(),
         )
     };
 
@@ -41,12 +44,15 @@ pub async fn add_subscription(
     let channel_info = YtDlpService::parse_channel_info(&yt_dlp_path, &proxy, &cookie_file, &url)
         .map_err(|e| e.to_string())?;
 
-    let subscription = Subscription::new(
+    let mut subscription = Subscription::new(
         url.clone(),
         channel_info.platform,
         channel_info.channel_name,
         channel_info.channel_avatar_url,
     );
+    if !default_quality.is_empty() {
+        subscription.quality_preset = default_quality;
+    }
 
     // 事务内复查重复：上面的只读预检与这次写入之间可能有并发的添加
     StorageService::update_subscriptions(&state.data_dir, |subs| {
