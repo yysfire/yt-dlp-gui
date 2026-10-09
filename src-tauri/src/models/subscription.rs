@@ -20,6 +20,12 @@ pub struct Subscription {
     /// Quality preset for downloads (e.g., "1080p", "720p", "best")
     pub quality_preset: String,
     /// Group/category name for organizing subscriptions
+    ///
+    /// `#[serde(default)]` 是**向后兼容的硬要求**：`subscriptions.json` 是长期
+    /// 存在的用户数据，早于本字段的版本写出的记录里没有这个键。没有 default 时
+    /// serde 会让**整个文件**反序列化失败（`missing field group_name`），用户的
+    /// 订阅列表直接打不开。新增字段一律照此办理。
+    #[serde(default = "default_group_name")]
     pub group_name: String,
     /// ISO 8601 creation timestamp
     pub created_at: String,
@@ -54,6 +60,10 @@ pub struct Subscription {
     /// Timestamp of the last health check (ISO 8601), or null if never checked
     #[serde(default)]
     pub last_health_check: Option<String>,
+}
+
+fn default_group_name() -> String {
+    "未分组".to_string()
 }
 
 impl Subscription {
@@ -386,6 +396,33 @@ mod tests {
             sub.last_successful_check_at, None,
             "last_successful_check_at should default to None for old JSON"
         );
+    }
+
+    #[test]
+    fn test_subscription_backward_compat_missing_group_name() {
+        // 回归测试：`group_name` 加入之前写出的 subscriptions.json 记录**没有这个键**。
+        // 缺少 #[serde(default = ...)] 时 serde 会让整个文件加载失败，报
+        // `missing field 'group_name' at line N column M`，用户的订阅列表直接打不开。
+        // 这里逐字复刻真实旧文件的字段集合。
+        let old_json = r#"{
+            "id": "04fe750c-b9a4-476f-95a8-6cfb7d253155",
+            "url": "https://www.youtube.com/@Minana2023/videos",
+            "platform": "Youtube",
+            "channel_name": "Minana",
+            "channel_avatar_url": "https://i.ytimg.com/vi/ugw3EFYVlgA/maxresdefault.jpg",
+            "paused": false,
+            "quality_preset": "1080p",
+            "created_at": "2026-05-28T19:01:56.292265+00:00"
+        }"#;
+
+        let sub: Subscription =
+            serde_json::from_str(old_json).expect("old JSON without group_name must still load");
+
+        assert_eq!(sub.group_name, "未分组", "missing group_name should default to '未分组'");
+        // 其余字段同样不能因缺键而失败
+        assert_eq!(sub.id, "04fe750c-b9a4-476f-95a8-6cfb7d253155");
+        assert_eq!(sub.channel_name, "Minana");
+        assert!(sub.last_checked_at.is_none());
     }
 
     #[test]
