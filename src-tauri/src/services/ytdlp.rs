@@ -69,8 +69,11 @@ const PROGRESS_TEMPLATE: &str =
 
 /// 画质 preset → yt-dlp `-f` 格式字符串。
 ///
-/// 除 `best` 外的档位一律走 `bestvideo[height<=N]+bestaudio/best[height<=N]`：
+/// 分辨率档位一律走 `bestvideo[height<=N]+bestaudio/best[height<=N]`：
 /// 选最高不超过 N 的**视频流** + 最佳**音频流**再合并，才能拿到该档位下的最高分辨率。
+///
+/// `audio`（界面「仅音频」）走 `bestaudio/best`：只取音频流，`/best` 回退保证无独立
+/// 音频流时仍能取到音频。**不能**落进 `_` 兜底 —— 那会下成 1080p 视频。
 ///
 /// `best`（界面「最高画质」）**不能**映射成 yt-dlp 的裸 `best` —— 裸 `best` 要求
 /// 单文件同时含音视频，YouTube 的预混流最高通常只有 360p，于是「最高画质」会下载到
@@ -83,6 +86,8 @@ pub(crate) fn quality_to_format(quality: &str) -> String {
         "1440p" => "bestvideo[height<=1440]+bestaudio/best[height<=1440]".to_string(),
         "720p" => "bestvideo[height<=720]+bestaudio/best[height<=720]".to_string(),
         "480p" => "bestvideo[height<=480]+bestaudio/best[height<=480]".to_string(),
+        // 仅音频：选音频流；`/best` 回退保证无独立音频流时仍能取到音频
+        "audio" => "bestaudio/best".to_string(),
         _ => "bestvideo[height<=1080]+bestaudio/best[height<=1080]".to_string(),
     }
 }
@@ -837,6 +842,13 @@ mod tests {
             quality_to_format("480p"),
             "bestvideo[height<=480]+bestaudio/best[height<=480]"
         );
+    }
+
+    #[test]
+    fn test_format_string_for_audio_downloads_audio_only() {
+        // 「仅音频」必须选音频流，不能被兜底成 1080p 视频；
+        // `/best` 回退保证无独立音频流时仍能取到音频（spec 故事 5 场景 2）。
+        assert_eq!(quality_to_format("audio"), "bestaudio/best");
     }
 
     #[test]
