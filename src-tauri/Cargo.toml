@@ -1,6 +1,6 @@
 [package]
 name = "yt-dlp-gui"
-version = "0.1.0"
+version = "0.8.0"
 description = "A desktop GUI subscription manager for yt-dlp"
 authors = ["yt-dlp-gui"]
 edition = "2021"
