@@ -118,6 +118,18 @@ fn build_download_args(format_str: &str, output_template: &str, url: &str) -> Ve
 trait EnvCommand {
     fn remove_env(&mut self, key: &str);
     fn set_env(&mut self, key: &str, value: &str);
+    /// 追加一个命令行参数。
+    ///
+    /// 与 `sanitize_python_env` 同一模式：两个 `Command` 类型的方法名不同
+    /// （`tokio::process::Command` **没有** `get_args`），用 trait 统一后
+    /// 公共逻辑与测试都只需写一遍。
+    fn push_arg(&mut self, arg: &str);
+    /// 按加入顺序读回全部参数。
+    ///
+    /// 仅供测试断言使用 —— 生产的 `force_utf8_io` 只写不读。tokio 的
+    /// `Command` 没有 `get_args`，故统一经 `as_std()` 读回。
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn pushed_args(&self) -> Vec<String>;
 }
 
 impl EnvCommand for Command {
@@ -128,6 +140,16 @@ impl EnvCommand for Command {
     fn set_env(&mut self, key: &str, value: &str) {
         self.env(key, value);
     }
+
+    fn push_arg(&mut self, arg: &str) {
+        self.arg(arg);
+    }
+
+    fn pushed_args(&self) -> Vec<String> {
+        self.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
 }
 
 impl EnvCommand for tokio::process::Command {
@@ -137,6 +159,17 @@ impl EnvCommand for tokio::process::Command {
 
     fn set_env(&mut self, key: &str, value: &str) {
         self.env(key, value);
+    }
+
+    fn push_arg(&mut self, arg: &str) {
+        self.arg(arg);
+    }
+
+    fn pushed_args(&self) -> Vec<String> {
+        self.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
     }
 }
 
@@ -206,6 +239,7 @@ fn python_env_fixes(
 fn yt_dlp_command(yt_dlp_path: &str) -> Command {
     let mut cmd = Command::new(yt_dlp_path);
     sanitize_python_env(&mut cmd);
+    force_utf8_io(&mut cmd);
     cmd
 }
 
@@ -213,7 +247,35 @@ fn yt_dlp_command(yt_dlp_path: &str) -> Command {
 fn yt_dlp_command_async(yt_dlp_path: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(yt_dlp_path);
     sanitize_python_env(&mut cmd);
+    force_utf8_io(&mut cmd);
     cmd
+}
+
+/// 强制 yt-dlp 以 UTF-8 编码输出，绕过「跟随控制台代码页」的行为。
+///
+/// **不加这个参数，所有非 ASCII 的 `file_path` 与 `title` 都会损坏。**
+///
+/// yt-dlp 的 stdout/stderr 编码跟随父进程的 locale/代码页，而**落盘的文件名始终是正确的
+/// UTF-8 字节** —— 所以损坏只发生在我们读 stdout 这一侧，表现为「文件下载对了、记录里的
+/// 路径却是乱的」。
+///
+/// 本机实测（Windows，yt-dlp 2026.06.09，标题 `你好世界`）：
+/// - 不加：`--print after_move:filepath` 输出原始字节 `c4 e3 ba c3 ca c0 bd e7`
+///   （**GBK 编码**），被我们的 UTF-8 解码器读成 `□□□□□□□□`；
+///   而 `ls` 显示落盘名是 `e4 bd a0 e5 a5 bd e4 b8 96 e7 95 8c`（**正确的 UTF-8**）。
+/// - 加上：stdout 输出 `你好世界`，与落盘名一致。
+///
+/// 影响面是全部非 ASCII：中文 `你好世界` → `□□□□□□□□`（8 个替换符）、韩文
+/// `그릴래영` → `C`、重音与 emoji 同样受损；纯 ASCII 不受影响。
+///
+/// 必须在**统一收口**加，而不是只在下载调用点加 —— 本文件 5 个调用点
+/// （`parse_channel_info` / `check_new_videos` / `get_channel_videos_paginated` /
+/// `get_channel_info_full` / `download_video_spawn`）**全部读 stdout**，
+/// 其中 4 处经 `String::from_utf8_lossy`、下载路径经 `BufReader::lines()`，
+/// 同样按 UTF-8 解码。
+fn force_utf8_io<C: EnvCommand>(cmd: &mut C) {
+    cmd.push_arg("--encoding");
+    cmd.push_arg("utf-8");
 }
 
 /// 将订阅数格式化为人类可读的字符串（如 "12.3K", "1.5M"）
@@ -1104,6 +1166,65 @@ mod tests {
         assert_eq!(
             python_env_fixes(Some("/tmp/.mount_ytdlpX"), None),
             vec![("PYTHONHOME", None)]
+        );
+    }
+
+    // ── stdout 编码：非 ASCII 的 file_path / title ─────────────────
+    //
+    // 锁住一个正在损坏用户数据的历史 bug：yt-dlp 的 stdout 编码跟随父进程
+    // 代码页，而落盘文件名始终是正确的 UTF-8 字节 —— 于是「文件下载对了、
+    // 记录里的路径是乱的」，且**无任何报错**。
+
+    #[test]
+    fn test_force_utf8_io_appends_encoding_flag() {
+        let mut cmd = Command::new("yt-dlp");
+        force_utf8_io(&mut cmd);
+        assert_eq!(cmd.pushed_args(), vec!["--encoding", "utf-8"]);
+    }
+
+    #[test]
+    fn test_async_command_also_gets_encoding_flag() {
+        // 同步与异步两个构造器都必须加 —— 下载走的是 tokio 那个，
+        // 且 tokio 的 Command 没有 get_args，故读回断言也要覆盖它
+        let mut cmd = tokio::process::Command::new("yt-dlp");
+        force_utf8_io(&mut cmd);
+        assert_eq!(cmd.pushed_args(), vec!["--encoding", "utf-8"]);
+    }
+
+    #[test]
+    fn test_encoding_flag_precedes_user_args_in_download_argv() {
+        // 回归断言：锁定 `--encoding utf-8` 确实进入了下载 argv。
+        // 本机实测（yt-dlp 2026.06.09 / Windows）：不加时标题 `你好世界`
+        // 的 filepath 输出原始字节 `c4 e3 ba c3 ca c0 bd e7`（GBK），
+        // 被 UTF-8 解码成 `□□□□□□□□`；加后输出正确的 `你好世界`。
+        let mut cmd = Command::new("yt-dlp");
+        force_utf8_io(&mut cmd);
+        let expected_tail = build_download_args("best", "/out/%(title)s.%(ext)s", "https://e.com/v");
+        cmd.args(expected_tail.clone());
+
+        let argv = cmd.pushed_args();
+
+        assert_eq!(
+            argv.windows(2).position(|w| w == ["--encoding", "utf-8"]),
+            Some(0),
+            "--encoding 应在最前，不依赖调用点顺序"
+        );
+        // 其余 argv 仍与 build_download_args 完全一致（未被破坏）
+        assert_eq!(&argv[2..], &expected_tail[..]);
+    }
+
+    #[test]
+    fn test_encoding_flag_present_in_every_stdout_reading_call_site() {
+        // 5 个调用点全部读 stdout：4 处 String::from_utf8_lossy +
+        // 下载处 BufReader::lines()，全部按 UTF-8 解码 —— 因此这个参数
+        // 必须加在统一收口，只在下载调用点加是不够的。
+        let mut probe = Command::new("yt-dlp");
+        probe.args(["--dump-json", "--playlist-items", "1"]); // parse_channel_info 形态
+        force_utf8_io(&mut probe);
+
+        assert!(
+            probe.pushed_args().windows(2).any(|w| w == ["--encoding", "utf-8"]),
+            "统一收口加了就对所有调用点生效"
         );
     }
 }
