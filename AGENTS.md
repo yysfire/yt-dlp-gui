@@ -174,7 +174,14 @@ utils/
 
 `DownloadRecord` 的 Rust↔TS 一致性由**共享 fixture** 兜底：`src-tauri/tests/fixtures/download_record.json`，Rust 侧 `models/download.rs` 用 `include_str!` + `to_value == fixture`，前端侧 `src/types/__tests__/downloadRecordContract.test.ts` 用 `?raw` 读同一文件。**改字段必须同时改 fixture 与 TS interface**（`error_message` 为 None 时键缺省，故 fixture 里没有这个键）。
 
-**全局去重与归属**：一个 `video_id` ↔ 一条记录 ↔ **一个文件**。这是输出模板 `%(title)s.%(ext)s` 没有订阅判别符的**物理必然**。记录的 `subscription_id` 是**归属**（首次下载它的订阅）；其它订阅的列表把它呈现为「已在其它订阅下载」，**不提供重下/升级**。入队收口 `enqueue_record` 按 `(video_id, subscription_id)` **upsert 重置**（保留 `file_path`/`file_size`/`downloaded_at`），并有幂等守卫（记录状态 ∈ `{waiting, downloading, retrying}` 或队列/活动任务已有同 `record_id` 则不重复入队）。**所有记录回写一律按 `record_id` 精确定位**（旧的 `(video_url, subscription_id)` 过滤会误伤同键记录）。
+**全局去重与归属**：一个 `video_id` ↔ 一条记录。记录的 `subscription_id` 是**归属**（首次下载它的订阅）；其它订阅的列表把它呈现为「已在其它订阅下载」，**不提供重下/升级**。
+
+> ⚠️ **「一个文件」不是本项目的不变量** —— 008 最初的 `decisions.md` 曾把「同一视频在库中只有一个文件」写成输出模板 `%(title)s.%(ext)s` 没有订阅判别符的**物理必然**。该论证**后半段已被证伪**（详见 [修订 008「物理必然性」论证链](https://github.com/yysfire/yt-dlp-gui/issues/21)）。
+>
+> - **成立的部分**：无订阅判别符 ⇒ 订阅 A 与 B 下载同一视频会写**同一路径**。这是「每订阅各留一份」必须连模板一起改的原因。
+> - **不成立的部分**：「所以不同视频会落到不同文件」**从未被任何机制保证过**。`%(title)s` 渲染后**非单射**（时间戳正则 `:`→`_`；非法字符的全角替换与标题内已有的全角字符相撞），且**同标题的不同视频直接渲染成同一路径**。本机真实语料中，22 条不同 `video_id` 的记录曾共用**一个** `file_path`。
+>
+> **正确的表述**：**路径独占性**（一个落盘路径同一时刻只属于一个 `video_id`）是一条**独立的、至今未被满足的约束**，不是 008 的副产品。009 负责把它变成可断言的不变式（输出模板必须含 `%(id)s`）。入队收口 `enqueue_record` 按 `(video_id, subscription_id)` **upsert 重置**（保留 `file_path`/`file_size`/`downloaded_at`），并有幂等守卫（记录状态 ∈ `{waiting, downloading, retrying}` 或队列/活动任务已有同 `record_id` 则不重复入队）。**所有记录回写一律按 `record_id` 精确定位**（旧的 `(video_url, subscription_id)` 过滤会误伤同键记录）。
 
 **`retrying` 状态**：失败但可重试且未达上限时，记录置 `retrying`、`DownloadTask.status` 为 `retrying`、`next_retry_at` 有值；前端 `statusPriority` 把它插在 `downloading` 之后。**记录状态是 `RecordStatus` 无损枚举**（`models/download.rs`，`Unknown(String)` 兜底，序列化输出与 fixture 逐字符串一致）——业务逻辑一律匹配枚举（编译器强制穷尽），去重优先级也在枚举的 `dedup_rank()` 上；新增状态时编译器会强制登记，否则同 `video_id` 的重试记录会被旧的 `failed` 挤掉。`recover_state` 在启动时把 `downloading` / `paused` / `retrying` 一并置 `failed` + `Application restarted`（不主动恢复重试）。
 

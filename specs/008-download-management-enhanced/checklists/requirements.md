@@ -18,7 +18,7 @@
 ## 技术可行性检查
 
 - [ ] `yt-dlp --flat-playlist --dump-json` 的输出中**稳定包含视频 ID** —— 去重与画质判定都建立在此之上
-- [ ] 输出文件名模板为 `%(title)s.%(ext)s`、**不含订阅或画质判别符** —— 与「全局去重、同一视频只有一份文件」一致
+- [ ] 输出文件名模板为 `%(title)s.%(ext)s`、**不含订阅或画质判别符** —— 与「全局去重、同一视频只有一条记录」一致。⚠️ 原「同一视频只有一份文件」**已被证伪**（该模板不含 `video_id`，同标题的不同视频会渲染成同一路径）；**路径独占性**是独立约束，由 009 处理（修订依据见 [修订 008「物理必然性」论证链](https://github.com/yysfire/yt-dlp-gui/issues/21)）
 - [ ] 已核实「失败原因只出现在 stderr 的 `ERROR:` 行」且「退出码无错误类型语义（0 / 1 / 2 / 101）」
 - [ ] `DownloadRecord` 新增字段全部 `#[serde(default)]`，旧 `download_records.json` 能正常加载（`quality` 为空表示未知）
 - [ ] `deduplicate_vec` 的 rank 表已含 `retrying`（插在 `downloading` 之后）
